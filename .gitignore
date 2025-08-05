@@ -30,3 +30,17 @@ initialize_renv.R
 # ignore pdf reports and rendered html
 *.pdf
 *.html
+
+
+# ignore Claude documentation files
+claude.md
+CLAUDE.md
+.vscode/
+# directories
+/reference
+/app
+/venv
+/output
+/output_old
+config/config_mimic.json
+config/config_ucmc.json
