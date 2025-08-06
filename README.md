@@ -8,12 +8,7 @@ This project studies the epidemiology of Continuous Renal Replacement Therapy (C
 
 ## Objective
 
-Describe the epidemiology of CRRT for AKI in the CLIF consortium, including:
-
-- **Frequency** of first CRRT mode (denominator: all ICU admissions without ESRD)
-- **Pre-CRRT conditions**: Last recorded values of labs, vitals, vasopressors, mechanical ventilation, and location
-- **Treatment details**: Settings and duration by CRRT mode
-- **Outcomes**: Mode switches and in-hospital mortality
+Describe the epidemiology of CRRT for AKI in the CLIF consortium. 
 
 ## Project Structure
 
@@ -34,7 +29,7 @@ CLIF-epidemiology-of-CRRT/
 │   │   └── graphs/
 │   └── intermediate/                 # Intermediate files
 ├── requirements.txt                  # Python dependencies
-├── setup_venv.sh                    # Virtual environment setup script
+├── setup_venv.sh                     # Virtual environment setup script
 └── README.md
 ```
 
@@ -48,11 +43,11 @@ Please refer to the online [CLIF data dictionary](https://clif-consortium.github
 | **clif_hospitalization** | `patient_id`, `hospitalization_id`, `admission_dttm`, `discharge_dttm`, `age_at_admission` | - |
 | **clif_adt** |  `hospitalization_id`, `hospital_id`,`in_dttm`, `out_dttm`, `location_category`, `location_type` | - |
 | **clif_vitals** | `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value` | heart_rate, resp_rate, sbp, dbp, map, spo2, weight_kg, height_cm |
-| **clif_labs** | `hospitalization_id`, `lab_result_dttm`, `lab_category`, `lab_value` | sodium, potassium, chloride, bicarbonate, bun, creatinine, glucose_serum, calcium_total, lactate, magnesium, ph_arterial, ph_venous |
+| **clif_labs** | `hospitalization_id`, `lab_result_dttm`, `lab_category`, `lab_value` | sodium, potassium, chloride, bicarbonate, bun, creatinine, glucose_serum, calcium_total, lactate, magnesium, ph_arterial, ph_venous, po2_arterial |
 | **clif_medication_admin_continuous** | `hospitalization_id`, `admin_dttm`, `med_name`, `med_category`, `med_dose`, `med_dose_unit` | norepinephrine, epinephrine, phenylephrine, vasopressin, dopamine, angiotensin, dobutamine, milrinone, isoproterenol |
 | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `lpm_set`, `resp_rate_set`, `peep_set`, `resp_rate_obs`, `tidal_volume_set`, `pressure_control_set`, `pressure_support_set`, `peak_inspiratory_pressure_set`, `tidal_volume_obs` | - |
 | **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm`, `crrt_mode_name`, `crrt_mode_category`, `device_id`, `blood_flow_rate`, `dialysate_flow_rate`, `ultrafilteration_out` | - |
-| **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code` | - |
+| **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code`, `present_on_admission` | - |
 
 ## Cohort Identification
 
@@ -83,35 +78,16 @@ Please refer to the online [CLIF data dictionary](https://clif-consortium.github
       'V4512'     #ICD9: Noncompliance with renal dialysis
   ]
   ```
+- Excluded patients who died 6 hours or less after starting CRRT as data for these patients is likely to be skewed towards the extremely sick who were unlikely to ever recover. 
 
 ## Setup Instructions
 
 ### 1. Prerequisites
 
 - Python 3.8 or higher
-- Access to CLIF data tables at your site or mimic
+- Access to CLIF data tables at your site or MIMIC
 
-### 2. Environment Setup
-
-Run the setup script to create a virtual environment and install dependencies:
-
-**For Unix/macOS:**
-```bash
-./setup_venv.sh
-```
-
-**For Windows:**
-```cmd
-setup_venv.bat
-```
-
-This script will:
-- Create a Python virtual environment
-- Install all required packages
-- Set up Jupyter kernel
-- Create necessary directories
-
-### 3. Configuration
+### 2. Configuration
 
 Update the configuration file for your site:
 
@@ -127,29 +103,72 @@ Edit `config/config.json` with your site-specific settings:
 
 ## Usage
 
-### Activate Virtual Environment
+There are two ways to run this project:
+
+### Option 1: Automated Execution (Recommended)
+
+Use the provided scripts to automatically set up the environment and run the entire analysis:
 
 **For Unix/macOS:**
+1. Make the script executable
 ```bash
-source venv/bin/activate
+chmod +x run_project.sh
+```
+2. Then run the script:
+```bash
+./run_project.sh
 ```
 
 **For Windows:**
-```cmd
-venv\Scripts\activate.bat
+```bash
+run_project.bat
 ```
 
-### Run Analysis
+These scripts will:
+- Create a Python virtual environment (`.crrt`)
+- Install all required packages
+- Set up Jupyter kernel
+- Create necessary directories
+- Run all analysis notebooks in sequence
+- Generate comprehensive logs
+- Offer to launch visualization dashboard
+
+### Option 2: Manual Execution
+
+If you prefer to run the analysis step-by-step:
+
+#### 2a. Environment Setup
+Create and activate virtual environment:
+
+**For Unix/macOS:**
+```bash
+python3 -m venv .crrt
+source .crrt/bin/activate
+pip install -r requirements.txt
+python -m ipykernel install --user --name=.crrt --display-name="Python (CRRT)"
+```
+
+**For Windows:**
+```bash
+python -m venv .crrt
+.crrt\Scripts\activate.bat
+pip install -r requirements.txt
+python -m ipykernel install --user --name=.crrt --display-name="Python (CRRT)"
+```
+
+#### 2b. Run Analysis Notebooks
+Execute the notebooks in order:
 
 1. **Cohort Identification** (run first):
-```bash
-python code/01_cohort_identification.ipynb
-```
+   ```bash
+   cd code
+   jupyter notebook 01_cohort_identification.ipynb
+   ```
 
-2. **Analysis** (run after cohort identification):
-```bash
-python code/02_analysis_summary.pynb
-```
+2. **Analysis Summary** (run after cohort identification):
+   ```bash
+   jupyter notebook 02_analysis_summary.ipynb
+   ```
 
 
 ## Expected Results

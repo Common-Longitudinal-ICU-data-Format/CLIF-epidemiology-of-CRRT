@@ -32,14 +32,19 @@ initialize_renv.R
 *.html
 
 
+
 # ignore Claude documentation files
 claude.md
 CLAUDE.md
+.claude
 .vscode/
 # directories
 /reference
 /app
 /venv
+.crrt/
+/logs
+
 /output
 /output_old
 config/config_mimic.json

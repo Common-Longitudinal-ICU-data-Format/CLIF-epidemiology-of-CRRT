@@ -371,7 +371,24 @@ def process_crrt_waterfall(
     # ───────────── Phase 0 — prep, numeric coercion, optional inference
     p("✦ Phase 0: prep & numeric coercion (+optional mode inference)")
     df = crrt.copy()
+
     df["crrt_mode_category"] = df["crrt_mode_category"].str.lower()
+    # save original dialysate_flow_rate values
+    df["_orig_df"] = df["dialysate_flow_rate"]
+
+    # 0a) RAW SCUF DF‐OUT sanity check
+    # look for rows that are already labeled “scuf”
+    # and that have a non‐zero dialysate_flow_rate in the raw data
+    raw_scuf = df["crrt_mode_category"].str.lower() == "scuf"
+    raw_df_positive = df["_orig_df"].fillna(0) > 0
+
+    n_bad = (raw_scuf & raw_df_positive).sum()
+    if n_bad:
+        print(f"!!!  Found {n_bad} raw SCUF rows with dialysate_flow_rate > 0 (should be 0 or NA)")
+        print(" Converting these mode category to NA, keep recorded numerical values as the ground truth")
+        df.loc[raw_df_positive, "crrt_mode_category"] = np.nan
+    else:
+        print("!!! No raw SCUF rows had dialysate_flow_rate > 0")
 
     NUM_COLS = [
         "blood_flow_rate",
@@ -382,6 +399,16 @@ def process_crrt_waterfall(
     ]
     NUM_COLS = [c for c in NUM_COLS if c in df.columns]
     df[NUM_COLS] = df[NUM_COLS].apply(pd.to_numeric, errors="coerce")
+
+    #  any row whose original ultrafiltration_out was >0 must never be SCUF
+    def drop_scuf_on_positive_df(df, p):
+        bad_df  = df["_orig_df"].fillna(0) > 0
+        scuf_now = df["crrt_mode_category"] == "scuf"
+        n = (bad_df & scuf_now).sum()
+        if n:
+            p(f"→ Removing {n:,} SCUF labels on rows with DF>0")
+            df.loc[bad_df & scuf_now, "crrt_mode_category"] = np.nan
+            
 
     if infer_modes:
         miss = df["crrt_mode_category"].isna()
@@ -399,6 +426,7 @@ def process_crrt_waterfall(
 
         filled = (miss & df["crrt_mode_category"].notna()).sum()
         p(f"  • numeric-pattern inference filled {filled:,} missing modes")
+        drop_scuf_on_positive_df(df, p)
 
     # ───────────── Phase 1 — sort and *fix islands before episodes*
     p("✦ Phase 1: sort + SCUF-island fix")
@@ -418,6 +446,7 @@ def process_crrt_waterfall(
         df.loc[scuf_island, "crrt_mode_category"] = prev_mode[scuf_island]
         n_fixed = scuf_island.sum()
         p(f"  • relabelled {n_fixed:,} SCUF-island rows")
+        drop_scuf_on_positive_df(df, p)
 
 
     # ───────────── Phase 2 — episode detection (now with fixed modes)
@@ -469,8 +498,7 @@ def process_crrt_waterfall(
         .apply(lambda g: g.ffill())          
         .reset_index(level=0, drop=True)
     )
-  
-
+    drop_scuf_on_positive_df(df, p)
     # ───────────── Phase 4 — wipe / flag unused parameters
     p("✦ Phase 4: handle parameters not valid for the mode")
     MODE_PARAM_MAP = {
@@ -498,6 +526,25 @@ def process_crrt_waterfall(
         p("  • cells set → NA by wipe:")
         for col, n in wiped_totals.items():
             p(f"    {col:<35} {n:>8,}")
+    # ───────────── Phase 4a — SCUF‐specific sanity check
+    if "dialysate_flow_rate" in df.columns:
+        # only consider rows that were originally SCUF mode
+        # and whose original _orig_df was non‐zero/non‐NA
+        scuf_rows = df["crrt_mode_category"] == "scuf"
+        orig_bad = df["_orig_df"].fillna(0) > 0
+
+        # these are rows where the *original* data had UF>0 despite SCUF
+        bad_orig_scuf = scuf_rows & orig_bad
+
+        n_bad_orig = bad_orig_scuf.sum()
+        if n_bad_orig:
+            p(f"!!! {n_bad_orig} rows originally labeled SCUF had DF>0 (raw data); forcing DF→NA for those")
+            df.loc[bad_orig_scuf, "dialysate_flow_rate"] = np.nan
+        else:
+            p("!!! No SCUF rows with DF>0")
+
+    # then drop the helper column
+    df = df.drop(columns="_orig_df")
 
     # ───────────── Phase 5 — deduplicate & order
     p("✦ Phase 5: deduplicate & order")
