@@ -44,6 +44,7 @@ CLAUDE.md
 /venv
 .crrt/
 /logs
+/aggregate
 
 /output
 /output_old
