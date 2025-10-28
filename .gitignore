@@ -6,6 +6,7 @@
 .DS_Store
 *.Rproj
 .Rproj.user
+*.egg-info
 
 ## ignore the renv initialization file
 initialize_renv.R
@@ -38,6 +39,9 @@ claude.md
 CLAUDE.md
 .claude
 .vscode/
+.serena
+context7.json
+
 # directories
 /reference
 /app
@@ -45,6 +49,8 @@ CLAUDE.md
 .crrt/
 /logs
 /aggregate
+/code_archive
+__pycache__/
 
 /output
 /output_old

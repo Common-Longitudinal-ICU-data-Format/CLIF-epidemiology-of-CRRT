@@ -188,3 +188,16 @@ The analysis generates comprehensive results saved in the `output/final/` direct
 ---
 
 
+
+####################### NEW SETUP WITH UV 
+
+
+  # Add ipykernel as a dependency to the project
+  uv add ipykernel
+
+  # Then run the kernel installation
+  uv run python -m ipykernel install --user --name=CLIF-CRRT --display-name="CLIF-CRRT"
+
+
+
+
