@@ -941,7 +941,7 @@ def create_table_one_competing_risk(
 
     categorical_vars = {
         'Demographics': ['sex_category', 'race_category', 'ethnicity_category'],
-        'CRRT Parameters': ['crrt_mode_category', 'on_crrt'],
+        'CRRT Parameters': ['crrt_mode_category'],
         'Data Quality': ['has_any_lab', 'analysis_ready']
     }
 
@@ -1037,7 +1037,16 @@ def create_table_one_competing_risk(
     # Process categorical variables
     for group_name, var_list in categorical_vars.items():
         # Group header
-        table_rows.append({'Variable': f'**{group_name}**', 'Overall': ''})
+        group_header = {'Variable': f'**{group_name}**', 'Overall': ''}
+        if stratify_by is not None:
+            for stratum in strata:
+                label = (
+                    outcome_labels.get(stratum, str(stratum))
+                    if stratify_by == 'outcome'
+                    else str(stratum)
+                )
+                group_header[label] = ''
+        table_rows.append(group_header)
 
         for var in var_list:
             if var not in df.columns:
@@ -1046,23 +1055,65 @@ def create_table_one_competing_risk(
             # Clean variable name
             var_label = var.replace('_', ' ').title()
 
-            row = {'Variable': f"  {var_label}"}
-
-            # Overall
-            row['Overall'] = format_categorical(df[var])
-
-            # By strata
+            # Add variable name as subheader
+            var_header = {'Variable': f"  {var_label}", 'Overall': ''}
             if stratify_by is not None:
                 for stratum in strata:
-                    stratum_df = df[df[stratify_by] == stratum]
                     label = (
                         outcome_labels.get(stratum, str(stratum))
                         if stratify_by == 'outcome'
                         else str(stratum)
                     )
-                    row[label] = format_categorical(stratum_df[var])
+                    var_header[label] = ''
+            table_rows.append(var_header)
 
-            table_rows.append(row)
+            # Get all unique categories for this variable
+            all_categories = df[var].dropna().unique()
+
+            # Add row for each category
+            for category in sorted(all_categories, key=str):
+                cat_row = {'Variable': f"    {category}"}
+
+                # Overall count
+                overall_count = (df[var] == category).sum()
+                overall_pct = overall_count / len(df) * 100
+                cat_row['Overall'] = f"{overall_count} ({overall_pct:.1f}%)"
+
+                # By strata
+                if stratify_by is not None:
+                    for stratum in strata:
+                        stratum_df = df[df[stratify_by] == stratum]
+                        strat_count = (stratum_df[var] == category).sum()
+                        strat_pct = strat_count / len(stratum_df) * 100 if len(stratum_df) > 0 else 0
+                        label = (
+                            outcome_labels.get(stratum, str(stratum))
+                            if stratify_by == 'outcome'
+                            else str(stratum)
+                        )
+                        cat_row[label] = f"{strat_count} ({strat_pct:.1f}%)"
+
+                table_rows.append(cat_row)
+
+            # Add missing row if there are missing values
+            missing_count = df[var].isna().sum()
+            if missing_count > 0:
+                miss_row = {'Variable': '    Missing'}
+                miss_pct = missing_count / len(df) * 100
+                miss_row['Overall'] = f"{missing_count} ({miss_pct:.1f}%)"
+
+                if stratify_by is not None:
+                    for stratum in strata:
+                        stratum_df = df[df[stratify_by] == stratum]
+                        strat_miss = stratum_df[var].isna().sum()
+                        strat_miss_pct = strat_miss / len(stratum_df) * 100 if len(stratum_df) > 0 else 0
+                        label = (
+                            outcome_labels.get(stratum, str(stratum))
+                            if stratify_by == 'outcome'
+                            else str(stratum)
+                        )
+                        miss_row[label] = f"{strat_miss} ({strat_miss_pct:.1f}%)"
+
+                table_rows.append(miss_row)
 
     # Time-to-event (only if stratifying by outcome)
     if stratify_by == 'outcome':

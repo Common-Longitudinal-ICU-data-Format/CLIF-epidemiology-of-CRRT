@@ -179,8 +179,8 @@ cat("Available outcomes in cuminc object:\n")
 print(names(cr_fit))
 cat("\n")
 
-# Extract cumulative incidence at specific time points
-time_points <- c(7, 14, 21, 28, 60, 90)
+# Extract cumulative incidence at specific time points (every 2 days)
+time_points <- seq(2, 90, by = 2)  # 2, 4, 6, 8, ..., 88, 90
 
 # Function to extract CIF estimates at specific times
 extract_cif_at_times <- function(cuminc_obj, times, outcome_code, outcome_label) {
