@@ -1086,6 +1086,103 @@ def create_table_one_competing_risk(
         table1_df.to_csv(output_path, index=False)
         print(f"Table 1 saved to: {output_path}")
 
+        # Also save as HTML
+        html_path = output_path.replace('.csv', '.html')
+
+        # Create styled HTML
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Table 1 - Baseline Characteristics</title>
+    <style>
+        body {{
+            font-family: 'Arial', sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 13px;
+        }}
+        th {{
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: bold;
+            border: 1px solid #ddd;
+        }}
+        td {{
+            padding: 10px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f9f9f9;
+        }}
+        tr:hover {{
+            background-color: #f0f0f0;
+        }}
+        .group-header {{
+            font-weight: bold;
+            background-color: #e8f5e9 !important;
+            font-size: 14px;
+        }}
+        .variable-name {{
+            padding-left: 20px;
+        }}
+        .footer {{
+            margin-top: 20px;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+            font-size: 11px;
+            color: #666;
+        }}
+        pre {{
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Table 1: Baseline Characteristics - Competing Risk Analysis</h1>
+        <p><strong>Stratified by:</strong> {stratify_by if stratify_by else 'Overall (no stratification)'}</p>
+        <p><em>Continuous variables shown as: Mean ± SD, Median [IQR] (n/N)</em></p>
+        <p><em>Categorical variables shown as: n (%)</em></p>
+
+        {table1_df.to_html(index=False, escape=False, classes='table')}
+
+        <div class="footer">
+            <p>Generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>CRRT Competing Risk Analysis Pipeline</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        print(f"Table 1 HTML saved to: {html_path}")
+
     return table1_df
 
 

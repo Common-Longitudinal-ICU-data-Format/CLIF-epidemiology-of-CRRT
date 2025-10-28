@@ -51,7 +51,7 @@ context7.json
 /aggregate
 /code_archive
 __pycache__/
-
+code/output/
 /output
 /output_old
 config/config_mimic.json
