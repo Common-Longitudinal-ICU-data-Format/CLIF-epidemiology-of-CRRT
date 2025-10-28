@@ -1,35 +1,44 @@
 # CLIF Epidemiology of CRRT
 
-This project studies the epidemiology of Continuous Renal Replacement Therapy (CRRT) for Acute Kidney Injury (AKI) using the Common Longitudinal ICU data Format (CLIF).
+This project studies the epidemiology of Continuous Renal Replacement Therapy (CRRT) for Acute Kidney Injury (AKI) in the CLIF consortium using competing risk analysis.
 
-## CLIF VERSION 
+## CLIF VERSION
 
 2.1.0
 
 ## Objective
 
-Describe the epidemiology of CRRT for AKI in the CLIF consortium. 
+We hypothesize that among patients with acute kidney injury (AKI) who require continuous renal replacement therapy (CRRT), a higher initial CRRT dose is independently associated with increased 28-day mortality after adjustment for potential confounding factors.
+
+**Exposure Definition:**  
+The exposure is the initial CRRT dose, measured in mL/kg/hr. This is defined as:  
+  [dialysate flow rate (mL/hr) + fluid replacement rate (mL/hr; both pre- and post-filter)] divided by weight (kg),  
+where weight is the most recent value recorded prior to CRRT initiation.
+
+- For CVVHD, the CRRT dose equals the dialysate flow rate alone (mL/hr/kg).
+- For CVVH, the CRRT dose equals the fluid replacement rate alone (mL/hr/kg).
+- For CVVHDF, the CRRT dose is the sum of dialysate and fluid replacement rates divided by weight, as described above.
 
 ## Project Structure
 
 ```
 CLIF-epidemiology-of-CRRT/
 ├── code/
-│   ├── 01_cohort_identification.py    # Cohort identification script
-│   ├── 02_analysis_summary.py                 # Analysis script
-│   ├── pyCLIF.py                      # Utility functions
-│   ├── sofa_score.py                  # module for sofa calculation
-│   ├── waterfall.py                   # module for waterfall algorithms for respiratory support and crrt therapy tables 
-│   └── README.md
+│   ├── 00_cohort.ipynb               # Step 1: Cohort identification
+│   ├── 01_process_crrt.ipynb         # Step 2: CRRT processing & competing risk dataset
+│   ├── 02_model.R                    # Step 3: Competing risk models (R)
+│   ├── utils.py                      # Python utility functions
+│   ├── sofa_calculator.py            # SOFA score calculation
+│   └── README_ANALYSIS.md            # Detailed analysis documentation
 ├── config/
-│   ├── config_template.json
-│   └── outlier_config.json           # Outlier thresholds
+│   ├── config.json                   # Site-specific configuration (YOU MUST CREATE THIS)
+│   ├── config_template.json          # Template for config.json
+│   └── outlier_config.json           # Outlier thresholds for CRRT parameters
 ├── output/                           # Generated during analysis
-│   ├── final/                        # Final results (aggregate data only)
-│   │   └── graphs/
-│   └── intermediate/                 # Intermediate files
-├── requirements.txt                  # Python dependencies
-├── setup_venv.sh                     # Virtual environment setup script
+│   ├── final/                        # Final results (aggregate data, safe to share)
+│   └── intermediate/                 # Intermediate files (patient-level, DO NOT SHARE)
+├── pyproject.toml                    # UV project dependencies
+├── uv.lock                           # UV lock file
 └── README.md
 ```
 
@@ -55,6 +64,7 @@ Please refer to the online [CLIF data dictionary](https://clif-consortium.github
 - Adults (age ≥ 18 years)
 - Admissions between 2018-01-01 and 2024-12-31
 - Received CRRT therapy
+- Data completeness- Must have weight & CRRT settings  documented
 
 ### Exclusion Criteria
 - Prior End-Stage Renal Disease (ESRD) diagnosis with any of the following codes:
@@ -78,125 +88,74 @@ Please refer to the online [CLIF data dictionary](https://clif-consortium.github
       'V4512'     #ICD9: Noncompliance with renal dialysis
   ]
   ```
-- Excluded patients who died 6 hours or less after starting CRRT as data for these patients is likely to be skewed towards the extremely sick who were unlikely to ever recover. 
 
 ## Setup Instructions
 
-### 1. Prerequisites
+### Prerequisites
 
-- Python 3.8 or higher
-- Access to CLIF data tables at your site or MIMIC
+- **Python 3.11+**
+- **UV package manager** ([install from here](https://docs.astral.sh/uv/))
+- **R 4.0+** with packages: `cmprsk`, `survival`, `arrow`, `jsonlite`
+- Access to CLIF 2.1.0 data tables at your site
 
-### 2. Configuration
+### Step 1: Configuration
 
-Update the configuration file for your site:
+Create your site-specific configuration file:
 
 ```bash
 cp config/config_template.json config/config.json
 ```
 
-Edit `config/config.json` with your site-specific settings:
-- `site_name`: Your site identifier
-- `tables_path`: Path to your CLIF data files
-- `file_type`: "parquet" or "csv"
-- `timezone`: Your site's timezone
+Edit `config/config.json` with your site settings:
+
+```json
+{
+  "site_name": "YOUR_SITE_NAME",
+  "tables_path": "/path/to/your/clif/tables",
+  "file_type": "parquet",
+  "timezone": "US/Central"
+}
+```
+
+### Step 2: Environment Setup
+
+Install dependencies using UV:
+
+```bash
+# Sync dependencies from pyproject.toml
+uv sync
+
+# Install Jupyter kernel
+uv run python -m ipykernel install --user --name=CLIF-CRRT --display-name="CLIF-CRRT"
+```
+
+This will:
+- Create a virtual environment (`.venv/`)
+- Install all Python dependencies
+- Set up Jupyter kernel for notebooks
 
 ## Usage
 
-There are two ways to run this project:
+Run the analysis in 3 sequential steps:
 
-### Option 1: Automated Execution (Recommended)
+### Step 1: Cohort Identification (`00_cohort.ipynb`)
 
-Use the provided scripts to automatically set up the environment and run the entire analysis:
+**Purpose**: Identify cohort and calculate baseline characteristics
+---
 
-**For Unix/macOS:**
-1. Make the script executable
-```bash
-chmod +x run_project.sh
-```
-2. Then run the script:
-```bash
-./run_project.sh
-```
+### Step 2: CRRT Processing & Competing Risk Dataset (`01_process_crrt.ipynb`)
 
-**For Windows:**
-```bash
-run_project.bat
-```
-
-These scripts will:
-- Create a Python virtual environment (`.crrt`)
-- Install all required packages
-- Set up Jupyter kernel
-- Create necessary directories
-- Run all analysis notebooks in sequence
-- Generate comprehensive logs
-- Offer to launch visualization dashboard
-
-### Option 2: Manual Execution
-
-If you prefer to run the analysis step-by-step:
-
-#### 2a. Environment Setup
-Create and activate virtual environment:
-
-**For Unix/macOS:**
-```bash
-python3 -m venv .crrt
-source .crrt/bin/activate
-pip install -r requirements.txt
-python -m ipykernel install --user --name=.crrt --display-name="Python (CRRT)"
-```
-
-**For Windows:**
-```bash
-python -m venv .crrt
-.crrt\Scripts\activate.bat
-pip install -r requirements.txt
-python -m ipykernel install --user --name=.crrt --display-name="Python (CRRT)"
-```
-
-#### 2b. Run Analysis Notebooks
-Execute the notebooks in order:
-
-1. **Cohort Identification** (run first):
-   ```bash
-   cd code
-   jupyter notebook 01_cohort_identification.ipynb
-   ```
-
-2. **Analysis Summary** (run after cohort identification):
-   ```bash
-   jupyter notebook 02_analysis_summary.ipynb
-   ```
-
-
-## Expected Results
-
-The analysis generates comprehensive results saved in the `output/final/` directory. Upload them to the project box folder. 
-
-## Data Privacy
-
-- **No patient-level data** is saved in `output/final/`
-- All final outputs contain only aggregate statistics
-- Patient-level data remains in `output/intermediate/` for internal processing only. DO NOT UPLOAD TO BOX. 
-
-## Authors
-
-- Kaveri Chhikara
+**Purpose**: Process CRRT data and create competing risk analysis dataset
 
 ---
 
+### Step 3: Competing Risk Models (`02_model.R`)
 
+**Purpose**: Fit Fine-Gray competing risk regression models
 
-####################### NEW SETUP WITH UV 
+## Expected Results
 
-
-  # Add ipykernel as a dependency to the project
-  uv add ipykernel
-
-  # Then run the kernel installation
-  uv run python -m ipykernel install --user --name=CLIF-CRRT --display-name="CLIF-CRRT"
+The analysis generates comprehensive results saved in the `output/final/` directory. Please upload to box. 
 
 
 
