@@ -242,7 +242,6 @@ def create_consort_diagram(
 
     # Calculate percentages from strobe_counts
     aki_percentage = strobe_counts.get('6_Percentage_non_ESRD_encounter_blocks_with_AKI_codes', 0)
-    
     non_esrd_blocks = strobe_counts.get('3_encounter_blocks_without_esrd', 0)
     no_icu_blocks = strobe_counts.get('6_number_hosp_without_ICU_stay', 0)
     icu_percentage = 0
@@ -254,17 +253,23 @@ def create_consort_diagram(
     excluded_no_weight = strobe_counts.get('3_encounter_blocks_without_esrd', 0) - strobe_counts.get('4_encounter_blocks_with_weight', 0)
     excluded_no_crrt_settings = strobe_counts.get('4_encounter_blocks_with_weight', 0) - strobe_counts.get('5_encounter_blocks_with_crrt_settings', 0)
 
+    # Calculate lab exclusions if applicable
+    if '6_encounter_blocks_with_required_labs' in strobe_counts:
+        excluded_no_labs = strobe_counts.get('5_encounter_blocks_with_crrt_settings', 0) - strobe_counts.get('6_encounter_blocks_with_required_labs', 0)
+    else:
+        excluded_no_labs = 0
+
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 20))
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis('off')
 
-    # Title
-    ax.text(0.5, 0.97, 'CONSORT Flow Diagram', fontsize=16, fontweight='bold', ha='center')
-    ax.text(0.5, 0.94, 'CLIF-CRRT Cohort Selection', fontsize=12, ha='center')
+    # Title - keep relatively large
+    ax.text(0.5, 0.97, 'CONSORT Flow Diagram', fontsize=20, fontweight='bold', ha='center')
+    ax.text(0.5, 0.94, 'CLIF-CRRT Cohort Selection', fontsize=15, ha='center')
 
-    # Define box positions
+    # Define box positions/sizes
     BOX_W_MAIN = 0.35
     BOX_H = 0.055
     BOX_H_FINAL = 0.07
@@ -277,34 +282,45 @@ def create_consort_diagram(
     y3 = 0.67   # After stitching
     y4 = 0.57   # CRRT hospitalizations
     y5 = 0.47   # After ESRD exclusion
-    y6 = 0.37   # After weight exclusion
-    y7 = 0.27   # With CRRT settings
-    y8 = 0.15   # AKI/ICU info boxes
-    yF = 0.04   # Final cohort
+    y6 = 0.32   # Data Completeness Check (consolidated box)
+    y7 = 0.18   # AKI/ICU info boxes
+    yF = 0.05   # Final cohort
 
-    # Helper function to draw boxes
-    def draw_box(x, y, w, h, text, style='main'):
-        if style == 'main':
-            fc = 'lightblue'
-            ec = 'navy'
-        elif style == 'exclude':
-            fc = 'mistyrose'
-            ec = 'darkred'
-        elif style == 'info':
-            fc = 'lightyellow'
-            ec = 'darkgoldenrod'
-        else:  # 'final'
-            fc = 'lightgreen'
-            ec = 'darkgreen'
+    # Helper: Find best fontsize that fits text in a box
+    def fit_fontsize(text, w, h, min_size=11, max_size=24, line_height=1.2, fudge=0.86):
+        # Crude multiline estimator: scale font so that height and width are not exceeded
+        n_lines = text.count('\n') + 1
+        # Est. approx chars-wide, assume ~2/3rds of chars fit in box width at fontsize 1
+        maxchars = max((len(line) for line in text.splitlines()), default=1)
+        # Area fudge for round-padded boxes, etc.
+        scale = fudge
 
+        # Try max_size and decrease until it fits
+        for size in range(max_size, min_size - 1, -1):
+            # width check: fontsize * maxchars * 0.62 (arbitrary) / box width < 1
+            rel_w = (size * maxchars * 0.62) / (w * fig.get_figwidth() * 72)
+            # height check: (lines * fontsize * line_height) / box height < 1
+            rel_h = (size * n_lines * line_height) / (h * fig.get_figheight() * 72)
+            if rel_w < scale and rel_h < scale:
+                return size
+        return min_size  # fallback/minimal font
+
+    # Helper function to draw boxes (no colors, increased font)
+    def draw_box(x, y, w, h, text, style='main', fontsize=None):
+        # All boxes use white background, black borders
+        fc = 'white'
+        ec = 'black'
+        # If fontsize is not explicitly set, auto-fit
+        if fontsize is None:
+            fontsize = fit_fontsize(text, w, h, min_size=13, max_size=22)
         box = FancyBboxPatch((x, y), w, h,
                              boxstyle="round,pad=0.01",
                              linewidth=2, edgecolor=ec, facecolor=fc)
         ax.add_patch(box)
         ax.text(x + w/2, y + h/2, text, ha='center', va='center',
-                fontsize=9, wrap=True)
+                fontsize=fontsize, wrap=True, color="black", fontweight='normal')
 
-    # Draw main flow boxes
+    # Draw main flow boxes with larger font
     draw_box(X_MAIN, y1, BOX_W_MAIN, BOX_H,
              f"All Hospitalizations\nn = {strobe_counts.get('0_total_hospitalizations', 0):,}",
              'main')
@@ -325,29 +341,34 @@ def create_consort_diagram(
              f"After ESRD Exclusion\nEncounter blocks = {strobe_counts.get('3_encounter_blocks_without_esrd', 0):,}",
              'main')
 
-    draw_box(X_MAIN, y6, BOX_W_MAIN, BOX_H,
-             f"With Weight Data\nEncounter blocks = {strobe_counts.get('4_encounter_blocks_with_weight', 0):,}",
-             'main')
+    # Data Completeness Check - consolidated box
+    # Determine the final count after all data completeness checks
+    if '6_encounter_blocks_with_required_labs' in strobe_counts:
+        data_complete_count = strobe_counts.get('6_encounter_blocks_with_required_labs', 0)
+        completeness_text = f"Data Completeness Check\n(Weight, CRRT Settings, Labs)\nEncounter blocks = {data_complete_count:,}"
+    else:
+        data_complete_count = strobe_counts.get('5_encounter_blocks_with_crrt_settings', 0)
+        completeness_text = f"Data Completeness Check\n(Weight, CRRT Settings)\nEncounter blocks = {data_complete_count:,}"
 
-    draw_box(X_MAIN, y7, BOX_W_MAIN, BOX_H,
-             f"With CRRT Settings\nEncounter blocks = {strobe_counts.get('5_encounter_blocks_with_crrt_settings', 0):,}",
+    draw_box(X_MAIN, y6, BOX_W_MAIN, BOX_H + 0.01,  # Slightly taller for more text
+             completeness_text,
              'main')
 
     # AKI and ICU info boxes (side by side)
     if aki_percentage > 0:
-        draw_box(X_MAIN - 0.02, y8, 0.17, BOX_H,
+        draw_box(X_MAIN - 0.02, y7, 0.17, BOX_H,
                  f"With AKI Diagnosis\n{aki_percentage:.1f}%\n" +
                  f"n = {strobe_counts.get('6_encounter_blocks_with_AKI_no_esrd', 0):,}",
                  'info')
 
     if icu_percentage > 0:
-        draw_box(X_MAIN + 0.19, y8, 0.17, BOX_H,
+        draw_box(X_MAIN + 0.19, y7, 0.17, BOX_H,
                  f"With ICU Stay\n{icu_percentage:.1f}%",
                  'info')
 
     draw_box(X_MAIN, yF, BOX_W_MAIN, BOX_H_FINAL,
              f"FINAL COHORT\n" +
-             f"Encounter blocks = {strobe_counts.get('5_encounter_blocks_with_crrt_settings', 0):,}",
+             f"Encounter blocks = {data_complete_count:,}",
              'final')
 
     # Draw exclusion boxes
@@ -355,13 +376,25 @@ def create_consort_diagram(
              f"Excluded:\nESRD diagnosis\nn = {excluded_esrd:,}",
              'exclude')
 
-    draw_box(X_EXCL, y6, 0.2, BOX_H,
-             f"Excluded:\nNo weight data\nn = {excluded_no_weight:,}",
-             'exclude')
+    # Three exclusion boxes for data completeness (vertically stacked)
+    # Create a combined exclusion box with all three criteria
+    exclusion_texts = []
+    if excluded_no_weight > 0:
+        exclusion_texts.append(f"Missing Weight: {excluded_no_weight:,}")
+    if excluded_no_crrt_settings > 0:
+        exclusion_texts.append(f"Missing CRRT Settings: {excluded_no_crrt_settings:,}")
+    if excluded_no_labs > 0:
+        exclusion_texts.append(f"Missing Required Labs: {excluded_no_labs:,}")
 
-    draw_box(X_EXCL, y7, 0.2, BOX_H,
-             f"Excluded:\nNo CRRT settings\nn = {excluded_no_crrt_settings:,}",
-             'exclude')
+    if exclusion_texts:
+        exclusion_text = "Excluded:\n" + "\n".join(exclusion_texts)
+        total_excluded = excluded_no_weight + excluded_no_crrt_settings + excluded_no_labs
+        exclusion_text += f"\n(Total: {total_excluded:,})"
+        # Use smaller font if lots of text, else use increased size
+        font_for_exclusion = fit_fontsize(exclusion_text, 0.22, BOX_H + 0.03, min_size=11, max_size=18)
+        draw_box(X_EXCL, y6 - 0.01, 0.22, BOX_H + 0.03,  # Slightly wider and taller for multiple lines
+                 exclusion_text,
+                 'exclude', fontsize=font_for_exclusion)
 
     # Draw arrows - main flow
     arrow_props = dict(arrowstyle='->', connectionstyle='arc3', lw=2, color='black')
@@ -383,35 +416,31 @@ def create_consort_diagram(
                 xytext=(X_MAIN + BOX_W_MAIN/2, y4),
                 arrowprops=arrow_props)
 
-    ax.annotate('', xy=(X_MAIN + BOX_W_MAIN/2, y6 + BOX_H),
+    ax.annotate('', xy=(X_MAIN + BOX_W_MAIN/2, y6 + BOX_H + 0.01),
                 xytext=(X_MAIN + BOX_W_MAIN/2, y5),
                 arrowprops=arrow_props)
 
-    ax.annotate('', xy=(X_MAIN + BOX_W_MAIN/2, y7 + BOX_H),
+    # Arrow from data completeness box to final cohort
+    ax.annotate('', xy=(X_MAIN + BOX_W_MAIN/2, yF + BOX_H_FINAL),
                 xytext=(X_MAIN + BOX_W_MAIN/2, y6),
                 arrowprops=arrow_props)
 
-    ax.annotate('', xy=(X_MAIN + BOX_W_MAIN/2, yF + BOX_H_FINAL),
-                xytext=(X_MAIN + BOX_W_MAIN/2, y7),
-                arrowprops=arrow_props)
-
     # Exclusion arrows
+    # Arrow for ESRD exclusion
     ax.annotate('', xy=(X_EXCL, y5 + BOX_H/2),
                 xytext=(X_MAIN + BOX_W_MAIN, y5 + BOX_H/2),
-                arrowprops=dict(arrowstyle='->', lw=1.5, color='darkred'))
+                arrowprops=dict(arrowstyle='->', lw=1.5, color='black'))
 
-    ax.annotate('', xy=(X_EXCL, y6 + BOX_H/2),
-                xytext=(X_MAIN + BOX_W_MAIN, y6 + BOX_H/2),
-                arrowprops=dict(arrowstyle='->', lw=1.5, color='darkred'))
-
-    ax.annotate('', xy=(X_EXCL, y7 + BOX_H/2),
-                xytext=(X_MAIN + BOX_W_MAIN, y7 + BOX_H/2),
-                arrowprops=dict(arrowstyle='->', lw=1.5, color='darkred'))
+    # Arrow for data completeness exclusions
+    if excluded_no_weight > 0 or excluded_no_crrt_settings > 0 or excluded_no_labs > 0:
+        ax.annotate('', xy=(X_EXCL, y6 - 0.01 + (BOX_H + 0.03)/2),
+                    xytext=(X_MAIN + BOX_W_MAIN, y6 + (BOX_H + 0.01)/2),
+                    arrowprops=dict(arrowstyle='->', lw=1.5, color='black'))
 
     # Save figure
     consort_file = output_dir / "consort_diagram_crrt.png"
     plt.savefig(consort_file, dpi=300, facecolor="white", bbox_inches="tight")
-    plt.close()
+    #plt.close()
 
     return consort_file
 
@@ -927,10 +956,13 @@ def create_table_one_competing_risk(
             'post_filter_replacement_fluid_rate', 'ultrafiltration_out',
             'total_flow_rate', 'weight_kg'
         ],
+        'Treatment Duration': [  # NEW GROUP
+          'duration_days', 'imv_duration_days'
+        ],
         'Labs (Peri-CRRT)': [
             'ph_arterial_peri_crrt', 'lactate_peri_crrt', 'bicarbonate_peri_crrt',
             'potassium_peri_crrt', 'sodium_peri_crrt', 'creatinine_peri_crrt',
-            'bun_peri_crrt', 'hemoglobin_peri_crrt', 'glucose_serum_peri_crrt'
+            'bun_peri_crrt', 'hemoglobin_peri_crrt', 'glucose_serum_peri_crrt', 'phosphate_peri_crrt'
         ],
         'SOFA Scores': [
             'sofa_cv_97', 'sofa_coag', 'sofa_liver',
