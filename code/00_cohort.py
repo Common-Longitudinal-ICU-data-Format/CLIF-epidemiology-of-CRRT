@@ -70,7 +70,7 @@ with open(config_path, 'r') as f:
 # with open('../config/outlier_config.json', 'r', encoding='utf-8') as f:
 #     outlier_cfg = json.load(f)
 
-print(f"\n=� Configuration:")
+print(f"\n=== Configuration:")
 has_crrt_settings = config.get('has_crrt_settings', True)
 
 print(f"   Data directory: {config['tables_path']}")

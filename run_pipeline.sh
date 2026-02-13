@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONIOENCODING=utf-8
 
 # Check config exists
 if [ ! -f "$SCRIPT_DIR/config/config.json" ]; then

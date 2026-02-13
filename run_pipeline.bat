@@ -1,6 +1,7 @@
 @echo off
 setlocal
 
+set PYTHONIOENCODING=utf-8
 set SCRIPT_DIR=%~dp0
 
 :: Check config exists

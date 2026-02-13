@@ -36,6 +36,8 @@ Describe the epidemiology of CRRT for AKI across CLIF consortium hospitals:
 
 ## Quick Start
 
+### macOS / Linux
+
 ```bash
 # 1. Clone the repository
 git clone <repo-url>
@@ -57,6 +59,32 @@ bash run_pipeline.sh
 # uv run python code/03_crrt_visualizations.py
 ```
 
+### Windows
+
+```cmd
+:: 1. Clone the repository
+git clone <repo-url>
+cd CLIF-epidemiology-of-CRRT
+
+:: 2. Create your site config
+copy config\config_template.json config\config.json
+:: Edit config\config.json with your site settings (see Configuration below)
+
+:: 3. Install dependencies
+uv sync
+
+:: 4. Run the pipeline (all 4 steps in order)
+run_pipeline.bat
+:: Or run individually:
+:: set PYTHONIOENCODING=utf-8
+:: uv run python code\00_cohort.py
+:: uv run python code\01_create_wide_df.py
+:: uv run python code\02_construct_crrt_tableone.py
+:: uv run python code\03_crrt_visualizations.py
+```
+
+> **Note:** The batch script sets `PYTHONIOENCODING=utf-8` automatically. If running scripts individually on Windows, set this variable first to avoid Unicode encoding errors.
+
 ## Configuration
 
 Edit `config/config.json` (copied from `config/config_template.json`):
@@ -75,7 +103,7 @@ Edit `config/config.json` (copied from `config/config_template.json`):
 | Field | Description |
 |-------|-------------|
 | `site_name` | Your hospital/site identifier (e.g., "UCMC", "MIMIC") |
-| `tables_path` | Absolute path to directory containing CLIF 2.1.0 tables |
+| `tables_path` | Absolute path to directory containing CLIF 2.1.0 tables (use forward slashes on all platforms, e.g., `Z:/data/clif`) |
 | `file_type` | File format of CLIF tables: `"parquet"`, `"csv"`, or `"fst"` |
 | `timezone` | Timezone for your data (e.g., `"US/Central"`, `"US/Eastern"`) |
 | `project_root` | Absolute path to this repository's root directory |
