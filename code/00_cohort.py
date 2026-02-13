@@ -425,6 +425,24 @@ strobe_counts["2_crrt_blocks"] = n_crrt_blocks
 cohort_df = cohort_df[cohort_df['hospitalization_id'].isin(crrt_hosp_ids)].copy()
 crrt_df = clif.crrt_therapy.df
 
+# --- Filter to valid CRRT modes (exclude IHD and other non-continuous modalities) ---
+VALID_CRRT_MODES = {'scuf', 'cvvh', 'cvvhd', 'cvvhdf', 'avvh'}
+crrt_df['crrt_mode_category'] = crrt_df['crrt_mode_category'].str.lower().str.strip()
+
+invalid_mask = ~crrt_df['crrt_mode_category'].isin(VALID_CRRT_MODES) & crrt_df['crrt_mode_category'].notna()
+n_invalid = invalid_mask.sum()
+if n_invalid > 0:
+    invalid_modes = crrt_df.loc[invalid_mask, 'crrt_mode_category'].value_counts()
+    print(f"   Excluded {n_invalid:,} rows with non-CRRT modes:")
+    print(invalid_modes.to_string())
+    strobe_counts['excluded_non_crrt_modes'] = int(n_invalid)
+    crrt_df = crrt_df[~invalid_mask].copy()
+
+# Recount after filtering
+n_crrt_blocks = crrt_df['encounter_block'].nunique()
+strobe_counts["2_crrt_blocks"] = n_crrt_blocks
+print(f"   CRRT encounter blocks after mode filter: {n_crrt_blocks:,}")
+
 
 # In[16]:
 
@@ -1956,14 +1974,13 @@ if has_crrt_settings:
 
     print("\n Calculating CRRT dose at initiation...")
 
-    # First, filter for valid CRRT modes only
-    valid_modes = ['cvvh', 'cvvhd', 'cvvhdf']
-    crrt_cohort['crrt_mode_category'] = crrt_cohort['crrt_mode_category'].str.lower()
+    # Filter to dose-eligible modes (SCUF/AVVH excluded — no standard dose formula)
+    DOSE_MODES = {'cvvh', 'cvvhd', 'cvvhdf'}
 
-    print(f"   Total CRRT records before filtering: {len(crrt_df):,}")
-    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(valid_modes)].copy()
-    print(f"   Records after filtering for valid modes (cvvh, cvvhd, cvvhdf): {len(crrt_df_filtered):,}")
-    print(f"   Excluded records: {len(crrt_df) - len(crrt_df_filtered):,}")
+    print(f"   Total CRRT records before dose filtering: {len(crrt_cohort):,}")
+    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(DOSE_MODES)].copy()
+    print(f"   Records after filtering for dose modes (cvvh, cvvhd, cvvhdf): {len(crrt_df_filtered):,}")
+    print(f"   Excluded from dose calc: {len(crrt_cohort) - len(crrt_df_filtered):,}")
 
     # Fill NaN values with 0 for flow rate columns
     flow_cols = ['dialysate_flow_rate', 'pre_filter_replacement_fluid_rate',
