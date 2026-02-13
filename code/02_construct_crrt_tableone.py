@@ -678,8 +678,6 @@ rows.append(_wm_row_true)
 
 # Mortality overall — in-hospital mortality across all subgroups
 add_categorical("Mortality overall", [0, 1], col_name="in_hosp_death", patient_level=True)
-if HAS_CRRT_SETTINGS:
-    add_categorical("last_crrt_mode", ["cvvhd", "scuf"])
 add_categorical("sepsis_within_window", [False, True])
 
 # ── LOS ──
