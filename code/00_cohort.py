@@ -19,7 +19,7 @@
 # | **clif_vitals** | `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value` | heart_rate, resp_rate, sbp, dbp, map, spo2, weight_kg, height_cm |
 # | **clif_labs** | `hospitalization_id`, `lab_result_dttm`, `lab_category`, `lab_value` | sodium, potassium, chloride, bicarbonate, bun, creatinine, glucose_serum, calcium_total, lactate, magnesium, ph_arterial, ph_venous, po2_arterial |
 # | **clif_medication_admin_continuous** | `hospitalization_id`, `admin_dttm`, `med_name`, `med_category`, `med_dose`, `med_dose_unit` | norepinephrine, epinephrine, phenylephrine, vasopressin, dopamine, angiotensin, dobutamine, milrinone, isoproterenol |
-# | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `lpm_set`, `resp_rate_set`, `peep_set`, `resp_rate_obs`, `tidal_volume_set`, `pressure_control_set`, `pressure_support_set`, `tidal_volume_obs` | - |
+# | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `lpm_set`, `resp_rate_set`, `peep_set`, `resp_rate_obs`, `tidal_volume_set`, `pressure_control_set`, `pressure_support_set`, `peak_inspiratory_pressure_set`, `tidal_volume_obs` | - |
 # | **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm`, `crrt_mode_name`, `crrt_mode_category`, `device_id`, `blood_flow_rate`, `dialysate_flow_rate`, `pre_filter_replacement_fluid_rate`,`post_filter_replacement_fluid_rate`, `ultrafilteration_out` | - |
 # | **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code`, `present_on_admission` | - |
 
@@ -154,9 +154,13 @@ rst_required_columns = [
     'resp_rate_set',
     'peep_set',
     'resp_rate_obs',
-    'tidal_volume_set', 
+    'tidal_volume_set',
     'pressure_control_set',
     'pressure_support_set',
+    'peak_inspiratory_pressure_set',
+    'peak_inspiratory_pressure_obs',
+    'plateau_pressure_obs',
+    'minute_vent_obs',
 ]
 
 # CRRT table — columns depend on has_crrt_settings flag

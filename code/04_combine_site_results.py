@@ -29,12 +29,18 @@ SITE_LABELS = {
     "ucmc": "UChicago",
 }
 
-# Colors for overlay graphs (keyed by site folder name)
+# Colorblind-safe palette (Wong) + distinct line styles per site
 SITE_COLORS = {
-    "mimic_iv": "#1f77b4",   # blue
-    "nu": "#ff7f0e",         # orange
-    "rush": "#2ca02c",       # green
-    "ucmc": "#d62728",       # red
+    "mimic_iv": "#0072B2",   # blue
+    "nu": "#E69F00",         # orange
+    "rush": "#009E73",       # green
+    "ucmc": "#CC79A7",       # pink
+}
+SITE_LINESTYLES = {
+    "mimic_iv": "-",
+    "nu": "--",
+    "rush": "-.",
+    "ucmc": ":",
 }
 
 # Figures in display order: (filename, title)
@@ -413,6 +419,7 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
             continue
         label = SITE_LABELS.get(sid, sid)
         ax.plot(sub[x_col], sub[y_col], color=SITE_COLORS.get(sid, "gray"),
+                linestyle=SITE_LINESTYLES.get(sid, "-"),
                 label=label, linewidth=1.5)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -473,6 +480,7 @@ def _build_lab_overlay(sites) -> str:
                 continue
             ax.plot(sub["hour"], sub["median"],
                     color=SITE_COLORS.get(sid, "gray"),
+                    linestyle=SITE_LINESTYLES.get(sid, "-"),
                     label=SITE_LABELS.get(sid, sid), linewidth=1.5)
         ax.set_title(lab_name.replace("_", " ").title())
         ax.set_xlabel("Hour")
@@ -511,6 +519,7 @@ def _build_respiratory_overlay(sites) -> str:
             continue
         ax1.plot(sub["hour"], sub["median"],
                  color=SITE_COLORS.get(sid, "gray"),
+                 linestyle=SITE_LINESTYLES.get(sid, "-"),
                  label=SITE_LABELS.get(sid, sid), linewidth=1.5)
     ax1.set_title("FiO2 (Median)")
     ax1.set_xlabel("Hour")
@@ -527,6 +536,7 @@ def _build_respiratory_overlay(sites) -> str:
             continue
         ax2.plot(sub["hour"], sub["imv_proportion"],
                  color=SITE_COLORS.get(sid, "gray"),
+                 linestyle=SITE_LINESTYLES.get(sid, "-"),
                  label=SITE_LABELS.get(sid, sid), linewidth=1.5)
     ax2.set_title("IMV Proportion")
     ax2.set_xlabel("Hour")
@@ -567,6 +577,7 @@ def _build_patient_state_overlay(sites) -> str:
                 continue
             ax.plot(sub["hour"], sub[col],
                     color=SITE_COLORS.get(sid, "gray"),
+                    linestyle=SITE_LINESTYLES.get(sid, "-"),
                     label=SITE_LABELS.get(sid, sid), linewidth=1.5)
         ax.set_title(label)
         ax.set_xlabel("Hour")
