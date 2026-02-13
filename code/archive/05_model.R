@@ -420,6 +420,106 @@ dev.off()
 cat("Plot saved.\n\n")
 
 # ============================================================================
+# 6. LAB-ADJUSTED FINE-GRAY MODELS
+# ============================================================================
+cat(paste(rep("=", 80), collapse=""), "\n")
+cat("Fitting Lab-Adjusted Fine-Gray Models\n")
+cat(paste(rep("=", 80), collapse=""), "\n\n")
+
+# Define model variables including labs
+model_vars_labs <- c("time_to_event_90d", "outcome", "crrt_dose_ml_kg_hr",
+                     "age_at_admission", "sex_category", "sofa_total",
+                     "ph_arterial_peri_crrt", "lactate_peri_crrt",
+                     "bicarbonate_peri_crrt", "potassium_peri_crrt")
+
+# Filter to complete cases for lab-adjusted model
+df_complete_labs <- df[complete.cases(df[, model_vars_labs]), ]
+
+cat("Complete cases (with labs):", nrow(df_complete_labs), "of", nrow(df), "\n")
+cat("Excluded due to missing data:", nrow(df) - nrow(df_complete_labs),
+    "(", round((nrow(df) - nrow(df_complete_labs)) / nrow(df) * 100, 1), "%)\n\n")
+
+# Check for sufficient data
+if (nrow(df_complete_labs) < 50) {
+  cat("Warning: Insufficient complete cases for lab-adjusted modeling (n =", nrow(df_complete_labs), ")\n")
+  cat("Skipping lab-adjusted models.\n\n")
+} else {
+  # Create model matrix with labs
+  covariates_labs <- model.matrix(~ crrt_dose_ml_kg_hr + age_at_admission +
+                                    sex_category + sofa_total +
+                                    ph_arterial_peri_crrt + lactate_peri_crrt +
+                                    bicarbonate_peri_crrt + potassium_peri_crrt,
+                                  data = df_complete_labs)[, -1, drop=FALSE]
+
+  cat("Lab-adjusted model covariates:\n")
+  print(colnames(covariates_labs))
+  cat("\n")
+
+  # Model 1: Death (with labs)
+  cat(paste(rep("-", 80), collapse=""), "\n")
+  cat("Lab-Adjusted Model 1: Fine-Gray for Death (Outcome = 2)\n")
+  cat(paste(rep("-", 80), collapse=""), "\n\n")
+
+  fg_death_labs <- cmprsk::crr(
+    ftime = df_complete_labs$time_to_event_90d,
+    fstatus = df_complete_labs$outcome,
+    cov1 = covariates_labs,
+    failcode = 2,  # Death
+    cencode = 0
+  )
+
+  print(summary(fg_death_labs))
+
+  death_results_labs <- extract_model_results(fg_death_labs, "death", SITE_NAME)
+
+  # Model 2: Discharge Alive (with labs)
+  cat("\n", paste(rep("-", 80), collapse=""), "\n")
+  cat("Lab-Adjusted Model 2: Fine-Gray for Discharge Alive (Outcome = 1)\n")
+  cat(paste(rep("-", 80), collapse=""), "\n\n")
+
+  fg_discharge_labs <- cmprsk::crr(
+    ftime = df_complete_labs$time_to_event_90d,
+    fstatus = df_complete_labs$outcome,
+    cov1 = covariates_labs,
+    failcode = 1,  # Discharged alive
+    cencode = 0
+  )
+
+  print(summary(fg_discharge_labs))
+
+  discharge_results_labs <- extract_model_results(fg_discharge_labs, "discharge", SITE_NAME)
+
+  # Combine lab-adjusted model results
+  model_results_labs <- rbind(death_results_labs, discharge_results_labs)
+
+  # Save lab-adjusted model results
+  write.csv(model_results_labs,
+            file.path(output_dir, paste0(SITE_NAME, "_model_results_with_labs.csv")),
+            row.names = FALSE)
+
+  cat("\nLab-adjusted model results saved.\n\n")
+
+  # Save lab-adjusted model diagnostics
+  model_diagnostics_labs <- data.frame(
+    site_name = SITE_NAME,
+    outcome = c("death", "discharge"),
+    n_complete_cases = c(nrow(df_complete_labs), nrow(df_complete_labs)),
+    n_excluded = c(nrow(df) - nrow(df_complete_labs), nrow(df) - nrow(df_complete_labs)),
+    pct_excluded = c((nrow(df) - nrow(df_complete_labs)) / nrow(df) * 100,
+                     (nrow(df) - nrow(df_complete_labs)) / nrow(df) * 100),
+    pseudo_loglik = c(fg_death_labs$loglik, fg_discharge_labs$loglik),
+    convergence = c(fg_death_labs$converged, fg_discharge_labs$converged),
+    stringsAsFactors = FALSE
+  )
+
+  write.csv(model_diagnostics_labs,
+            file.path(output_dir, paste0(SITE_NAME, "_model_diagnostics_with_labs.csv")),
+            row.names = FALSE)
+
+  cat("Lab-adjusted model diagnostics saved.\n\n")
+}
+
+# ============================================================================
 # SUMMARY
 # ============================================================================
 cat(paste(rep("=", 80), collapse=""), "\n")
@@ -427,16 +527,27 @@ cat("ANALYSIS COMPLETE\n")
 cat(paste(rep("=", 80), collapse=""), "\n\n")
 
 cat("The following files have been saved to", output_dir, ":\n\n")
+cat("BASE MODEL (no labs):\n")
 cat("1.", paste0(SITE_NAME, "_sample_characteristics.csv"), "\n")
 cat("   - Sample size, demographics, outcomes distribution\n\n")
 cat("2.", paste0(SITE_NAME, "_cumulative_incidence.csv"), "\n")
-cat("   - CIF estimates at key time points (7, 14, 21, 28, 60, 90 days)\n\n")
+cat("   - CIF estimates every 2 days (2, 4, 6, ..., 90 days)\n\n")
 cat("3.", paste0(SITE_NAME, "_model_results.csv"), "\n")
-cat("   - Fine-Gray model coefficients, SHRs, CIs, p-values\n\n")
+cat("   - Fine-Gray model coefficients, SHRs, CIs, p-values\n")
+cat("   - Covariates: CRRT dose, age, sex, SOFA total\n\n")
 cat("4.", paste0(SITE_NAME, "_model_diagnostics.csv"), "\n")
 cat("   - Model fit statistics and diagnostics\n\n")
 cat("5.", paste0(SITE_NAME, "_cumulative_incidence_plot.pdf"), "\n")
 cat("   - Visual representation of competing risks\n\n")
+
+if (exists("model_results_labs")) {
+  cat("LAB-ADJUSTED MODEL:\n")
+  cat("6.", paste0(SITE_NAME, "_model_results_with_labs.csv"), "\n")
+  cat("   - Fine-Gray model coefficients, SHRs, CIs, p-values\n")
+  cat("   - Covariates: CRRT dose, age, sex, SOFA total + pH, lactate, bicarb, K+\n\n")
+  cat("7.", paste0(SITE_NAME, "_model_diagnostics_with_labs.csv"), "\n")
+  cat("   - Lab-adjusted model fit statistics\n\n")
+}
 
 cat("These aggregated results can be used for multi-site analysis.\n\n")
 

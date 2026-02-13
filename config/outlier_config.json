@@ -25,9 +25,9 @@
 
     "lactate": [0, 40],
 
-    "blood_flow_rate": [150, 350],
-    "pre_filter_replacement_fluid_rate": [0, 10000],
-    "post_filter_replacement_fluid_rate": [0, 10000],
-    "dialysate_flow_rate": [0, 10000],
-    "ultrafiltration_out": [0, 500]
+    "blood_flow_rate": [150, 5000],
+    "pre_filter_replacement_fluid_rate": [0, 20000],
+    "post_filter_replacement_fluid_rate": [0, 20000],
+    "dialysate_flow_rate": [0, 20000],
+    "ultrafiltration_out": [0, 200]
   }
