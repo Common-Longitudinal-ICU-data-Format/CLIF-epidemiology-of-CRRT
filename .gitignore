@@ -56,3 +56,4 @@ code/output/
 /output_old
 config/config_mimic.json
 config/config_ucmc.json
+config/config.json

@@ -1,0 +1,304 @@
+# =============================================================================
+# CLIF Data Requirements
+# =============================================================================
+# This file defines all required CLIF tables, columns, and category values.
+# =============================================================================
+
+# =============================================================================
+# PATIENT TABLE (Full table required)
+# =============================================================================
+patient_required_columns:
+  - patient_id
+  - birth_date
+  - death_dttm
+  - race_category
+  - ethnicity_category
+  - sex_category
+  - language_category
+
+# =============================================================================
+# HOSPITALIZATION TABLE (Full table required)
+# =============================================================================
+hospitalization_required_columns:
+  - patient_id
+  - hospitalization_id
+  - admission_dttm
+  - discharge_dttm
+  - age_at_admission
+  - admission_type_category
+  - discharge_category
+
+# =============================================================================
+# ADT TABLE (Full table required)
+# =============================================================================
+adt_required_columns:
+  - hospitalization_id
+  - hospital_id
+  - hospital_type
+  - in_dttm
+  - out_dttm
+  - location_name
+  - location_category
+  - location_type
+
+adt_location_categories_of_interest:
+  - ed
+  - ward
+  - stepdown
+  - icu
+  - procedural
+  - other
+
+# =============================================================================
+# VITALS TABLE
+# =============================================================================
+vitals_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - vital_category
+  - vital_value
+
+vitals_of_interest:
+  - temp_c
+  - heart_rate
+  - sbp
+  - dbp
+  - map
+  - spo2
+  - respiratory_rate
+  - weight_kg
+  - height_cm
+
+# =============================================================================
+# LABS TABLE
+# =============================================================================
+labs_required_columns:
+  - hospitalization_id
+  - lab_result_dttm
+  - lab_category
+  - lab_value
+  - lab_value_numeric
+
+labs_of_interest:
+  # ABG values
+  - po2_arterial
+  - pco2_arterial
+  - ph_arterial
+  - ph_venous
+  - so2_arterial
+  # Electrolytes
+  - sodium
+  - potassium
+  - phosphate
+  - chloride
+  - bicarbonate
+  - calcium_total
+  - magnesium
+  # Renal
+  - creatinine
+  - bun
+  # Metabolic
+  - glucose_serum
+  - lactate
+  - albumin
+  # Hematology
+  - wbc
+  - hemoglobin
+  - platelet_count
+  - neutrophils_absolute
+  - lymphocytes_absolute
+  # Liver
+  - bilirubin_total
+  - ast
+  - alt
+  # Coagulation
+  - inr
+  - ptt
+  # Inflammatory markers
+  - crp
+  - procalcitonin
+  - ferritin
+  # Cardiac
+  - troponin_i
+  - troponin_t
+
+# =============================================================================
+# MEDICATION ADMIN CONTINUOUS TABLE
+# =============================================================================
+meds_continuous_required_columns:
+  - hospitalization_id
+  - admin_dttm
+  - med_name
+  - med_category
+  - med_group
+  - med_route_category
+  - med_dose
+  - med_dose_unit
+  - mar_action_category
+
+# Vasoactives/Inotropes
+vasoactives_of_interest:
+  - norepinephrine
+  - epinephrine
+  - phenylephrine
+  - vasopressin
+  - dopamine
+  - angiotensin
+  - dobutamine
+  - milrinone
+  - isoproterenol
+
+# Sedation (continuous)
+sedation_continuous_of_interest:
+  - propofol
+  - midazolam
+  - lorazepam
+  - dexmedetomidine
+  - fentanyl
+  - hydromorphone
+  - morphine
+  - ketamine
+  - pentobarbital
+  - remifentanil
+
+# Paralytics (continuous)
+paralytics_continuous_of_interest:
+  - vecuronium
+  - rocuronium
+  - cisatracurium
+
+# Anticoagulation (continuous)
+anticoagulation_continuous_of_interest:
+  - heparin
+  - argatroban
+  - bivalirudin
+  - cangrelor
+  - eptifibatide
+
+# Other continuous meds
+other_continuous_of_interest:
+  - insulin           # endocrine
+  - nitric_oxide      # pulmonary vasodilators (inhaled)
+  - epoprostenol      # pulmonary vasodilators (IV)
+  - treprostinil      # pulmonary vasodilators (IV)
+  - tacrolimus        # immunosuppressant
+
+# All continuous meds combined
+meds_continuous_of_interest:
+  # Vasoactives/Inotropes
+  - norepinephrine
+  - epinephrine
+  - phenylephrine
+  - vasopressin
+  - dopamine
+  - angiotensin
+  - dobutamine
+  - milrinone
+  - isoproterenol
+  # Sedation
+  - propofol
+  - midazolam
+  - lorazepam
+  - dexmedetomidine
+  - fentanyl
+  - hydromorphone
+  - morphine
+  - ketamine
+  - pentobarbital
+  - remifentanil
+
+# =============================================================================
+# RESPIRATORY SUPPORT TABLE
+# =============================================================================
+respiratory_support_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - device_name
+  - device_category
+  - vent_brand_name
+  - mode_name
+  - mode_category
+  - tracheostomy
+  - fio2_set
+  - lpm_set
+  - tidal_volume_set
+  - resp_rate_set
+  - pressure_control_set
+  - pressure_support_set
+  - flow_rate_set
+  - peak_inspiratory_pressure_set
+  - inspiratory_time_set
+  - peep_set
+  - tidal_volume_obs
+  - resp_rate_obs
+  - plateau_pressure_obs
+  - peak_inspiratory_pressure_obs
+  - peep_obs
+  - minute_vent_obs
+  - mean_airway_pressure_obs
+
+device_categories_of_interest:
+  - IMV
+  - NIPPV
+  - CPAP
+  - High Flow NC
+  - Face Mask
+  - Trach Collar
+  - Nasal Cannula
+  - Room Air
+  - Other
+
+mode_categories_of_interest:
+  - Assist Control-Volume Control
+  - Pressure Control
+  - Pressure-Regulated Volume Control
+  - SIMV
+  - Pressure Support/CPAP
+  - Volume Support
+  - Blow by
+  - Other
+
+# =============================================================================
+# CRRT TABLE
+# When has_crrt_settings=true (config.json), all columns below are required.
+# When has_crrt_settings=false, only hospitalization_id and recorded_dttm are
+# required; setting/mode columns will be ignored.
+# =============================================================================
+crrt_required_columns:
+  - hospitalization_id        # REQUIRED always
+  - recorded_dttm             # REQUIRED always
+  - crrt_mode_category        # optional if has_crrt_settings=false
+  - blood_flow_rate           # optional if has_crrt_settings=false
+  - dialysate_flow_rate       # optional if has_crrt_settings=false
+  - pre_filter_replacement_fluid_rate   # optional if has_crrt_settings=false
+  - post_filter_replacement_fluid_rate  # optional if has_crrt_settings=false
+  - ultrafiltration_out       # optional if has_crrt_settings=false
+
+crrt_minimal_columns:
+  - hospitalization_id
+  - recorded_dttm
+
+# =============================================================================
+# PATIENT ASSESSMENT TABLE (for GCS, RASS, CAM)
+# =============================================================================
+patient_assessment_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - assessment_category
+  - assessment_value
+
+assessments_of_interest:
+  - gcs_total
+  - gcs_eye
+  - gcs_verbal
+  - gcs_motor
+
+# =============================================================================
+# HOSPITAL DIAGNOSIS TABLE
+# =============================================================================
+hospital_diagnosis_required_columns:
+  - hospitalization_id
+  - diagnosis_code
+  - diagnosis_code_format
+  - diagnosis_primary
+  - poa_present
