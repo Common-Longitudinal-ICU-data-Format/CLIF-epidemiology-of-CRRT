@@ -32,7 +32,7 @@ initialize_renv.R
 *.pdf
 *.html
 
-
+.venv
 
 # ignore Claude documentation files
 claude.md
@@ -57,3 +57,5 @@ code/output/
 config/config_mimic.json
 config/config_ucmc.json
 config/config.json
+
+all_site_data/
