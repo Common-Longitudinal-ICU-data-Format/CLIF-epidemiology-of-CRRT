@@ -68,7 +68,10 @@ def extract_table(html_path: Path) -> str:
     match = re.search(r"(<table[\s\S]*?</table>)", html, re.IGNORECASE)
     if not match:
         return "<p><em>Table not found.</em></p>"
-    return match.group(1)
+    table = match.group(1)
+    # Drop hardcoded last_crrt_mode rows (scuf / cvvhd)
+    table = re.sub(r"<tr>\s*<td>last_crrt_mode.*?</tr>", "", table, flags=re.DOTALL)
+    return table
 
 
 def img_to_data_uri(img_path: Path) -> str:
@@ -376,6 +379,9 @@ def build_combined_table1(sites: list[Path]) -> str:
 # ── Overlay Graphs ────────────────────────────────────────────────────────
 
 
+MAX_HOUR = 167  # Cap overlay graphs just under 7 days (hour 168 has boundary artifacts)
+
+
 def _load_site_csv(sites: list[Path], rel_path: str) -> pd.DataFrame:
     """Load a CSV from each site's final/ tree, concat with site_id column."""
     frames = []
@@ -385,7 +391,12 @@ def _load_site_csv(sites: list[Path], rel_path: str) -> pd.DataFrame:
             tmp = pd.read_csv(csv_path)
             tmp["site_id"] = site_dir.name
             frames.append(tmp)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    if "hour" in df.columns:
+        df = df[df["hour"] <= MAX_HOUR]
+    return df
 
 
 def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str:
