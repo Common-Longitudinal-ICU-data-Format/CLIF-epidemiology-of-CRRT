@@ -164,6 +164,8 @@ sofa_scores = compute_sofa_polars(
 
 sofa_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_scores.columns]
 sofa_df = sofa_scores[sofa_keep]
+del sofa_scores, sofa_cohort
+gc.collect()
 print(f"  SOFA at initiation: {len(sofa_df)} encounters")
 
 # 2b: SOFA 72h window (0h to 72h) — used for 72h survivor/non-survivor columns
@@ -188,6 +190,8 @@ sofa_72h_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_72h_sco
 sofa_72h_df = sofa_72h_scores[sofa_72h_keep].rename(
     columns={c: f"{c}_72h" for c in SOFA_COLS if c in sofa_72h_scores.columns}
 )
+del sofa_72h_scores, sofa_cohort_72h
+gc.collect()
 print(f"  SOFA 72h: {len(sofa_72h_df)} encounters")
 
 # 2c: SOFA post-CRRT (0h to last_vital_dttm) — used for discharge survivor/non-survivor columns
@@ -217,6 +221,8 @@ sofa_post_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_post_s
 sofa_post_df = sofa_post_scores[sofa_post_keep].rename(
     columns={c: f"{c}_post" for c in SOFA_COLS if c in sofa_post_scores.columns}
 )
+del sofa_post_scores, sofa_cohort_post
+gc.collect()
 print(f"  SOFA post-CRRT: {len(sofa_post_df)} encounters")
 
 
@@ -256,6 +262,8 @@ sepsis_flag_df = pd.DataFrame({
     "encounter_block": crrt_initiation["encounter_block"],
     "sepsis_within_window": crrt_initiation["encounter_block"].isin(ebs_with_sepsis),
 })
+del sepsis_raw, sepsis_pos
+gc.collect()
 print(f"  Sepsis within ±72h: {sepsis_flag_df['sepsis_within_window'].sum()}/{len(sepsis_flag_df)}")
 
 
