@@ -1287,6 +1287,12 @@ def _compute_sofa_scores(extremal_df: pl.DataFrame, id_name: str) -> pl.DataFram
             extremal_df = extremal_df.with_columns([
                 pl.lit(None).cast(dtype).alias(col)
             ])
+        elif extremal_df[col].dtype != dtype:
+            # Column exists but has wrong type (e.g., Null/Boolean when all values
+            # are missing). Cast to expected numeric type to prevent comparison errors.
+            extremal_df = extremal_df.with_columns([
+                pl.col(col).cast(dtype).alias(col)
+            ])
 
     # Calculate P/F ratios (only if not already calculated from concurrent measurements)
     if 'p_f' not in extremal_df.columns:
@@ -1632,9 +1638,15 @@ def compute_sofa_polars(
         pl.lit('assessment').alias('data_type')
     ])
 
+    # Ensure consistent 'value' column type across all aggregations
+    # (prevents Null/Boolean type when a data source has no matching rows)
+    agg_parts = []
+    for part in [labs_agg, vitals_agg, meds_agg, assess_agg]:
+        agg_parts.append(part.cast({'value': pl.Float64}))
+
     # Concatenate all aggregated results (still lazy)
     # Now all have consistent schema: [id_name, lab_category, value, data_type]
-    aggregated_lazy = pl.concat([labs_agg, vitals_agg, meds_agg, assess_agg], how='vertical')
+    aggregated_lazy = pl.concat(agg_parts, how='vertical')
 
     # NOW collect the small aggregated result (only ~11 rows per patient)
     logger.info("Collecting aggregated data...")
