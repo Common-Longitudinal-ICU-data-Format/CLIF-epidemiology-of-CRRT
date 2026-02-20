@@ -50,6 +50,7 @@ context7.json
 /logs
 /aggregate
 /code_archive
+/code/archive
 __pycache__/
 code/output/
 /output
