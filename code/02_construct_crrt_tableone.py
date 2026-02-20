@@ -14,7 +14,7 @@ SOFA scores use window-specific computations (baseline, 72h, post-CRRT).
 
 Usage: uv run python code/construct_crrt_tableone.py
 """
-
+import sys; sys.stdout.reconfigure(line_buffering=True)
 import gc
 import sys
 from pathlib import Path
@@ -140,6 +140,83 @@ new_deaths = int(outcomes_df["in_hosp_death"].sum())
 capped = int(mask_beyond_90d.sum())
 print(f"  Mortality redefined: {old_deaths} → {new_deaths} in-hospital deaths ({capped} capped at 90d)")
 
+# ===================================================================
+# STEP 1b: Pre-filter CLIF tables for SOFA/ASE
+# ===================================================================
+print("Step 1b: Pre-filtering CLIF tables for SOFA/ASE")
+FILTERED_DIR = INTERMEDIATE_DIR / "filtered_clif"
+# # Uncomment to skip re-filtering if tables already exist:
+# if (FILTERED_DIR / f"clif_labs.{FILE_TYPE}").exists():
+#     print("  Filtered tables exist, skipping. Delete filtered_clif/ to re-filter.")
+#     FILTERED_TABLES_PATH = str(FILTERED_DIR)
+# else:
+if not FILTERED_DIR.exists():
+    FILTERED_DIR.mkdir(parents=True)
+FILTERED_TABLES_PATH = str(FILTERED_DIR)
+
+_hosp_ids_set = set(eb_map["hospitalization_id"].unique())
+_sofa_ase_tables = [
+    "clif_hospitalization",
+    "clif_patient",
+    "clif_adt",
+    "clif_labs",
+    "clif_vitals",
+    "clif_patient_assessments",
+    "clif_medication_admin_continuous",
+    "clif_medication_admin_intermittent",
+    "clif_respiratory_support",
+    "clif_microbiology_culture",
+    "clif_hospital_diagnosis",
+]
+
+
+import duckdb as _ddb
+
+_filter_con = _ddb.connect()
+_filter_con.register("_hosp_filter",
+    pd.DataFrame({"hospitalization_id": list(_hosp_ids_set)}))
+
+for _tname in _sofa_ase_tables:
+    _src = Path(TABLES_PATH) / f"{_tname}.{FILE_TYPE}"
+    _dst = FILTERED_DIR / f"{_tname}.{FILE_TYPE}"
+    if not _src.exists():
+        print(f"  {_tname}: not found, skipping")
+        continue
+    _src_str = str(_src).replace("\\", "/")
+    _dst_str = str(_dst).replace("\\", "/")
+    _orig = _filter_con.execute(
+        f"SELECT COUNT(*) FROM read_parquet('{_src_str}')").fetchone()[0]
+    _cols = [c[0] for c in _filter_con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{_src_str}')").fetchall()]
+    if "hospitalization_id" in _cols:
+        _filter_con.execute(f"""
+            COPY (
+                SELECT t.*
+                FROM read_parquet('{_src_str}') t
+                SEMI JOIN _hosp_filter h
+                    ON t.hospitalization_id = h.hospitalization_id
+            ) TO '{_dst_str}' (FORMAT PARQUET)
+        """)
+    else:
+        _filter_con.execute(f"""
+            COPY (SELECT * FROM read_parquet('{_src_str}'))
+            TO '{_dst_str}' (FORMAT PARQUET)
+        """)
+    _new = _filter_con.execute(
+        f"SELECT COUNT(*) FROM read_parquet('{_dst_str}')").fetchone()[0]
+    print(f"  {_tname}: {_orig:,} -> {_new:,} rows")
+
+_filter_con.close()
+
+
+import copy as _copy
+_filtered_config = _copy.deepcopy(config)
+_filtered_config["tables_path"] = FILTERED_TABLES_PATH
+FILTERED_CONFIG_PATH = str(FILTERED_DIR / "config.json")
+with open(FILTERED_CONFIG_PATH, "w") as _fc:
+    json.dump(_filtered_config, _fc)
+
+print(f"  Filtered tables ready in {FILTERED_DIR}")
 
 # ===================================================================
 # STEP 2: Compute SOFA scores
@@ -152,7 +229,7 @@ sofa_cohort["end_dttm"] = sofa_cohort["crrt_initiation_time"] + pd.Timedelta(hou
 sofa_cohort = sofa_cohort[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
 
 sofa_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
+    data_directory=FILTERED_TABLES_PATH,
     cohort_df=pl.from_pandas(sofa_cohort),
     filetype=FILE_TYPE,
     id_name="encounter_block",
@@ -176,7 +253,7 @@ sofa_cohort_72h["end_dttm"] = sofa_cohort_72h["crrt_initiation_time"] + pd.Timed
 sofa_cohort_72h = sofa_cohort_72h[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
 
 sofa_72h_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
+    data_directory=FILTERED_TABLES_PATH,
     cohort_df=pl.from_pandas(sofa_cohort_72h),
     filetype=FILE_TYPE,
     id_name="encounter_block",
@@ -207,7 +284,7 @@ sofa_cohort_post["end_dttm"] = sofa_cohort_post["last_vital_dttm"]
 sofa_cohort_post = sofa_cohort_post[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
 
 sofa_post_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
+    data_directory=FILTERED_TABLES_PATH,
     cohort_df=pl.from_pandas(sofa_cohort_post),
     filetype=FILE_TYPE,
     id_name="encounter_block",
@@ -235,7 +312,8 @@ from clifpy.utils.ase import compute_ase  # noqa: E402
 hosp_ids = outcomes_df["hospitalization_id"].unique().tolist()
 sepsis_raw = compute_ase(
     hospitalization_ids=hosp_ids,
-    config_path=str(project_root / "config" / "config.json"),
+    # config_path=str(project_root / "config" / "config.json"),
+    config_path=FILTERED_CONFIG_PATH,
     apply_rit=True,
     include_lactate=True,
     verbose=True,

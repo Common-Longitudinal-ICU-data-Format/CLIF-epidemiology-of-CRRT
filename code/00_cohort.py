@@ -881,7 +881,7 @@ if 'poa_present' in hospital_diagnosis_df.columns:
     # Any other value (including Exempt, Unknown, Unspecified, NA) is set to 0
     hospital_diagnosis_df['poa_present'] = hospital_diagnosis_df['poa_present'].astype(str).str.lower()
     hospital_diagnosis_df['poa_present'] = hospital_diagnosis_df['poa_present'].map(
-        {'yes': 1, 'y': 1, 'true': 1, '1': 1, 'no': 0, 'n': 0, 'false': 0, '0': 0}
+        {'yes': 1, 'y': 1, 'true': 1, '1': 1, '1.0': 1, 'no': 0, 'n': 0, 'false': 0, '0': 0, '0.0': 0}
     ).fillna(0).astype('int8')
 
 
