@@ -441,6 +441,24 @@ n_crrt_blocks = crrt_df['encounter_block'].nunique()
 strobe_counts["2_crrt_blocks"] = n_crrt_blocks
 print(f"   CRRT encounter blocks after mode filter: {n_crrt_blocks:,}")
 
+# ============================================================================
+# CRRT Column Missingness Report
+# ============================================================================
+print("\n" + "=" * 80)
+print("CRRT Column Missingness Report")
+print("=" * 80)
+crrt_miss_cols = [c for c in crrt_df.columns if c not in ['hospitalization_id', 'encounter_block']]
+miss_data = []
+for col in crrt_miss_cols:
+    n_total = len(crrt_df)
+    n_missing = crrt_df[col].isna().sum()
+    pct = n_missing / n_total * 100
+    miss_data.append({'column': col, 'n_total': n_total, 'n_missing': int(n_missing), 'pct_missing': round(pct, 1)})
+    print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
+miss_report = pd.DataFrame(miss_data)
+miss_report.to_csv('../output/final/crrt_column_missingness.csv', index=False)
+print(f"\n✓ Saved to: output/final/crrt_column_missingness.csv")
+print("=" * 80)
 
 # In[16]:
 
@@ -2120,11 +2138,27 @@ if has_crrt_settings:
     print(f"     Total rows: {len(final_df):,} (one per encounter)")
     print(f"     Total columns: {len(final_df.columns)}")
 
-    # Assign to your desired variable name
-    index_crrt_df = final_df.copy()
+    # Merge dose results back into the full index_crrt_df (left join)
+    # This preserves encounters excluded from dose calc (e.g. SCUF/AVVH, missing flows)
+    dose_only_cols = [c for c in final_df.columns if c not in ['encounter_block', 'hospitalization_id', 'crrt_initiation_time', 'weight_kg', 'crrt_mode_category']]
+    # Drop any overlapping columns from index_crrt_df before merge to avoid _x/_y suffixes
+    overlap_cols = [c for c in dose_only_cols if c in index_crrt_df.columns]
+    if overlap_cols:
+        index_crrt_df = index_crrt_df.drop(columns=overlap_cols)
+    print(f"\n   Merging dose columns back into index_crrt_df...")
+    print(f"     index_crrt_df rows before merge: {len(index_crrt_df):,}")
+    print(f"     final_df (dose-eligible) rows: {len(final_df):,}")
+    index_crrt_df = index_crrt_df.merge(
+        final_df[['encounter_block'] + dose_only_cols],
+        on='encounter_block',
+        how='left'
+    )
+    print(f"     index_crrt_df rows after merge: {len(index_crrt_df):,}")
 
     print("\n✅ Final dataframe created with one row per encounter!")
     print(f"   Stored as 'index_crrt_df' with {len(index_crrt_df)} encounters")
+    print(f"   Encounters with dose data: {index_crrt_df['crrt_dose_ml_kg_hr'].notna().sum():,}")
+    print(f"   Encounters without dose data (NaN): {index_crrt_df['crrt_dose_ml_kg_hr'].isna().sum():,}")
 
 
     # In[48]:

@@ -57,5 +57,6 @@ code/output/
 config/config_mimic.json
 config/config_ucmc.json
 config/config.json
-
+code/archive/
+code/archive/00_cohort.ipynb
 all_site_data/

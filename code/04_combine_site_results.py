@@ -16,10 +16,20 @@ from matplotlib.patches import FancyBboxPatch
 import numpy as np
 import pandas as pd
 
+import importlib
+import sys
+# Import 05_severity_analysis (numeric prefix requires importlib)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+_sev_mod = importlib.import_module("05_severity_analysis")
+load_all_table1 = _sev_mod.load_all_table1
+extract_severity_data = _sev_mod.extract_severity_data
+generate_severity_html = _sev_mod.generate_severity_html
+
 # ── Config ──────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent.parent / "all_site_data"
 OUTPUT = ROOT / "combined_dashboard.html"
+OUTPUT_ANON = ROOT / "combined_dashboard_anon.html"
 
 # Display names for sites (fallback: folder name title-cased)
 SITE_LABELS = {
@@ -27,21 +37,59 @@ SITE_LABELS = {
     "nu": "Northwestern",
     "rush": "Rush",
     "ucmc": "UChicago",
+    "umich": "UMichigan",
 }
 
-# Colorblind-safe palette (Wong) + distinct line styles per site
+# Distinct palette: maximally separated hues + unique line styles per site
 SITE_COLORS = {
     "mimic_iv": "#0072B2",   # blue
     "nu": "#E69F00",         # orange
-    "rush": "#009E73",       # green
+    "rush": "#009E73",       # teal green
     "ucmc": "#CC79A7",       # pink
+    "umich": "#882255",      # wine/purple
 }
 SITE_LINESTYLES = {
     "mimic_iv": "-",
     "nu": "--",
     "rush": "-.",
     "ucmc": ":",
+    "umich": (0, (3, 1, 1, 1)),  # dash-dot-dot
 }
+
+# Fallback colors and linestyles for dynamically discovered sites
+_EXTRA_COLORS = ["#332288", "#44AA99", "#DDCC77", "#AA4499", "#999933",
+                 "#88CCEE", "#661100", "#117733", "#6699CC", "#DC3220"]
+_EXTRA_LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)),
+                     (0, (5, 2)), (0, (1, 1))]
+
+
+def get_site_color(sid: str) -> str:
+    """Return a color for a site, assigning from extras if not predefined."""
+    if sid in SITE_COLORS:
+        return SITE_COLORS[sid]
+    # Deterministic assignment based on sorted unknown sites
+    if not hasattr(get_site_color, "_cache"):
+        get_site_color._cache = {}
+    if sid not in get_site_color._cache:
+        idx = len(get_site_color._cache)
+        get_site_color._cache[sid] = _EXTRA_COLORS[idx % len(_EXTRA_COLORS)]
+    return get_site_color._cache[sid]
+
+
+def get_site_linestyle(sid: str):
+    """Return a linestyle for a site, assigning from extras if not predefined."""
+    if sid in SITE_LINESTYLES:
+        return SITE_LINESTYLES[sid]
+    if not hasattr(get_site_linestyle, "_cache"):
+        get_site_linestyle._cache = {}
+    if sid not in get_site_linestyle._cache:
+        idx = len(get_site_linestyle._cache)
+        get_site_linestyle._cache[sid] = _EXTRA_LINESTYLES[idx % len(_EXTRA_LINESTYLES)]
+    return get_site_linestyle._cache[sid]
+
+def build_anon_labels(sites: list) -> dict:
+    """Dynamically assign 'Site N' labels to all discovered sites."""
+    return {site_dir.name: f"Site {i + 1}" for i, site_dir in enumerate(sites)}
 
 # Figures in display order: (filename, title)
 FIGURES = [
@@ -405,8 +453,10 @@ def _load_site_csv(sites: list[Path], rel_path: str) -> pd.DataFrame:
     return df
 
 
-def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str:
+def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel,
+                    labels=None) -> str:
     """Single-panel overlay: one line per site."""
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, rel_path)
     if df.empty:
         return f'<p class="missing">{title}: data not available.</p>'
@@ -417,9 +467,9 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
         sub = df[df["site_id"] == sid].sort_values(x_col)
         if sub.empty:
             continue
-        label = SITE_LABELS.get(sid, sid)
-        ax.plot(sub[x_col], sub[y_col], color=SITE_COLORS.get(sid, "gray"),
-                linestyle=SITE_LINESTYLES.get(sid, "-"),
+        label = labels.get(sid, sid)
+        ax.plot(sub[x_col], sub[y_col], color=get_site_color(sid),
+                linestyle=get_site_linestyle(sid),
                 label=label, linewidth=1.5)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -433,32 +483,36 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
     )
 
 
-def _build_dose_overlay(sites) -> str:
+def _build_dose_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/crrt_dose_hourly.csv",
         "hour", "median_dose",
         "CRRT Dose Over Time (Median)", "Hour", "Dose (mL/kg/hr)",
+        labels=labels,
     )
 
 
-def _build_map_overlay(sites) -> str:
+def _build_map_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/map_over_crrt.csv",
         "hour", "median",
         "MAP Over CRRT (Median)", "Hour", "MAP (mmHg)",
+        labels=labels,
     )
 
 
-def _build_nee_overlay(sites) -> str:
+def _build_nee_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/nee_over_crrt.csv",
         "hour", "median",
         "NEE Over CRRT (Median)", "Hour", "NEE (mcg/kg/min)",
+        labels=labels,
     )
 
 
-def _build_lab_overlay(sites) -> str:
+def _build_lab_overlay(sites, labels=None) -> str:
     """3x2 grid of lab panels."""
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/lab_distributions_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Lab distributions: data not available.</p>'
@@ -479,9 +533,9 @@ def _build_lab_overlay(sites) -> str:
             if sub.empty:
                 continue
             ax.plot(sub["hour"], sub["median"],
-                    color=SITE_COLORS.get(sid, "gray"),
-                    linestyle=SITE_LINESTYLES.get(sid, "-"),
-                    label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                    color=get_site_color(sid),
+                    linestyle=get_site_linestyle(sid),
+                    label=labels.get(sid, sid), linewidth=1.5)
         ax.set_title(lab_name.replace("_", " ").title())
         ax.set_xlabel("Hour")
         ax.set_ylabel("Median")
@@ -502,8 +556,9 @@ def _build_lab_overlay(sites) -> str:
     )
 
 
-def _build_respiratory_overlay(sites) -> str:
+def _build_respiratory_overlay(sites, labels=None) -> str:
     """Two-panel: FiO2 median + IMV proportion."""
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/respiratory_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Respiratory data not available.</p>'
@@ -518,9 +573,9 @@ def _build_respiratory_overlay(sites) -> str:
         if sub.empty:
             continue
         ax1.plot(sub["hour"], sub["median"],
-                 color=SITE_COLORS.get(sid, "gray"),
-                 linestyle=SITE_LINESTYLES.get(sid, "-"),
-                 label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                 color=get_site_color(sid),
+                 linestyle=get_site_linestyle(sid),
+                 label=labels.get(sid, sid), linewidth=1.5)
     ax1.set_title("FiO2 (Median)")
     ax1.set_xlabel("Hour")
     ax1.set_ylabel("FiO2")
@@ -535,9 +590,9 @@ def _build_respiratory_overlay(sites) -> str:
         if sub.empty:
             continue
         ax2.plot(sub["hour"], sub["imv_proportion"],
-                 color=SITE_COLORS.get(sid, "gray"),
-                 linestyle=SITE_LINESTYLES.get(sid, "-"),
-                 label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                 color=get_site_color(sid),
+                 linestyle=get_site_linestyle(sid),
+                 label=labels.get(sid, sid), linewidth=1.5)
     ax2.set_title("IMV Proportion")
     ax2.set_xlabel("Hour")
     ax2.set_ylabel("IMV %")
@@ -553,8 +608,9 @@ def _build_respiratory_overlay(sites) -> str:
     )
 
 
-def _build_patient_state_overlay(sites) -> str:
+def _build_patient_state_overlay(sites, labels=None) -> str:
     """Four-line overlay: prop_dead, prop_imv, prop_off_imv, prop_discharged."""
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/patient_state_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Patient state data not available.</p>'
@@ -567,7 +623,7 @@ def _build_patient_state_overlay(sites) -> str:
     ]
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    for idx, (col, label) in enumerate(metrics):
+    for idx, (col, metric_label) in enumerate(metrics):
         r, c = divmod(idx, 2)
         ax = axes[r][c]
         for site_dir in sites:
@@ -576,10 +632,10 @@ def _build_patient_state_overlay(sites) -> str:
             if sub.empty or col not in sub.columns:
                 continue
             ax.plot(sub["hour"], sub[col],
-                    color=SITE_COLORS.get(sid, "gray"),
-                    linestyle=SITE_LINESTYLES.get(sid, "-"),
-                    label=SITE_LABELS.get(sid, sid), linewidth=1.5)
-        ax.set_title(label)
+                    color=get_site_color(sid),
+                    linestyle=get_site_linestyle(sid),
+                    label=labels.get(sid, sid), linewidth=1.5)
+        ax.set_title(metric_label)
         ax.set_xlabel("Hour")
         ax.set_ylabel("Proportion (%)")
         ax.legend(fontsize=8)
@@ -597,19 +653,19 @@ def _build_patient_state_overlay(sites) -> str:
 # ── Build Overall Tab Content ─────────────────────────────────────────────
 
 
-def build_overall_content(sites: list[Path]) -> str:
-    """Assemble the full Overall tab HTML: CONSORT + Table 1 + overlay graphs."""
+def build_overall_content(sites: list[Path], labels=None) -> str:
+    """Assemble the full Overall tab HTML: CONSORT + overlay graphs."""
     print("  Building combined CONSORT diagram...")
     consort_html = build_combined_consort(sites)
 
     print("  Building overlay graphs...")
     graph_blocks = [
-        _build_dose_overlay(sites),
-        _build_lab_overlay(sites),
-        _build_map_overlay(sites),
-        _build_nee_overlay(sites),
-        _build_respiratory_overlay(sites),
-        _build_patient_state_overlay(sites),
+        _build_dose_overlay(sites, labels=labels),
+        _build_lab_overlay(sites, labels=labels),
+        _build_map_overlay(sites, labels=labels),
+        _build_nee_overlay(sites, labels=labels),
+        _build_respiratory_overlay(sites, labels=labels),
+        _build_patient_state_overlay(sites, labels=labels),
     ]
     graphs_html = "\n".join(graph_blocks)
 
@@ -627,21 +683,14 @@ def build_overall_content(sites: list[Path]) -> str:
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
-def main():
-    sites = discover_sites()
-    if not sites:
-        print("No sites found in", ROOT)
-        return
-
-    print(f"Found {len(sites)} sites: {[s.name for s in sites]}")
-
-    # Build tab buttons and tab content panels
+def build_dashboard(sites: list[Path], labels: dict, output_path: Path,
+                    include_site_tabs: bool = True) -> None:
+    """Build a complete dashboard HTML file with the given label mapping."""
     tab_buttons = []
     tab_panels = []
 
     # Overall tab (first, default active)
-    print("  Processing Overall tab...")
-    overall_content = build_overall_content(sites)
+    overall_content = build_overall_content(sites, labels=labels)
     tab_buttons.append(
         '<button class="tab-btn active" '
         "onclick=\"switchTab('overall')\" "
@@ -653,30 +702,49 @@ def main():
         '</div>'
     )
 
-    # Per-site tabs
-    for site_dir in sites:
-        site_id = site_dir.name
-        label = SITE_LABELS.get(site_id, site_id.replace("_", " ").title())
-
+    # Severity Analysis tab
+    print("  Building severity analysis tab...")
+    df_table1 = load_all_table1(sites)
+    if not df_table1.empty:
+        sev = extract_severity_data(df_table1)
+        severity_content = generate_severity_html(sev, labels=labels)
         tab_buttons.append(
-            f'<button class="tab-btn" '
-            f'onclick="switchTab(\'{site_id}\')" '
-            f'id="btn-{site_id}">{label}</button>'
+            '<button class="tab-btn" '
+            "onclick=\"switchTab('severity')\" "
+            'id="btn-severity">Severity Analysis</button>'
+        )
+        tab_panels.append(
+            '<div class="tab-panel" id="panel-severity" style="display:none;">'
+            f'{severity_content}'
+            '</div>'
         )
 
-        print(f"  Processing {label}...")
-        content = build_site_content(site_dir)
-        tab_panels.append(
-            f'<div class="tab-panel" id="panel-{site_id}" style="display:none;">'
-            f'{content}'
-            f'</div>'
-        )
+    # Per-site tabs
+    if include_site_tabs:
+        for site_dir in sites:
+            site_id = site_dir.name
+            label = labels.get(site_id, site_id.replace("_", " ").title())
+
+            tab_buttons.append(
+                f'<button class="tab-btn" '
+                f'onclick="switchTab(\'{site_id}\')" '
+                f'id="btn-{site_id}">{label}</button>'
+            )
+
+            content = build_site_content(site_dir)
+            tab_panels.append(
+                f'<div class="tab-panel" id="panel-{site_id}" style="display:none;">'
+                f'{content}'
+                f'</div>'
+            )
 
     tabs_bar = "\n".join(tab_buttons)
     panels = "\n".join(tab_panels)
 
-    # Site IDs for JS (include "overall")
-    all_tab_ids = ["overall"] + [s.name for s in sites]
+    # Site IDs for JS
+    all_tab_ids = ["overall", "severity"]
+    if include_site_tabs:
+        all_tab_ids += [s.name for s in sites]
     site_ids_js = ", ".join(f'"{tid}"' for tid in all_tab_ids)
 
     html = f"""<!DOCTYPE html>
@@ -783,9 +851,27 @@ def main():
 </body>
 </html>"""
 
-    OUTPUT.write_text(html, encoding="utf-8")
-    print(f"\nDashboard written to {OUTPUT}")
-    print(f"  File size: {OUTPUT.stat().st_size / 1024 / 1024:.1f} MB")
+    output_path.write_text(html, encoding="utf-8")
+    print(f"  Written to {output_path}")
+    print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.1f} MB")
+
+
+def main():
+    sites = discover_sites()
+    if not sites:
+        print("No sites found in", ROOT)
+        return
+
+    print(f"Found {len(sites)} sites: {[s.name for s in sites]}")
+
+    # Named dashboard (with per-site tabs)
+    print("\nBuilding named dashboard...")
+    build_dashboard(sites, SITE_LABELS, OUTPUT, include_site_tabs=True)
+
+    # Anonymized dashboard (Overall tab only, site labels replaced)
+    print("\nBuilding anonymized dashboard...")
+    anon_labels = build_anon_labels(sites)
+    build_dashboard(sites, anon_labels, OUTPUT_ANON, include_site_tabs=False)
 
 
 if __name__ == "__main__":
