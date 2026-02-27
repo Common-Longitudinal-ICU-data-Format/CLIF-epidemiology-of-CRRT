@@ -148,6 +148,14 @@ if (!all(required_vars %in% names(df))) {
   stop("Missing variables from data frame: ", paste(missing, collapse = ", "))
 }
 
+## ---- F. Collapse race into 3 categories ----
+df$race_category <- forcats::fct_collapse(
+  df$race_category,
+  "White"                  = "white",
+  "Black/African American" = "black or african american",
+  other_level = "Other"
+)
+
 # ================================ #
 # ---- 1. DATA CLEANING ----
 # ================================ #
@@ -159,13 +167,58 @@ cat(paste(rep("=", 80), collapse=""), "\n\n")
 ## ---- A. Define model variables for complete case analysis ----
 model_vars <- required_vars
 
-# Report missingness before imputation
+## ---- B. CRRT Dose Cutoff ----
+# =================================== #
+
+# CRRT dose cutoff (mL/kg/hr)
+dose_cutoff <- 30
+
+# Generate a label for filenames and titles
+dose_label <- paste0("CRRT_", dose_cutoff, "cutoff")
+
+cat("Using CRRT dose cutoff of:", dose_cutoff, "mL/kg/hr\n\n")
+
+## ---- C. CRRT Dose Outlier Exclusion ----
+# Adjustable cutoff — rows exceeding this are excluded                                                                                                                
+CRRT_DOSE_MAX <- 300  # mL/kg/hr                                                                                                                                      
+
+dose_cols <- c("crrt_dose_ml_kg_hr_0", "crrt_dose_0_12", "crrt_dose_12_24")                                                                                           
+dose_cols <- dose_cols[dose_cols %in% names(df)]
+
+outlier_mask <- rowSums(
+  sapply(dose_cols, function(col) {
+    !is.na(df[[col]]) & df[[col]] > CRRT_DOSE_MAX
+  })
+) > 0
+
+n_outliers <- sum(outlier_mask)
+if (n_outliers > 0) {
+  cat("Excluding", n_outliers, "rows with CRRT dose >", CRRT_DOSE_MAX, "mL/kg/hr\n")
+  cat("  Breakdown:\n")
+  for (col in dose_cols) {
+    n <- sum(!is.na(df[[col]]) & df[[col]] > CRRT_DOSE_MAX)
+    if (n > 0) cat("   ", col, ":", n, "rows\n")
+  }
+  df <- df[!outlier_mask, ]
+  cat("  Remaining rows:", nrow(df), "\n\n")
+} else {
+  cat("No CRRT dose outliers found (threshold:", CRRT_DOSE_MAX, "mL/kg/hr)\n\n")
+}
+
+## ---- D. Propensity Score Cutoffs for Truncation in SL Step 4A ----
+PS_FLOOR <- 0.00                                                                                                                                                    
+PS_CEIL  <- 1.00
+#^Currently not truncating at all since it did not help
+
+## ---- E. MICE Imputation and Missingness - df_complete ----
+
+### ---- I. Report missingness before imputation ----
 cat("Missing values per variable:\n")
 miss_counts <- colSums(is.na(df[, model_vars]))
 print(miss_counts[miss_counts > 0])
 cat("\n")
 
-# NOTE: 24h exclusion (died or off CRRT within 24h) now handled in step 04.
+# NOTE: 24h exclusion (died or off CRRT within 24h) now handled in Python step 04.
 
 # MICE imputation for remaining missingness (oxygenation index only)
 miss_counts <- colSums(is.na(df[, model_vars]))
@@ -174,13 +227,13 @@ n_incomplete <- sum(!complete.cases(df[, model_vars]))
 if (n_incomplete > 0) {
   cat("Imputing", n_incomplete, "incomplete rows via MICE (pmm, m=5) …\n")
   library(mice)
-
+  
   predictor_vars <- c("age_at_admission", "sex_category", "lactate_0",
-                       "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
-                       "imv_status_0", "crrt_dose_ml_kg_hr_0")
+                      "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
+                      "imv_status_0", "crrt_dose_ml_kg_hr_0")
   mice_vars <- unique(c(vars_with_na, intersect(predictor_vars, model_vars)))
   mice_vars <- mice_vars[mice_vars %in% names(df)]
-
+  
   imp <- mice(df[, mice_vars], m = 5, method = "pmm", seed = 42, maxit = 10, printFlag = FALSE)
   imputed_block <- complete(imp, 1)
   df_complete <- df
@@ -198,19 +251,11 @@ if (nrow(df_complete) < 50) {
   stop("Insufficient cases for modeling (n = ", nrow(df_complete), ")")
 }
 
-## ---- B. CRRT Dose Cutoff ----
-# =================================== #
+# ================================ #
+# ---- 2. DATA SUMMARIZATION ----
+# ================================ #
 
-# CRRT dose cutoff (mL/kg/hr)
-dose_cutoff <- 25
-
-# Generate a label for filenames and titles
-dose_label <- paste0("CRRT_", dose_cutoff, "cutoff")
-
-cat("Using CRRT dose cutoff of:", dose_cutoff, "mL/kg/hr\n\n")
-# =================================== #
-
-## ---- C. Calculate summary statistics ----
+## ---- A. Calculate summary statistics ----
 sample_chars <- data.frame(
   site_name = SITE_NAME,
   total_n = nrow(df_complete),
@@ -225,6 +270,15 @@ sample_chars <- data.frame(
   # Sex
   sex_male_n = sum(df_complete$sex_category == "male", na.rm = TRUE),
   sex_male_pct = mean(df_complete$sex_category == "male", na.rm = TRUE) * 100,
+  
+  # Weight (kg)                                                                                                                                                         
+  weight_mean = mean(df_complete$weight_kg, na.rm = TRUE),                                                                                                              
+  weight_sd = sd(df_complete$weight_kg, na.rm = TRUE),                                                                                                                  
+  weight_median = median(df_complete$weight_kg, na.rm = TRUE),                                                                                                          
+  weight_q25 = quantile(df_complete$weight_kg, 0.25, na.rm = TRUE),                                                                                                     
+  weight_q75 = quantile(df_complete$weight_kg, 0.75, na.rm = TRUE),
+  weight_min = min(df_complete$weight_kg, na.rm = TRUE),
+  weight_max = max(df_complete$weight_kg, na.rm = TRUE),
 
   # SOFA score (descriptive only)
   sofa_mean = mean(df_complete$sofa_total_0, na.rm = TRUE),
@@ -233,12 +287,32 @@ sample_chars <- data.frame(
   sofa_q25 = quantile(df_complete$sofa_total_0, 0.25, na.rm = TRUE),
   sofa_q75 = quantile(df_complete$sofa_total_0, 0.75, na.rm = TRUE),
 
-  # CRRT dose (modality independent, time t=0)
-  crrt_dose_mean = mean(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_sd = sd(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_median = median(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_q25 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.25, na.rm = TRUE),
-  crrt_dose_q75 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.75, na.rm = TRUE),
+  # CRRT dose at initiation (t=0)                                                                                                                                     
+  crrt_dose_t0_mean = mean(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),                                                                                           
+  crrt_dose_t0_sd = sd(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),                                                                                               
+  crrt_dose_t0_median = median(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),                                                                                       
+  crrt_dose_t0_q25 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.25, na.rm = TRUE),                                                                                  
+  crrt_dose_t0_q75 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.75, na.rm = TRUE),
+  crrt_dose_t0_min = min(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
+  crrt_dose_t0_max = max(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
+  
+  # CRRT dose mean 0-12h
+  crrt_dose_0_12_mean = mean(df_complete$crrt_dose_0_12, na.rm = TRUE),
+  crrt_dose_0_12_sd = sd(df_complete$crrt_dose_0_12, na.rm = TRUE),
+  crrt_dose_0_12_median = median(df_complete$crrt_dose_0_12, na.rm = TRUE),
+  crrt_dose_0_12_q25 = quantile(df_complete$crrt_dose_0_12, 0.25, na.rm = TRUE),
+  crrt_dose_0_12_q75 = quantile(df_complete$crrt_dose_0_12, 0.75, na.rm = TRUE),
+  crrt_dose_0_12_min = min(df_complete$crrt_dose_0_12, na.rm = TRUE),
+  crrt_dose_0_12_max = max(df_complete$crrt_dose_0_12, na.rm = TRUE),
+  
+  # CRRT dose mean 12-24h
+  crrt_dose_12_24_mean = mean(df_complete$crrt_dose_12_24, na.rm = TRUE),
+  crrt_dose_12_24_sd = sd(df_complete$crrt_dose_12_24, na.rm = TRUE),
+  crrt_dose_12_24_median = median(df_complete$crrt_dose_12_24, na.rm = TRUE),
+  crrt_dose_12_24_q25 = quantile(df_complete$crrt_dose_12_24, 0.25, na.rm = TRUE),
+  crrt_dose_12_24_q75 = quantile(df_complete$crrt_dose_12_24, 0.75, na.rm = TRUE),
+  crrt_dose_12_24_min = min(df_complete$crrt_dose_12_24, na.rm = TRUE),
+  crrt_dose_12_24_max = max(df_complete$crrt_dose_12_24, na.rm = TRUE),
 
   # Oxygenation Index (time t=0)
   oxygenation_index_mean   = mean(df_complete$oxygenation_index_0, na.rm = TRUE),
@@ -312,26 +386,95 @@ write.csv(sample_chars,
 
 cat("Sample characteristics saved.\n\n")
 
-## ---- D. Histogram CRRT dose ----
-crrt_dose_hist <- ggplot(df_complete, aes(x = crrt_dose_ml_kg_hr_0)) +
-  geom_histogram(binwidth = 5, color = "black", fill = "skyblue") +
+## ---- B. Histogram CRRT dose ----
+
+### ---- I. Separate Histograms of CRRT dose ----
+# Helper function to avoid repeating ggplot code
+plot_dose_hist <- function(data, dose_col, title_label) {                                                                                                             
+  ggplot(data, aes(x = .data[[dose_col]])) +
+    geom_histogram(binwidth = 5, color = "black", fill = "skyblue") +
+    geom_vline(xintercept = dose_cutoff, linetype = "dashed", linewidth = 1) +
+    labs(
+      title = paste0("Distribution of ", title_label,
+                     " (Cutoff = ", dose_cutoff, " mL/kg/hr)"),
+      x = "CRRT Dose (mL/kg/hr)",
+      y = "Count"
+    ) +
+    theme_bw(base_size = 12)
+}
+
+# 1. Initial dose (t=0)
+crrt_dose_hist_t0 <- plot_dose_hist(
+  df_complete, "crrt_dose_ml_kg_hr_0", "Initial CRRT Dose (t=0)")
+crrt_dose_hist_t0
+
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_hist_crrt_dose_t0.png")),
+       crrt_dose_hist_t0, width = 6, height = 4)
+
+# 2. Mean dose 0-12h
+crrt_dose_hist_0_12 <- plot_dose_hist(
+  df_complete, "crrt_dose_0_12", "Mean CRRT Dose (0-12h)")
+crrt_dose_hist_0_12
+
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_hist_crrt_dose_0_12.png")),
+       crrt_dose_hist_0_12, width = 6, height = 4)
+
+# 3. Mean dose 12-24h
+crrt_dose_hist_12_24 <- plot_dose_hist(
+  df_complete, "crrt_dose_12_24", "Mean CRRT Dose (12-24h)")
+crrt_dose_hist_12_24
+
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_hist_crrt_dose_12_24.png")),
+       crrt_dose_hist_12_24, width = 6, height = 4)
+
+cat("Saved all three dose histogram PNGs\n")
+
+### ---- II. Combined Histogram of CRRT dose ----
+# Pivot to long format for overlaid plotting                                                                                                                          
+dose_long <- df_complete %>%                                                                                                                                          
+  select(encounter_block, crrt_dose_ml_kg_hr_0, crrt_dose_0_12, crrt_dose_12_24) %>%                                                                                  
+  pivot_longer(                                                                                                                                                       
+    cols = c(crrt_dose_ml_kg_hr_0, crrt_dose_0_12, crrt_dose_12_24),                                                                                                  
+    names_to = "window",
+    values_to = "dose"
+  ) %>%
+  mutate(
+    window = factor(window,
+                    levels = c("crrt_dose_ml_kg_hr_0", "crrt_dose_0_12", "crrt_dose_12_24"),
+                    labels = c("At Initiation", "Mean 0-12h", "Mean 12-24h")
+    )
+  )
+
+crrt_dose_hist_combined <- ggplot(dose_long, aes(x = dose, fill = window)) +
+  geom_histogram(binwidth = 5, alpha = 0.5, position = "identity",
+                 color = "black", linewidth = 0.2) +
   geom_vline(xintercept = dose_cutoff, linetype = "dashed", linewidth = 1) +
-  # Line at cutoff
+  scale_fill_manual(values = c(
+    "At Initiation" = "#E69F00",
+    "Mean 0-12h"    = "#56B4E9",
+    "Mean 12-24h"   = "#009E73"
+  )) +
   labs(
-    title = paste0("Distribution of CRRT Dose (Cutoff = ", dose_cutoff, " mL/kg/hr)"),
+    title = paste0("CRRT Dose Distribution Over First 24h",
+                   " (Cutoff = ", dose_cutoff, " mL/kg/hr)"),
     x = "CRRT Dose (mL/kg/hr)",
-    y = "Count"
+    y = "Count",
+    fill = "Time Window"
   ) +
-  theme_bw(base_size = 12)
-crrt_dose_hist
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
 
-# Save histogram
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
-                                    "_hist_crrt_dose.png")),
-       crrt_dose_hist, width=6, height=4)
-cat("Saved histogram PNG\n")
+crrt_dose_hist_combined
 
-## ---- E. Designate High vs Low CRRT Dose ----
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_hist_crrt_dose_combined.png")),
+       crrt_dose_hist_combined, width = 8, height = 5)
+cat("Saved combined dose histogram PNG\n")
+
+## ---- C. Designate High vs Low CRRT Dose ----
 cat("Defining treatment groups using cutoff =", dose_cutoff, "mL/kg/hr\n")
 
 df_tte_bin <- df_complete %>%
@@ -366,7 +509,7 @@ write.csv(bin_dist, file.path(output_dir,
 cat("Saved bin distribution\n")
 
 
-## ---- F. Table 1 ----
+## ---- D. Table 1 ----
 
 ### ---- Modify df to include all three outcomes in one column
 df_tte_table1 <- df_tte_bin %>%
@@ -386,17 +529,8 @@ df_tte_table1 <- df_tte_bin %>%
     sex_category = factor(sex_category),
 
     #### ---- Clean race labels
-    race_category = forcats::fct_recode(
-      race_category,
-      "Black/African American" = "black or african american",
-      "White" = "white",
-      "Asian" = "asian",
-      "Native American" = "american indian or alaska native",
-      "Pacific Islander" = "native hawaiian or other pacific islander",
-      "Unknown" = "unknown",
-      "Other" = "other"
-    ),
-
+    race_category = factor(race_category),
+    
     #### ---- Clean CRRT modality labels
     crrt_mode_category = forcats::fct_recode(
       crrt_mode_category,
@@ -561,7 +695,7 @@ table1 <- df_tte_table1 %>%
   modify_header(label ~ "**Characteristic**") %>%
   modify_spanning_header(c("stat_1","stat_2") ~ "**CRRT dose group**") %>%
   modify_caption(
-    "**Table 1. Baseline Characteristics of the Cohort by CRRT Dose Group**")
+    "**Table 1. Baseline Characteristics of the Cohort by Initial CRRT Dose Group**")
 
 table1 <- table1 %>%
   collapse_binary_in_gtsummary(
@@ -580,7 +714,7 @@ gt::gtsave(
 
 
 # ============================================================= #
-# ---- 2. CREATING WIDE DATASET ----
+# ---- 3. CREATING WIDE DATASET ----
 # ============================================================= #
 
 ## ---- A. Making and visualizing wide MSM datasets ----
@@ -659,7 +793,7 @@ df_msm_long <- bind_rows(
 stopifnot(all(df_msm_long$A %in% c(0L, 1L)))
 
 # ============================================================= #
-# ---- 3. STABILIZED WEIGHTS WITH SUPERLEARNER ----
+# ---- 4. STABILIZED WEIGHTS WITH SUPERLEARNER ----
 # ============================================================= #
 
 ## ---- A. Propensity Weighting with SuperLearner  ----
@@ -724,6 +858,10 @@ for (tt in c(0, 12)) {
 
   p1_denom <- sl_fit_prob(dft, y = "A", xvars = denom_vars, sl_lib = sl_lib)
   p1_num   <- sl_fit_prob(dft, y = "A", xvars = num_vars,   sl_lib = sl_lib)
+  
+  ### ---- I. Truncate extreme propensity scores to enforce positivity  ----
+  # If unwanted, add #s 
+  p1_denom <- pmin(pmax(p1_denom, PS_FLOOR), PS_CEIL)
 
   # Probability of the observed treatment A
   p_obs_denom <- ifelse(dft$A == 1, p1_denom, 1 - p1_denom)
@@ -933,12 +1071,8 @@ bal_t12 <- run_balance_timepoint(
   dose_cutoff, pretty_names_msm, baseline_terms, tv_terms
 )
 
-### ---- V. Display Loveplots ----
-print(bal_t0$love_plot)
-print(bal_t12$love_plot)
-
 # ============================================================= #
-# ---- 4. MSM OUTCOME MODELS ----
+# ---- 5. MSM OUTCOME MODELS ----
 # ============================================================= #
 
 ## ---- A. Exposure history summary: number of high-dose intervals (0,1,2) ----
@@ -959,8 +1093,10 @@ df_out_msm <- df_msm_wide %>%
   )
 
 ## ---- B. Death cause-specific hazard ----
+# Doubly robust, adding weight, lactate, and bibcarb due to residual confounding
 fit_msm_cs_death <- coxph(
-  Surv(time_to_event_90d, death_event) ~ high_count,
+  Surv(time_to_event_90d, death_event) ~ high_count + 
+    weight_kg + lactate_0 + bicarbonate_0,
   data = df_out_msm,
   weights = w_msm,
   robust = TRUE,
@@ -968,8 +1104,10 @@ fit_msm_cs_death <- coxph(
 )
 
 ## ---- C. Discharge cause-specific hazard ----
+# Doubly robust, adding weight, lactate, and bibcarb due to residual confounding
 fit_msm_cs_disch <- coxph(
-  Surv(time_to_event_90d, disch_event) ~ high_count,
+  Surv(time_to_event_90d, disch_event) ~ high_count + 
+    weight_kg + lactate_0 + bicarbonate_0,
   data = df_out_msm,
   weights = w_msm,
   robust = TRUE,
@@ -1024,7 +1162,7 @@ write.csv(
 
 cat("Saved MSM Cox results CSV.\n")
 
-## ---- E. Table S2 ----
+## ---- E. Table S1 ----
 # Weighted cohort characteristics in the MSM pseudopopulation
 
 # New collapse function without p-values
@@ -1060,17 +1198,23 @@ collapse_binary_no_p <- function(tbl, variable, keep_level, label) {
 # Ensure df_out_msm contains: w_msm, high_count, A_0, A_12
 stopifnot(all(c("w_msm","high_count") %in% names(df_out_msm)))
 
-# Prepare MSM Table S2 dataframe (mirror Table 1 preprocessing)
-df_msm_tableS2 <- df_out_msm %>%
+# Prepare MSM Table S1 dataframe (mirror Table 1 preprocessing)
+df_msm_tableS1 <- df_out_msm %>%
   mutate(
-    # Regime summary groups (0/1/2 high-dose intervals over 0-24h)
+    # Regime summary groups (4 directional groups matching Section 6)
     crrt_group = factor(
-      high_count,
-      levels = c(0, 1, 2),
+      case_when(
+        A_0 == 0 & A_12 == 0 ~ "low_low",
+        A_0 == 0 & A_12 == 1 ~ "low_high",
+        A_0 == 1 & A_12 == 0 ~ "high_low",
+        A_0 == 1 & A_12 == 1 ~ "high_high"
+      ),
+      levels = c("low_low", "low_high", "high_low", "high_high"),
       labels = c(
-        paste0("Always low (<", dose_cutoff, " mL/kg/hr) [0/2 intervals high]"),
-        paste0("Mixed (", dose_cutoff, " cutoff) [1/2 intervals high]"),
-        paste0("Always high (>=", dose_cutoff, " mL/kg/hr) [2/2 intervals high]")
+        paste0("Low -> Low (<", dose_cutoff, " both)"),
+        paste0("Low -> High (escalated to >=", dose_cutoff, ")"),
+        paste0("High -> Low (de-escalated from >=", dose_cutoff, ")"),
+        paste0("High -> High (>=", dose_cutoff, " both)")
       )
     ),
 
@@ -1078,16 +1222,7 @@ df_msm_tableS2 <- df_out_msm %>%
     sex_category = factor(sex_category),
 
     # Clean race labels (same as Table 1)
-    race_category = forcats::fct_recode(
-      race_category,
-      "Black/African American" = "black or african american",
-      "White"                  = "white",
-      "Asian"                  = "asian",
-      "Native American"        = "american indian or alaska native",
-      "Pacific Islander"       = "native hawaiian or other pacific islander",
-      "Unknown"                = "unknown",
-      "Other"                  = "other"
-    ),
+    race_category = factor(race_category),
 
     # Clean CRRT modality labels (same as Table 1)
     crrt_mode_category = forcats::fct_recode(
@@ -1126,11 +1261,11 @@ df_msm_tableS2 <- df_out_msm %>%
 design_msm <- survey::svydesign(
   ids = ~1,
   weights = ~w_msm,
-  data = df_msm_tableS2
+  data = df_msm_tableS1
 )
 
-# Build type list for Table S2
-tableS2_type <- list(
+# Build type list for Table S1
+tableS1_type <- list(
   age_at_admission            ~ "continuous",
   sex_category                ~ "categorical",
   weight_kg                   ~ "continuous",
@@ -1147,12 +1282,12 @@ tableS2_type <- list(
   outcome_3cat                ~ "categorical"
 )
 for (v in cci_vars) {
-  tableS2_type[[length(tableS2_type) + 1]] <- as.formula(
+  tableS1_type[[length(tableS1_type) + 1]] <- as.formula(
     paste0(v, ' ~ "dichotomous"'))
 }
 
-# Build label list for Table S2
-tableS2_label <- list(
+# Build label list for Table S1
+tableS1_label <- list(
   age_at_admission             ~ "Age at Admission (years)",
   sex_category                 ~ "Female (%)",
   weight_kg                    ~ "Weight (kg)",
@@ -1169,164 +1304,46 @@ tableS2_label <- list(
   outcome_3cat                 ~ "90-day Outcome"
 )
 for (v in cci_vars) {
-  tableS2_label[[length(tableS2_label) + 1]] <- as.formula(
+  tableS1_label[[length(tableS1_label) + 1]] <- as.formula(
     paste0(v, ' ~ "', cci_labels[v], '"'))
 }
 
-# Build weighted Table S2
-tableS2_msm <- tbl_svysummary(
+# Build weighted Table S1
+tableS1_msm <- tbl_svysummary(
   design_msm,
   by = crrt_group,
-  type = tableS2_type,
+  type = tableS1_type,
   statistic = list(
     all_continuous()  ~ "{median} ({p25}, {p75})",
     all_categorical() ~ "{n} ({p}%)"
   ),
-  label = tableS2_label
+  label = tableS1_label
 ) %>%
   add_overall() %>%
   bold_labels() %>%
   modify_header(label ~ "**Characteristic**") %>%
   modify_spanning_header(
-    c("stat_1","stat_2","stat_3")
-    ~ "**CRRT dose strategy over first 24h**") %>%
+    c("stat_1","stat_2","stat_3","stat_4")
+    ~ "**CRRT Dose Strategy in the First 24h**") %>%
   modify_caption(
-    "**Table S2. Weighted Cohort Characteristics After MSM IPTW (SuperLearner)**")
+    "**Table S1. Weighted Cohort Characteristics After MSM IPTW (SuperLearner)**")
 
 # Collapse Sex row
-tableS2_msm <- tableS2_msm %>%
+tableS1_msm <- tableS1_msm %>%
   collapse_binary_no_p(
     variable   = "sex_category",
     keep_level = "female",
     label      = "Female (%)"
   )
 
-# Save Table S2
+# Save Table S1
 gt::gtsave(
-  as_gt(tableS2_msm),
-  filename = file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS2_MSM_IPTW.html"))
+  as_gt(tableS1_msm),
+  filename = file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS1_MSM_IPTW.html"))
 )
 
-cat("Saved MSM Table S2.\n")
+cat("Saved MSM Table S1.\n")
 
-# ============================================================= #
-  # ---- 5. WEIGHTED KAPLAN-MEIER (KM) CURVES ----
-# ============================================================= #
-
-## ---- A. Define the MSM strategy grouping ----
-
-### Choose between Option 1, 2, or 3
-
-# ___________________________________________________________________
-# OPTION 1 - 3 groups - 'Always low' / 'Mixed' / 'Always high'
-#df_plot_msm <- df_out_msm %>%
-#  mutate(
-#    crrt_strategy = factor(
-#      high_count,
-#      levels = c(0, 1, 2),
-#      labels = c(
-#        paste0("Always low (<", dose_cutoff, ")"),
-#        paste0("Mixed (1/2 intervals high)"),
-#        paste0("Always high (>=", dose_cutoff, ")")
-#      )
-#    )
-#  )
-
-# OPTION 2 - Two groups - 'Always low' / 'Always high'
-df_plot_msm <- df_out_msm %>%
-  filter(high_count %in% c(0, 2)) %>%
-  mutate(
-    crrt_strategy = factor(
-      high_count,
-      levels = c(0, 2),
-      labels = c(
-        paste0("Always low (<", dose_cutoff, ")"),
-        paste0("Always high (>=", dose_cutoff, ")")
-      )
-    )
-  )
-
-# OPTION 3 - 4 groups - directional dose strategies
-#df_plot_msm <- df_out_msm %>%
-#  mutate(
-#    crrt_strategy = factor(
-#      case_when(
-#        A_0 == 0 & A_12 == 0 ~ "low_low",
-#        A_0 == 0 & A_12 == 1 ~ "low_high",
-#        A_0 == 1 & A_12 == 0 ~ "high_low",
-#        A_0 == 1 & A_12 == 1 ~ "high_high"
-#      ),
-#      levels = c("low_low", "low_high", "high_low", "high_high"),
-#      labels = c(
-#        paste0("Low -> Low (<", dose_cutoff, " both)"),
-#        paste0("Low -> High (escalated to >=", dose_cutoff, ")"),
-#        paste0("High -> Low (de-escalated from >=", dose_cutoff, ")"),
-#        paste0("High -> High (>=", dose_cutoff, " both)")
-#      )
-#    )
-#  )
-# ___________________________________________________________________
-
-
-## ---- B. MSM Weighted Curves ----
-
-### ---- I. Death ----
-fit_km_msm_death <- survfit(
-  Surv(time_to_event_90d, outcome == 2) ~ crrt_strategy,
-  data = df_plot_msm,
-  weights = w_msm
-)
-
-plot_km_msm_death <- ggsurvplot(
-  fit_km_msm_death,
-  data = df_plot_msm,
-  fun = "event",
-  conf.int = FALSE,
-  legend.title = "CRRT Strategy (0-24h)",
-  legend.labs = levels(df_plot_msm$crrt_strategy),
-  ggtheme = theme_bw(base_size = 12) +
-    theme(plot.title = element_text(hjust = 0.5)),
-  title = "MSM Weighted Curve: Death",
-  xlab = "Time from CRRT Initiation (Days)",
-  ylab = "Cumulative Incidence (cause-specific)"
-)
-
-plot_km_msm_death
-
-ggsave(
-  file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_MSM_KM_Death.png")),
-  plot_km_msm_death$plot, width = 6, height = 4
-)
-
-### ---- II. Discharge ----
-fit_km_msm_disch <- survfit(
-  Surv(time_to_event_90d, outcome == 1) ~ crrt_strategy,
-  data = df_plot_msm,
-  weights = w_msm
-)
-
-plot_km_msm_disch <- ggsurvplot(
-  fit_km_msm_disch,
-  data = df_plot_msm,
-  fun = "event",
-  conf.int = FALSE,
-  legend.title = "CRRT Strategy (0-24h)",
-  legend.labs = levels(df_plot_msm$crrt_strategy),
-  ggtheme = theme_bw(base_size = 12) +
-    theme(plot.title = element_text(hjust = 0.5)),
-  title = "MSM Weighted Curve: Discharge",
-  xlab = "Time from CRRT Initiation (Days)",
-  ylab = "Cumulative Incidence (cause-specific)"
-)
-
-plot_km_msm_disch
-
-ggsave(
-  file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_MSM_KM_Discharge.png")),
-  plot_km_msm_disch$plot, width = 6, height = 4
-)
-
-cat("MSM weighted curves saved as PNGs.\n")
 
 # ============================================================= #
 # ---- 6. MSM-STANDARDIZED COMPETING RISK CIF CURVES ----
@@ -1335,10 +1352,10 @@ cat("MSM weighted curves saved as PNGs.\n")
 
 ## ---- A. Define the MSM strategy grouping ----
 
-### Choose between Option 1, 2, or 3
+### ---- I. Choose between Option 1, 2, or 3 ---- 
 
 # ___________________________________________________________________
-# OPTION 1 - 3 groups - 'Always low' / 'Mixed' / 'Always high'
+#  OPTION 1 - 3 groups - 'Always low' / 'Mixed' / 'Always high'
 #df_plot_msm <- df_out_msm %>%
 #  mutate(
 #    crrt_strategy = factor(
@@ -1353,46 +1370,72 @@ cat("MSM weighted curves saved as PNGs.\n")
 #  )
 
 # OPTION 2 - Two groups - 'Always low' / 'Always high'
-df_plot_msm <- df_out_msm %>%
-  filter(high_count %in% c(0, 2)) %>%
-  mutate(
-    crrt_strategy = factor(
-      high_count,
-      levels = c(0, 2),
-      labels = c(
-        paste0("Always low (<", dose_cutoff, ")"),
-        paste0("Always high (>=", dose_cutoff, ")")
-      )
-    )
-  )
-
-# OPTION 3 - 4 groups - directional dose strategies
 #df_plot_msm <- df_out_msm %>%
+#  filter(high_count %in% c(0, 2)) %>%
 #  mutate(
 #    crrt_strategy = factor(
-#      case_when(
-#        A_0 == 0 & A_12 == 0 ~ "low_low",
-#        A_0 == 0 & A_12 == 1 ~ "low_high",
-#        A_0 == 1 & A_12 == 0 ~ "high_low",
-#        A_0 == 1 & A_12 == 1 ~ "high_high"
-#      ),
-#      levels = c("low_low", "low_high", "high_low", "high_high"),
+#      high_count,
+#      levels = c(0, 2),
 #      labels = c(
-#        paste0("Low -> Low (<", dose_cutoff, " both)"),
-#        paste0("Low -> High (escalated to >=", dose_cutoff, ")"),
-#        paste0("High -> Low (de-escalated from >=", dose_cutoff, ")"),
-#        paste0("High -> High (>=", dose_cutoff, " both)")
+#        paste0("Always low (<", dose_cutoff, ")"),
+#        paste0("Always high (>=", dose_cutoff, ")")
 #      )
 #    )
 #  )
+
+# OPTION 3 - 4 groups - directional dose strategies
+df_plot_msm <- df_out_msm %>%
+  mutate(
+    crrt_strategy = factor(
+      case_when(
+        A_0 == 0 & A_12 == 0 ~ "low_low",
+        A_0 == 0 & A_12 == 1 ~ "low_high",
+        A_0 == 1 & A_12 == 0 ~ "high_low",
+        A_0 == 1 & A_12 == 1 ~ "high_high"
+      ),
+      levels = c("low_low", "low_high", "high_low", "high_high"),
+      labels = c(
+        paste0("Low -> Low (<", dose_cutoff, " both)"),
+        paste0("Low -> High (escalated to >=", dose_cutoff, ")"),
+        paste0("High -> Low (de-escalated from >=", dose_cutoff, ")"),
+        paste0("High -> High (>=", dose_cutoff, " both)")
+      )
+    )
+  )
 # ___________________________________________________________________
 
+### ---- II. Strategy group counts and outcomes ----                                                                                                                                
+df_4group_summary <- df_plot_msm %>%
+  group_by(crrt_strategy) %>%
+  summarise(
+    n_patients = n(),
+    deaths_90d = sum(outcome == 2),
+    discharged_90d = sum(outcome == 1),
+    censored_90d = sum(outcome == 0),
+    mortality_pct = round(mean(outcome == 2) * 100, 1),
+    discharge_pct = round(mean(outcome == 1) * 100, 1),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group_pct = round(n_patients / sum(n_patients) * 100, 1),
+    dose_cutoff_mlkghr = dose_cutoff
+  )
 
-## ---- B. Fit weighted cause-specific Cox models with strategy as predictor ----
+write.csv(
+  df_4group_summary,
+  file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                               "_MSM_4group_strategy_summary.csv")),
+  row.names = FALSE
+)
+cat("\n4-group strategy summary:\n")
+print(df_4group_summary)
+
+## ---- B. Fit weighted cause-specific Cox models ----
 
 # Death cause-specific hazard
 fit_cs_death_msm <- coxph(
-  Surv(time_to_event_90d, outcome == 2) ~ crrt_strategy,
+  Surv(time_to_event_90d, outcome == 2) ~ crrt_strategy + 
+    weight_kg + lactate_0 + bicarbonate_0,
   data = df_plot_msm,
   weights = w_msm,
   robust = TRUE,
@@ -1401,12 +1444,26 @@ fit_cs_death_msm <- coxph(
 
 # Discharge cause-specific hazard
 fit_cs_disch_msm <- coxph(
-  Surv(time_to_event_90d, outcome == 1) ~ crrt_strategy,
+  Surv(time_to_event_90d, outcome == 1) ~ crrt_strategy + 
+    weight_kg + lactate_0 + bicarbonate_0,
   data = df_plot_msm,
   weights = w_msm,
   robust = TRUE,
   cluster = encounter_block
 )
+
+cif_cox_results <- dplyr::bind_rows(
+  extract_cox_robust(fit_cs_death_msm, "MSM CIF Cause-Specific Cox - Death (4-group)"),
+  extract_cox_robust(fit_cs_disch_msm, "MSM CIF Cause-Specific Cox - Discharge (4-group)")
+)
+
+write.csv(
+  cif_cox_results,
+  file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_MSM_CIF_CauseSpecificCox_4group_results.csv")),
+  row.names = FALSE
+)
+
+cat("Saved CIF cause-specific Cox (4-group strategy) results CSV.\n")
 
 ## ---- C. Helpers to compute standardized CIFs from cause-specific hazards ----
 
@@ -1446,50 +1503,72 @@ compute_cifs_two_causes <- function(mult_death, mult_disch, tgrid, dH0_death, dH
 }
 
 # Build CIF curves for each strategy level
-build_standardized_cifs <- function(fit_death, fit_disch, strategy_levels) {
-
+build_standardized_cifs <- function(fit_death, fit_disch, strategy_levels, newdata) {
+  
   # Baseline cumulative hazards
-  bh_death <- basehaz(fit_death, centered = FALSE)  # time, hazard
+  bh_death <- basehaz(fit_death, centered = FALSE)
   bh_disch <- basehaz(fit_disch, centered = FALSE)
-
-  # Common time grid = union of baseline hazard times
+  
+  # Common time grid
   tgrid <- sort(unique(c(bh_death$time, bh_disch$time)))
   tgrid <- tgrid[tgrid >= 0]
-
+  
   # Baseline cumhaz on grid + increments
   H0_death <- cumhaz_at_grid(bh_death, tgrid)
   H0_disch <- cumhaz_at_grid(bh_disch, tgrid)
   dH0_death <- c(H0_death[1], diff(H0_death))
   dH0_disch <- c(H0_disch[1], diff(H0_disch))
-
-  # Coefs are relative to reference level
-  b_death <- coef(fit_death)
-  b_disch <- coef(fit_disch)
-
-  # Helper: multiplier exp(lp) for a given level, with ref=1
-  get_mult <- function(level, bvec, prefix = "crrt_strategy") {
-    ref_level <- strategy_levels[1]
-    if (level == ref_level) return(1)
-
-    # In coxph, factor terms usually appear like: crrt_strategyLevelName
-    nm <- paste0(prefix, level)
-    if (!(nm %in% names(bvec))) {
-      stop("Could not find coefficient '", nm, "' in model. Check factor level names.")
-    }
-    exp(as.numeric(bvec[[nm]]))
-  }
-
-  # Build CIFs for each level
+  
+  nt <- length(tgrid)
+  
+  # For each strategy level, compute population-averaged CIFs (g-computation)
   out <- lapply(strategy_levels, function(lv) {
-    mult_death <- get_mult(lv, b_death)
-    mult_disch <- get_mult(lv, b_disch)
-
-    compute_cifs_two_causes(mult_death, mult_disch, tgrid, dH0_death, dH0_disch) %>%
-      mutate(crrt_strategy = lv)
+    
+    # Counterfactual: assign everyone to this strategy, keep real covariates
+    cf_data <- newdata
+    cf_data$crrt_strategy <- factor(lv, levels = strategy_levels)
+    
+    # Individual linear predictors under this counterfactual strategy
+    lp_death <- predict(fit_death, newdata = cf_data, type = "lp")
+    lp_disch <- predict(fit_disch, newdata = cf_data, type = "lp")
+    
+    mult_death <- exp(lp_death)  # n-vector
+    mult_disch <- exp(lp_disch)  # n-vector
+    n <- length(mult_death)
+    
+    # Vectorized Aalen-Johansen across patients, sequential over time
+    S_prev <- rep(1, n)
+    cif_death_accum <- rep(0, n)
+    cif_disch_accum <- rep(0, n)
+    
+    avg_cif_death <- numeric(nt)
+    avg_cif_disch <- numeric(nt)
+    avg_surv      <- numeric(nt)
+    
+    for (j in seq_len(nt)) {
+      dH_death_j <- dH0_death[j] * mult_death
+      dH_disch_j <- dH0_disch[j] * mult_disch
+      
+      cif_death_accum <- cif_death_accum + S_prev * dH_death_j
+      cif_disch_accum <- cif_disch_accum + S_prev * dH_disch_j
+      S_prev <- S_prev * exp(-(dH_death_j + dH_disch_j))
+      
+      avg_cif_death[j] <- mean(cif_death_accum)
+      avg_cif_disch[j] <- mean(cif_disch_accum)
+      avg_surv[j]      <- mean(S_prev)
+    }
+    
+    tibble::tibble(
+      time = tgrid,
+      cif_death = avg_cif_death,
+      cif_disch = avg_cif_disch,
+      surv = avg_surv,
+      crrt_strategy = lv
+    )
   }) %>%
     dplyr::bind_rows() %>%
     mutate(crrt_strategy = factor(crrt_strategy, levels = strategy_levels))
-
+  
   out
 }
 
@@ -1499,24 +1578,117 @@ strategy_levels <- levels(df_plot_msm$crrt_strategy)
 cif_df <- build_standardized_cifs(
   fit_death = fit_cs_death_msm,
   fit_disch = fit_cs_disch_msm,
-  strategy_levels = strategy_levels
+  strategy_levels = strategy_levels,
+  newdata = df_plot_msm
 )
 
-## ---- E. Plot CIFs (Death + Discharge) ----
+## ---- E. Bootstrap CIs for standardized CIFs ----
+N_BOOT <- 200  # Adjustable
+set.seed(42)
+
+cat("Bootstrapping CIF confidence intervals (", N_BOOT, "replicates) …\n")
+
+# Common time grid from the point estimate
+tgrid_common <- sort(unique(cif_df$time))
+
+# Storage: list of CIF matrices per strategy
+boot_death <- list()
+boot_disch <- list()
+for (lv in strategy_levels) {
+  boot_death[[lv]] <- matrix(NA, nrow = N_BOOT, ncol = length(tgrid_common))
+  boot_disch[[lv]] <- matrix(NA, nrow = N_BOOT, ncol = length(tgrid_common))
+}
+
+unique_ids <- unique(df_plot_msm$encounter_block)
+n_ids <- length(unique_ids)
+
+for (b in seq_len(N_BOOT)) {
+  # Resample encounter_blocks with replacement
+  boot_ids <- sample(unique_ids, n_ids, replace = TRUE)
+  
+  # Build bootstrap dataset (handles duplicate IDs)
+  boot_df <- data.frame(encounter_block = boot_ids, .boot_idx = seq_along(boot_ids)) %>%
+    left_join(df_plot_msm, by = "encounter_block", relationship = "many-to-many")
+  
+  # Refit cause-specific Cox models
+  fit_b <- tryCatch({
+    fit_d <- coxph(
+      Surv(time_to_event_90d, outcome == 2) ~ crrt_strategy +
+        weight_kg + lactate_0 + bicarbonate_0,
+      data = boot_df, weights = w_msm, robust = FALSE
+    )
+    fit_c <- coxph(
+      Surv(time_to_event_90d, outcome == 1) ~ crrt_strategy +
+        weight_kg + lactate_0 + bicarbonate_0,
+      data = boot_df, weights = w_msm, robust = FALSE
+    )
+    list(death = fit_d, disch = fit_c)
+  }, error = function(e) NULL)
+  
+  if (is.null(fit_b)) next
+  
+  # Compute CIFs on the common grid
+  boot_cif <- tryCatch(
+    build_standardized_cifs(fit_b$death, fit_b$disch, strategy_levels, 
+                            newdata = boot_df),
+    error = function(e) NULL
+  )
+  
+  if (is.null(boot_cif)) next
+  
+  # Interpolate to common grid and store
+  for (lv in strategy_levels) {
+    lv_df <- boot_cif %>% filter(crrt_strategy == lv)
+    if (nrow(lv_df) == 0) next
+    boot_death[[lv]][b, ] <- approx(lv_df$time, lv_df$cif_death,
+                                    xout = tgrid_common, rule = 2)$y
+    boot_disch[[lv]][b, ] <- approx(lv_df$time, lv_df$cif_disch,
+                                    xout = tgrid_common, rule = 2)$y
+  }
+  
+  if (b %% 50 == 0) cat("  ", b, "/", N_BOOT, "\n")
+}
+
+# Compute pointwise 2.5% and 97.5% percentiles
+ci_list <- lapply(strategy_levels, function(lv) {
+  tibble(
+    time = tgrid_common,
+    crrt_strategy = lv,
+    cif_death_lower = apply(boot_death[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+    cif_death_upper = apply(boot_death[[lv]], 2, quantile, 0.975, na.rm = TRUE),
+    cif_disch_lower = apply(boot_disch[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+    cif_disch_upper = apply(boot_disch[[lv]], 2, quantile, 0.975, na.rm = TRUE)
+  )
+})
+ci_df <- bind_rows(ci_list) %>%
+  mutate(crrt_strategy = factor(crrt_strategy, levels = strategy_levels))
+
+# Merge CIs into the point estimate dataframe
+cif_df <- cif_df %>%
+  left_join(ci_df, by = c("time", "crrt_strategy"))
+
+cat("Bootstrap complete.\n")
+
+## ---- F. Plot CIFs (Death + Discharge) ----
 
 ### ---- I. Death CIF ----
-plot_cif_death <- ggplot(cif_df, aes(x = time, y = cif_death, color = crrt_strategy)) +
+plot_cif_death <- ggplot(cif_df, aes(x = time, y = cif_death, color = crrt_strategy,
+                                     fill = crrt_strategy)) +
+  geom_ribbon(aes(ymin = cif_death_lower, ymax = cif_death_upper),
+              alpha = 0.2, linewidth = 0) +
   geom_line(linewidth = 1) +
   theme_bw(base_size = 12) +
   theme(plot.title = element_text(hjust = 0.5),
         legend.position = "bottom",
         legend.text = element_text(size = 7)) +
-  guides(color = guide_legend(nrow = 2)) +
+  guides(color = guide_legend(nrow = 2),
+         fill = guide_legend(nrow = 2)) +
   labs(
     title = "MSM Standardized CIF: Death",
     x = "Time from CRRT Initiation (Days)",
     y = "Cumulative Incidence (Death)",
-    color = "CRRT Strategy (0-24h)"
+    color = "CRRT Strategy (0-24h)",
+    fill = "CRRT Strategy (0-24h)"
   )
 
 plot_cif_death
@@ -1527,18 +1699,23 @@ ggsave(
 )
 
 ### ---- II. Discharge CIF ----
-plot_cif_disch <- ggplot(cif_df, aes(x = time, y = cif_disch, color = crrt_strategy)) +
+plot_cif_disch <- ggplot(cif_df, aes(x = time, y = cif_disch, color = crrt_strategy,
+                                     fill = crrt_strategy)) +
+  geom_ribbon(aes(ymin = cif_disch_lower, ymax = cif_disch_upper),
+              alpha = 0.2, linewidth = 0) +
   geom_line(linewidth = 1) +
   theme_bw(base_size = 12) +
   theme(plot.title = element_text(hjust = 0.5),
         legend.position = "bottom",
         legend.text = element_text(size = 7)) +
-  guides(color = guide_legend(nrow = 2)) +
+  guides(color = guide_legend(nrow = 2),
+         fill = guide_legend(nrow = 2)) +
   labs(
     title = "MSM Standardized CIF: Discharge",
     x = "Time from CRRT Initiation (Days)",
     y = "Cumulative Incidence (Discharge)",
-    color = "CRRT Strategy (0-24h)"
+    color = "CRRT Strategy (0-24h)",
+    fill = "CRRT Strategy (0-24h)"
   )
 
 plot_cif_disch
@@ -1548,11 +1725,9 @@ ggsave(
   plot_cif_disch, width = 6, height = 4, dpi = 300
 )
 
-cat("MSM standardized CIF plots saved as PNGs.\n")
-
-
+cat("MSM standardized CIF plots with CIs saved as PNGs.\n")
 
 # ============================================================= #
-# ---- 7. FINISH! ----
+# ---- 8. FINISH! ----
 # ============================================================= #
 cat("Code run complete!\n")

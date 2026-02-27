@@ -416,6 +416,23 @@ wide_df = wide_df.merge(
 # Re-sort by hospitalization and time
 wide_df = wide_df.sort_values(['hospitalization_id', 'event_dttm']).reset_index(drop=True)
 
+# Apply CRRT outlier handling (same ranges as outlier_config.json)
+crrt_outlier_ranges = {
+    "crrt_blood_flow_rate": (150, 5000),
+    "crrt_dialysate_flow_rate": (0, 20000),
+    "crrt_pre_filter_replacement_fluid_rate": (0, 20000),
+    "crrt_post_filter_replacement_fluid_rate": (0, 20000),
+}
+for col, (lo, hi) in crrt_outlier_ranges.items():
+    if col in wide_df.columns:
+        n_before = wide_df[col].notna().sum()
+        wide_df.loc[wide_df[col] < lo, col] = np.nan
+        wide_df.loc[wide_df[col] > hi, col] = np.nan
+        n_after = wide_df[col].notna().sum()
+        n_removed = n_before - n_after
+        if n_removed > 0:
+            print(f"  CRRT outlier filter: {col} — {n_removed} values set to NaN")
+
 print(wide_df.columns)
 
 ################################################################################

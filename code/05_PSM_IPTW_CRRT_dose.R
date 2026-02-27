@@ -128,7 +128,7 @@ cci_labels <- c(
 # Make sure outcome and covariates exist
 required_vars <- c(
   "encounter_block",
-  "time_to_event_90d", "outcome",
+  "time_to_event_30d", "outcome",
   "age_at_admission", "sex_category", "race_category", "ethnicity_category",
   "crrt_mode_category", "weight_kg",
   "crrt_dose_ml_kg_hr_0",
@@ -146,6 +146,14 @@ if (!all(required_vars %in% names(df))) {
   missing <- setdiff(required_vars, names(df))
   stop("Missing variables from data frame: ", paste(missing, collapse = ", "))
 }
+
+## ---- F. Collapse race into 3 categories ----
+df$race_category <- forcats::fct_collapse(
+  df$race_category,
+  "White"                  = "white",
+  "Black" = "black or african american",
+  other_level = "Other"
+)
 
 # ================================ #
 # ---- 1. DATA CLEANING ----
@@ -195,7 +203,7 @@ if (nrow(df_complete) < 50) {
   stop("Insufficient cases for modeling (n = ", nrow(df_complete), ")")
 }
 
-## ---- A2. Build model covariate set and formulas dynamically ----
+## ---- B. Build model covariate set and formulas dynamically ----
 
 # All potential covariates for propensity / outcome models
 # NOTE: sofa_total_0 deliberately excluded from models
@@ -226,11 +234,11 @@ cat("PSM/IPTW formula:\n")
 print(psm_formula)
 cat("\n")
 
-## ---- B. CRRT Dose Cutoff ----
+## ---- C. CRRT Dose Cutoff ----
 # =================================== #
 
 # CRRT dose cutoff (mL/kg/hr)
-dose_cutoff <- 25
+dose_cutoff <- 30
 
 # Generate a label for filenames and titles
 dose_label <- paste0("CRRT_", dose_cutoff, "cutoff")
@@ -238,7 +246,7 @@ dose_label <- paste0("CRRT_", dose_cutoff, "cutoff")
 cat("Using CRRT dose cutoff of:", dose_cutoff, "mL/kg/hr\n\n")
 # =================================== #
 
-## ---- C. Calculate summary statistics ----
+## ---- D. Calculate summary statistics ----
 sample_chars <- data.frame(
   site_name = SITE_NAME,
   total_n = nrow(df_complete),
@@ -340,13 +348,14 @@ write.csv(sample_chars,
 
 cat("Sample characteristics saved.\n\n")
 
-## ---- D. Histogram CRRT dose ----
+## ---- E. Histogram CRRT dose ----
 crrt_dose_hist <- ggplot(df_complete, aes(x = crrt_dose_ml_kg_hr_0)) +
   geom_histogram(binwidth = 5, color = "black", fill = "skyblue") +
   geom_vline(xintercept = dose_cutoff, linetype = "dashed", linewidth = 1) +
       # Line at cutoff
   labs(
-    title = paste0("Distribution of CRRT Dose (Cutoff = ", dose_cutoff, " mL/kg/hr)"),
+    title = paste0("Distribution of Initial CRRT Dose (Cutoff = 
+                   ", dose_cutoff, " mL/kg/hr)"),
     x = "CRRT Dose (mL/kg/hr)",
     y = "Count"
   ) +
@@ -359,7 +368,7 @@ ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
        crrt_dose_hist, width=6, height=4)
 cat("Saved histogram PNG\n")
 
-## ---- E. Designate High vs Low CRRT Dose ----
+## ---- F. Designate High vs Low CRRT Dose ----
 cat("Defining treatment groups using cutoff =", dose_cutoff, "mL/kg/hr\n")
 
 df_tte_bin <- df_complete %>%
@@ -375,7 +384,7 @@ df_tte_bin <- df_complete %>%
     crrt_high, age_at_admission, sex_category, sofa_total_0,
     lactate_0, bicarbonate_0, potassium_0,
     oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
-    time_to_event_90d, outcome
+    time_to_event_30d, outcome
   )
 
 # Print Distribution
@@ -394,7 +403,7 @@ write.csv(bin_dist, file.path(output_dir,
 cat("Saved bin distribution\n")
 
 
-## ---- TABLE 1 ----
+## ---- G. TABLE 1 ----
 # =================================== #
 
 ### ---- Modify df to include all three outcomes in one column
@@ -415,16 +424,7 @@ df_tte_table1 <- df_tte_bin %>%
     sex_category = factor(sex_category),
 
     #### ---- Clean race labels
-    race_category = forcats::fct_recode(
-      race_category,
-      "Black/African American" = "black or african american",
-      "White" = "white",
-      "Asian" = "asian",
-      "Native American" = "american indian or alaska native",
-      "Pacific Islander" = "native hawaiian or other pacific islander",
-      "Unknown" = "unknown",
-      "Other" = "other"
-    ),
+    race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
     crrt_mode_category = forcats::fct_recode(
@@ -558,7 +558,7 @@ table1_label <- list(
   crrt_duration_days           ~ "Duration of CRRT (Days)",
   imv_duration_days            ~ "Duration of IMV (Days)",
   crrt_dose_ml_kg_hr_0         ~ "Initial CRRT Dose (mL/kg/hr)",
-  outcome_3cat                 ~ "90-day Outcome"
+  outcome_3cat                 ~ "30-day Outcome"
 )
 for (v in cci_vars) {
   table1_label[[length(table1_label) + 1]] <- as.formula(
@@ -609,8 +609,8 @@ gt::gtsave(
 # ---- 2. PROPENSITY SCORE MATCHING BRANCH ----
 # ============================================ #
 
-## ---- A. Making and visualizing PSM dataset ----
-### ---- PSM ----
+## ---- A. Making PSM dataset ----
+### ---- I. PSM ----
 m.out <- matchit(
   psm_formula,
   data = df_tte_bin,
@@ -635,7 +635,7 @@ write.csv(psm_counts, file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
           row.names = FALSE)
 cat("Saved PSM summaries\n")
 
-### ---- Save Matched Dataset ----
+### ---- II. Save Matched Dataset ----
 df_match <- match.data(m.out)
 
 # Pretty variable names for Love plot
@@ -661,7 +661,7 @@ pretty_names_loveplot <- c(
   cci_labels  # named vector appended here
 )
 
-### ---- Love Plot (SMD + variance ratio) ----
+## ---- B. Love Plot (SMD + variance ratio) ----
 plot_loveplot_psm <- love.plot(
   m.out,
   stat = c("m", "v"),
@@ -680,7 +680,7 @@ dev.off()
 
 cat("Saved Love plot for PSM as PNG\n")
 
-### ---- TABLE S1 (PSM) ----
+## ---- C. TABLE S1 (PSM) ----
 
 # New collapse function without p-values
 collapse_binary_no_p <- function(tbl, variable, keep_level, label) {
@@ -730,16 +730,7 @@ df_tte_tableS1 <- df_match %>%
     sex_category = factor(sex_category),
 
     # ---- Clean race labels
-    race_category = forcats::fct_recode(
-      race_category,
-      "Black/African American"  = "black or african american",
-      "White"                   = "white",
-      "Asian"                   = "asian",
-      "Native American"         = "american indian or alaska native",
-      "Pacific Islander"        = "native hawaiian or other pacific islander",
-      "Unknown"                 = "unknown",
-      "Other"                   = "other"
-    ),
+    race_category = factor(race_category),
 
     # ---- Clean CRRT modality labels
     crrt_mode_category = forcats::fct_recode(
@@ -805,14 +796,14 @@ gt::gtsave(
   )
 )
 
-## ---- B. Analysis of PSM ----
-### ---- Fine-Gray Analysis on Matched Patients ----
+## ---- D. Analysis of PSM ----
+### ---- I. Fine-Gray Analysis on Matched Patients ----
 
 # Matrix for treatment only (reference = low dose)
 X_trt <- model.matrix(~ crrt_high, df_match)[, -1, drop = FALSE]
 
 fg_death_psm <- cmprsk::crr(
-  ftime   = df_match$time_to_event_90d,
+  ftime   = df_match$time_to_event_30d,
   fstatus = df_match$outcome,
   cov1    = X_trt,
   failcode = 2,
@@ -820,7 +811,7 @@ fg_death_psm <- cmprsk::crr(
 )
 
 fg_disch_psm <- cmprsk::crr(
-  ftime   = df_match$time_to_event_90d,
+  ftime   = df_match$time_to_event_30d,
   fstatus = df_match$outcome,
   cov1    = X_trt,
   failcode = 1,
@@ -838,7 +829,7 @@ X_dr <- model.matrix(dr_formula, data = df_match)[, -1, drop = FALSE]
 colnames(X_dr) <- make.names(colnames(X_dr))  # SL.gam compatibility
 
 fg_death_psm_dr <- cmprsk::crr(
-  ftime   = df_match$time_to_event_90d,
+  ftime   = df_match$time_to_event_30d,
   fstatus = df_match$outcome,
   cov1    = X_dr,
   failcode = 2,
@@ -846,7 +837,7 @@ fg_death_psm_dr <- cmprsk::crr(
 )
 
 fg_disch_psm_dr <- cmprsk::crr(
-  ftime   = df_match$time_to_event_90d,
+  ftime   = df_match$time_to_event_30d,
   fstatus = df_match$outcome,
   cov1    = X_dr,
   failcode = 1,
@@ -881,82 +872,151 @@ write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
           row.names = FALSE)
 cat("Saved Fine Gray DR model results\n")
 
-### ---- CIF Curves ----
+### ---- II. CIF Curves ----
 
-# Fine Gray cumulative incidence estimate by group (death outcome failcode=2)
+# Helper: tidy a cuminc object into a data.frame          
+tidy_cuminc <- function(ci_obj) {                                                                                                                                     
+  bind_rows(lapply(names(ci_obj), function(name) {                                                                                                                    
+    if (!grepl(" ", name)) return(NULL)
+    data.frame(
+      group   = sub(" .*", "", name),
+      outcome = sub(".* ", "", name),
+      time    = ci_obj[[name]]$time,
+      est     = ci_obj[[name]]$est
+    )
+  }))
+}
+
+# Point-estimate CIF
 ci <- cuminc(
-  ftime = df_match$time_to_event_90d,
+  ftime   = df_match$time_to_event_30d,
   fstatus = df_match$outcome,
-  group = df_match$crrt_high,
+  group   = df_match$crrt_high,
   cencode = 0
 )
+tidy_ci <- tidy_cuminc(ci)
 
-# Convert cuminc object to tidy df for ggplot
-tidy_ci <- bind_rows(lapply(names(ci), function(name) {
-  if(!grepl(" ", name)) return(NULL) # skip variance elements etc
+# Common time grid for interpolation
+tgrid_psm <- sort(unique(tidy_ci$time))
+grp_levels <- levels(df_match$crrt_high)
 
-  data.frame(
-    group = sub(" .*", "", name),
-    outcome = sub(".* ", "", name),         # should be "2" or "1"
-    time = ci[[name]]$time,
-    est = ci[[name]]$est
+# Bootstrap CIs (200 replicates)
+N_BOOT_PSM <- 200
+set.seed(42)
+cat("Bootstrapping PSM CIF confidence intervals (", N_BOOT_PSM, "replicates) …\n")
+
+boot_death_psm <- boot_disch_psm <- list()
+for (lv in grp_levels) {
+  boot_death_psm[[lv]] <- matrix(NA, nrow = N_BOOT_PSM, ncol = length(tgrid_psm))
+  boot_disch_psm[[lv]] <- matrix(NA, nrow = N_BOOT_PSM, ncol = length(tgrid_psm))
+}
+
+for (b in seq_len(N_BOOT_PSM)) {
+  boot_idx <- sample(seq_len(nrow(df_match)), nrow(df_match), replace = TRUE)
+  boot_df  <- df_match[boot_idx, ]
+  
+  boot_ci <- tryCatch(
+    cuminc(ftime = boot_df$time_to_event_30d,
+           fstatus = boot_df$outcome,
+           group = boot_df$crrt_high,
+           cencode = 0),
+    error = function(e) NULL
   )
-}), .id = NULL)
+  if (is.null(boot_ci)) next
+  
+  boot_tidy <- tidy_cuminc(boot_ci)
+  
+  for (lv in grp_levels) {
+    # Death (outcome == 2)
+    lv_death <- boot_tidy %>% filter(group == lv, outcome == "2")
+    if (nrow(lv_death) > 0) {
+      boot_death_psm[[lv]][b, ] <- approx(lv_death$time, lv_death$est,
+                                          xout = tgrid_psm, method = "constant",
+                                          rule = 2, f = 0)$y
+    }
+    # Discharge (outcome == 1)
+    lv_disch <- boot_tidy %>% filter(group == lv, outcome == "1")
+    if (nrow(lv_disch) > 0) {
+      boot_disch_psm[[lv]][b, ] <- approx(lv_disch$time, lv_disch$est,
+                                          xout = tgrid_psm, method = "constant",
+                                          rule = 2, f = 0)$y
+    }
+  }
+  if (b %% 50 == 0) cat("  ", b, "/", N_BOOT_PSM, "\n")
+}
 
-# Filter only death (failcode 2)
-tidy_ci_death <- tidy_ci %>% filter(outcome == "2")
+# Compute pointwise 95% CIs and merge with point estimates
+ci_psm_list <- lapply(grp_levels, function(lv) {
+  tibble(
+    group = lv, time = tgrid_psm,
+    ci_death_lower = apply(boot_death_psm[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+    ci_death_upper = apply(boot_death_psm[[lv]], 2, quantile, 0.975, na.rm = TRUE),
+    ci_disch_lower = apply(boot_disch_psm[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+    ci_disch_upper = apply(boot_disch_psm[[lv]], 2, quantile, 0.975, na.rm = TRUE)
+  )
+})
+ci_psm_df <- bind_rows(ci_psm_list)
+
+# Join CIs onto point-estimate data
+tidy_ci_death <- tidy_ci %>%
+  filter(outcome == "2") %>%
+  left_join(ci_psm_df %>% select(group, time, ci_death_lower, ci_death_upper),
+            by = c("group", "time"))
+
+tidy_ci_discharge <- tidy_ci %>%
+  filter(outcome == "1") %>%
+  left_join(ci_psm_df %>% select(group, time, ci_disch_lower, ci_disch_upper),
+            by = c("group", "time"))
+
+cat("PSM bootstrap complete.\n")
 
 # Plot CIF for death
-plot_cif_death <- ggplot(tidy_ci_death, aes(x = time, y = est, color = group)) +
+plot_cif_death <- ggplot(tidy_ci_death, aes(x = time, y = est,
+                                            color = group, fill = group)) +
+  geom_ribbon(aes(ymin = ci_death_lower, ymax = ci_death_upper),
+              alpha = 0.2, linewidth = 0) +
   geom_step(linewidth = 1) +
   labs(
-    title = paste0("Cumulative Incidence of Death by CRRT Dose Group"),
+    title = "PSM Cumulative Incidence: Death",
     x = "Time from CRRT Initiation (Days)",
-    y = "Cumulative Incidence",
-    color = "CRRT Dose"
+    y = "Cumulative Incidence (Death)",
+    color = "CRRT Dose", fill = "CRRT Dose"
   ) +
-  theme_bw(base_size = 10) +
-  theme(
-    plot.title = element_text(hjust = 0.5)
-  )
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5))
 plot_cif_death
 
-# Save CIF for death
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
                                     "_cif_death.png")),
-       plot_cif_death, width=6, height=4)
+       plot_cif_death, width = 6, height = 4, dpi = 300)
 cat("Saved CIF for death as PNG\n")
-
-# Filter only discharge (failcode 1)
-tidy_ci_discharge <- tidy_ci %>% filter(outcome == "1")
 
 # Plot CIF for discharge
 plot_cif_discharge <- ggplot(tidy_ci_discharge, aes(x = time, y = est,
-                                                    color = group)) +
+                                                    color = group, fill = group)) +
+  geom_ribbon(aes(ymin = ci_disch_lower, ymax = ci_disch_upper),
+              alpha = 0.2, linewidth = 0) +
   geom_step(linewidth = 1) +
   labs(
-    title = paste0("Cumulative Incidence of Discharge by CRRT Dose Group"),
+    title = "PSM Cumulative Incidence: Discharge",
     x = "Time from CRRT Initiation (Days)",
-    y = "Cumulative Incidence",
-    color = "CRRT Dose"
+    y = "Cumulative Incidence (Discharge)",
+    color = "CRRT Dose", fill = "CRRT Dose"
   ) +
-  theme_bw(base_size = 10) +
-  theme(
-    plot.title = element_text(hjust = 0.5)
-  )
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5))
 plot_cif_discharge
 
-# Save CIF for discharge
 ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
                                     "_cif_discharge.png")),
-       plot_cif_discharge, width=6, height=4)
+       plot_cif_discharge, width = 6, height = 4, dpi = 300)
 cat("Saved CIF for discharge as PNG\n")
 
 # ============================================================= #
 # ---- 3. SUPER LEARNER PROPENSITY WEIGHTING (IPTW BRANCH) ----
 # ============================================================= #
 
-## ---- A. Making and visualizing IPTW dataset ----
+## ---- A. Making IPTW dataset ----
 
 ### Super Learner Propensity Weighting ###
 set.seed(42)
@@ -964,7 +1024,7 @@ set.seed(42)
 # Make SL copy of df_tte_bin to avoid overwriting the PSM path
 df_tte_sl <- df_tte_bin
 
-### ---- IPTW using Super Learner for propensity score estimation ----
+# IPTW using Super Learner for propensity score estimation
 # NOTE: If SL.gam fails due to spaces in race_category level names,
 #       either remove SL.gam from library or apply make.names() to data
 w_sl <- weightit(
@@ -980,7 +1040,7 @@ w_sl <- weightit(
 df_tte_sl$w  <- w_sl$weights
 df_tte_sl$ps <- w_sl$ps
 
-### ---- Overlap Diagnostics ----
+## ---- B. Overlap Diagnostics ----
 plot_sl_overlap <- ggplot(df_tte_sl, aes(x = ps, fill = crrt_high)) +
   geom_histogram(alpha=0.6, position="identity", bins=30) +
   theme_bw(base_size=10) +
@@ -1012,7 +1072,7 @@ write_csv(
                                "_SL_IPTW_ESS.csv"))
 )
 
-### ---- Love Plot (SMDs of covariates between groups) ----
+### ---- I. Love Plot (SMDs of covariates between groups) ----
 # Demonstrates balance of chosen covariates
 
 plot_loveplot_sl <- love.plot(
@@ -1041,7 +1101,7 @@ dev.off()
 
 cat("Saved Love Plot PNG\n")
 
-### ---- TABLE S2 (IPTW) ----
+### ---- II. TABLE S2 (IPTW) ----
 # Like Table 1 but median/IQR/% are weighted for the pseudopopulation
 
 # Prepare IPTW df (mirror Table 1 preprocessing)
@@ -1062,16 +1122,7 @@ df_tte_tableS2 <- df_tte_sl %>%
     sex_category = factor(sex_category),
 
     #### ---- Clean race labels
-    race_category = forcats::fct_recode(
-      race_category,
-      "Black/African American" = "black or african american",
-      "White"                  = "white",
-      "Asian"                  = "asian",
-      "Native American"        = "american indian or alaska native",
-      "Pacific Islander"       = "native hawaiian or other pacific islander",
-      "Unknown"                = "unknown",
-      "Other"                  = "other"
-    ),
+    race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
     crrt_mode_category = forcats::fct_recode(
@@ -1162,9 +1213,9 @@ gt::gtsave(
 #cat("Saved SL trimmed dataset\n\n")
 # ============================================================= #
 
-## ---- B. Analysis of IPTW ----
+## ---- C. Analysis of IPTW ----
 
-### ---- Marginal Structural Cause-Specific Cox Models (with IPTW) ----
+### ---- I. Marginal Structural Cause-Specific Cox Models (with IPTW) ----
 
 # References and RowIDs for sandwich SEs
 # Dynamically set the reference to the lower-dose group based on cutoff
@@ -1179,7 +1230,7 @@ cox_rhs <- paste(c("crrt_high", model_covariates), collapse = " + ")
 
 # Death cause-specific hazard (event code 2)
 fit_cs_death <- coxph(
-  as.formula(paste("Surv(time_to_event_90d, outcome == 2) ~", cox_rhs)),
+  as.formula(paste("Surv(time_to_event_30d, outcome == 2) ~", cox_rhs)),
   data = df_tte_sl,
   weights = w,          # IPTW (ATE) from SuperLearner
   robust = TRUE,
@@ -1189,7 +1240,7 @@ summary(fit_cs_death)
 
 # Discharge cause-specific hazard (event code 1)
 fit_cs_disch <- coxph(
-  as.formula(paste("Surv(time_to_event_90d, outcome == 1) ~", cox_rhs)),
+  as.formula(paste("Surv(time_to_event_30d, outcome == 1) ~", cox_rhs)),
   data = df_tte_sl,
   weights = w,
   robust = TRUE,
@@ -1197,7 +1248,7 @@ fit_cs_disch <- coxph(
 )
 summary(fit_cs_disch)
 
-#### ---- Extract IPTW Cox cause-specific HR results (full covariates) ----
+#### ---- II. Extract IPTW Cox cause-specific HR results (full covariates) ----
 
 extract_iptw_cox <- function(fit, label){
   s <- summary(fit)
@@ -1234,65 +1285,174 @@ write.csv(
 )
 cat("Saved full IPTW Cause-Specific Cox results.\n")
 
-### ---- Weighted KM Curves ----
+### ---- III. Standardized CIF Curves (competing risks) ----
 
-# Weighted KM for Death
-fit_km_death <- survfit(
-  Surv(time_to_event_90d, outcome == 2) ~ crrt_high,
-  data = df_tte_sl,
-  weights = w
+# Helper: carry-forward cumulative baseline hazard to a common grid
+cumhaz_at_grid <- function(basehaz_df, grid_time) {
+  idx <- findInterval(grid_time, basehaz_df$time)
+  out <- numeric(length(grid_time))
+  out[idx > 0] <- basehaz_df$hazard[idx[idx > 0]]
+  out
+}
+
+# Population-averaged standardized CIFs via g-computation
+build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, newdata) {
+  bh_death <- basehaz(fit_death, centered = FALSE)
+  bh_disch <- basehaz(fit_disch, centered = FALSE)
+  tgrid <- sort(unique(c(bh_death$time, bh_disch$time)))
+  tgrid <- tgrid[tgrid >= 0]
+  H0_death <- cumhaz_at_grid(bh_death, tgrid)
+  H0_disch <- cumhaz_at_grid(bh_disch, tgrid)
+  dH0_death <- c(H0_death[1], diff(H0_death))
+  dH0_disch <- c(H0_disch[1], diff(H0_disch))
+  nt <- length(tgrid)
+  
+  out <- lapply(trt_levels, function(lv) {
+    cf_data <- newdata
+    cf_data[[trt_var]] <- factor(lv, levels = trt_levels)
+    lp_death <- predict(fit_death, newdata = cf_data, type = "lp")
+    lp_disch <- predict(fit_disch, newdata = cf_data, type = "lp")
+    mult_death <- exp(lp_death)
+    mult_disch <- exp(lp_disch)
+    n <- length(mult_death)
+    S_prev <- rep(1, n)
+    cif_death_accum <- rep(0, n)
+    cif_disch_accum <- rep(0, n)
+    avg_cif_death <- numeric(nt)
+    avg_cif_disch <- numeric(nt)
+    avg_surv <- numeric(nt)
+    for (j in seq_len(nt)) {
+      dH_death_j <- dH0_death[j] * mult_death
+      dH_disch_j <- dH0_disch[j] * mult_disch
+      cif_death_accum <- cif_death_accum + S_prev * dH_death_j
+      cif_disch_accum <- cif_disch_accum + S_prev * dH_disch_j
+      S_prev <- S_prev * exp(-(dH_death_j + dH_disch_j))
+      avg_cif_death[j] <- mean(cif_death_accum)
+      avg_cif_disch[j] <- mean(cif_disch_accum)
+      avg_surv[j] <- mean(S_prev)
+    }
+    tibble::tibble(time = tgrid, cif_death = avg_cif_death,
+                   cif_disch = avg_cif_disch, surv = avg_surv,
+                   trt_group = lv)
+  }) %>%
+    dplyr::bind_rows() %>%
+    mutate(trt_group = factor(trt_group, levels = trt_levels))
+  
+  out
+}
+
+# Generate point-estimate CIFs
+  trt_levels <- levels(df_tte_sl$crrt_high)
+
+cif_df <- build_standardized_cifs(
+  fit_death = fit_cs_death,
+  fit_disch = fit_cs_disch,
+  trt_var = "crrt_high",
+  trt_levels = trt_levels,
+  newdata = df_tte_sl
 )
 
-plot_km_death <- ggsurvplot(
-  fit_km_death,
-  data = df_tte_sl,
-  fun = "event",  # plots cumulative incidence-like 1 - S(t)
-  conf.int = FALSE,
-  legend.title = "CRRT Dose",
-  legend.labs = levels(df_tte_sl$crrt_high),
-  ggtheme = theme_bw(base_size = 12) +
-    theme(
-      plot.title = element_text(hjust = 0.5)
-    ),
-  title = paste0("Weighted Kaplan-Meier: Death"),
-  xlab = "Time from CRRT Initiation (Days)",
-  ylab = "Cumulative Incidence"
-)
-plot_km_death
+# Bootstrap CIs (200 replicates)
+N_BOOT <- 200
+set.seed(42)
+cat("Bootstrapping IPTW CIF confidence intervals (", N_BOOT, "replicates) …\n")
 
-# Save as PNG
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
-                                    "_IPTW_KM_Death.png")),
-       plot_km_death$plot, width=6, height=4)
+tgrid_common <- sort(unique(cif_df$time))
+boot_death <- boot_disch <- list()
+for (lv in trt_levels) {
+  boot_death[[lv]] <- matrix(NA, nrow = N_BOOT, ncol = length(tgrid_common))
+  boot_disch[[lv]] <- matrix(NA, nrow = N_BOOT, ncol = length(tgrid_common))
+}
 
-# Weighted KM for Discharge
-fit_km_disch <- survfit(
-  Surv(time_to_event_90d, outcome == 1) ~ crrt_high,
-  data = df_tte_sl,
-  weights = w
-)
+unique_ids <- seq_len(nrow(df_tte_sl))  # row-level resampling (no cluster ID)
 
-plot_km_disch <- ggsurvplot(
-  fit_km_disch,
-  data = df_tte_sl,
-  fun = "event",
-  conf.int = FALSE,
-  legend.title = "CRRT Dose",
-  legend.labs = levels(df_tte_sl$crrt_high),
-  ggtheme = theme_bw(base_size = 12) +
-    theme(
-      plot.title = element_text(hjust = 0.5)
-    ),
-  title = paste0("Weighted Kaplan-Meier: Discharge"),
-  xlab = "Time from CRRT Initiation (Days)",
-  ylab = "Cumulative Incidence"
-)
-plot_km_disch
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
-                                    "_IPTW_KM_Discharge.png")),
-       plot_km_disch$plot, width=6, height=4)
+for (b in seq_len(N_BOOT)) {
+  boot_idx <- sample(unique_ids, length(unique_ids), replace = TRUE)
+  boot_df <- df_tte_sl[boot_idx, ]
+  boot_df$id <- seq_len(nrow(boot_df))
+  
+  fit_b <- tryCatch({
+    cox_rhs_boot <- paste(c("crrt_high", model_covariates), collapse = " + ")
+    fit_d <- coxph(
+      as.formula(paste("Surv(time_to_event_30d, outcome == 2) ~", cox_rhs_boot)),
+      data = boot_df, weights = w, robust = FALSE
+    )
+    fit_c <- coxph(
+      as.formula(paste("Surv(time_to_event_30d, outcome == 1) ~", cox_rhs_boot)),
+      data = boot_df, weights = w, robust = FALSE
+    )
+    list(death = fit_d, disch = fit_c)
+  }, error = function(e) NULL)
+  
+  if (is.null(fit_b)) next
+  
+  boot_cif <- tryCatch(
+    build_standardized_cifs(fit_b$death, fit_b$disch, "crrt_high",
+                            trt_levels, newdata = boot_df),
+    error = function(e) NULL
+  )
+  if (is.null(boot_cif)) next
+  
+  for (lv in trt_levels) {
+    lv_df <- boot_cif %>% filter(trt_group == lv)
+    if (nrow(lv_df) == 0) next
+    boot_death[[lv]][b, ] <- approx(lv_df$time, lv_df$cif_death,
+                                    xout = tgrid_common, rule = 2)$y
+    boot_disch[[lv]][b, ] <- approx(lv_df$time, lv_df$cif_disch,
+                                    xout = tgrid_common, rule = 2)$y
+  }
+  if (b %% 50 == 0) cat("  ", b, "/", N_BOOT, "\n")
+}
 
-cat("Weighted KM plots saved as PNGs.\n")
+# Compute 95% CIs
+ci_list <- lapply(trt_levels, function(lv) {
+  tibble(time = tgrid_common, trt_group = lv,
+         cif_death_lower = apply(boot_death[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+         cif_death_upper = apply(boot_death[[lv]], 2, quantile, 0.975, na.rm = TRUE),
+         cif_disch_lower = apply(boot_disch[[lv]], 2, quantile, 0.025, na.rm = TRUE),
+         cif_disch_upper = apply(boot_disch[[lv]], 2, quantile, 0.975, na.rm = TRUE))
+})
+ci_df <- bind_rows(ci_list) %>%
+  mutate(trt_group = factor(trt_group, levels = trt_levels))
+
+cif_df <- cif_df %>% left_join(ci_df, by = c("time", "trt_group"))
+cat("Bootstrap complete.\n")
+
+# Plot CIF Death
+plot_cif_death <- ggplot(cif_df, aes(x = time, y = cif_death,
+                                     color = trt_group, fill = trt_group)) +
+  geom_ribbon(aes(ymin = cif_death_lower, ymax = cif_death_upper),
+              alpha = 0.2, linewidth = 0) +
+  geom_line(linewidth = 1) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "IPTW Standardized CIF: Death",
+       x = "Time from CRRT Initiation (Days)",
+       y = "Cumulative Incidence (Death)",
+       color = "CRRT Dose", fill = "CRRT Dose")
+plot_cif_death
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_IPTW_CIF_Death.png")),
+       plot_cif_death, width = 6, height = 4, dpi = 300)
+
+# Plot CIF Discharge
+plot_cif_disch <- ggplot(cif_df, aes(x = time, y = cif_disch,
+                                     color = trt_group, fill = trt_group)) +
+  geom_ribbon(aes(ymin = cif_disch_lower, ymax = cif_disch_upper),
+              alpha = 0.2, linewidth = 0) +
+  geom_line(linewidth = 1) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "IPTW Standardized CIF: Discharge",
+       x = "Time from CRRT Initiation (Days)",
+       y = "Cumulative Incidence (Discharge)",
+       color = "CRRT Dose", fill = "CRRT Dose")
+plot_cif_disch
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_IPTW_CIF_Discharge.png")),
+       plot_cif_disch, width = 6, height = 4, dpi = 300)
+
+cat("IPTW standardized CIF plots with CIs saved as PNGs.\n")
 
 # ============================================================= #
 # ----  4. MODEL COMPARISON - PSM FG vs IPTW Cox ----
