@@ -5,8 +5,10 @@ Output: all_site_data/combined_dashboard.html
 """
 
 import base64
+import importlib
 import io
 import re
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -16,6 +18,13 @@ from matplotlib.patches import FancyBboxPatch
 import numpy as np
 import pandas as pd
 
+# Import 05_severity_analysis (numeric prefix requires importlib)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+_sev_mod = importlib.import_module("05_severity_analysis")
+load_all_table1 = _sev_mod.load_all_table1
+extract_severity_data = _sev_mod.extract_severity_data
+generate_severity_html = _sev_mod.generate_severity_html
+
 # ── Config ──────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent.parent / "all_site_data"
@@ -23,24 +32,45 @@ OUTPUT = ROOT / "combined_dashboard.html"
 
 # Display names for sites (fallback: folder name title-cased)
 SITE_LABELS = {
+    "emory": "Emory",
+    "hopkins": "Hopkins",
     "mimic_iv": "MIMIC-IV",
     "nu": "Northwestern",
+    "ohsu": "OHSU",
     "rush": "Rush",
     "ucmc": "UChicago",
+    "ucsf": "UCSF",
+    "umich": "UMichigan",
+    "umn": "UMN",
+    "upenn": "UPenn",
 }
 
-# Colorblind-safe palette (Wong) + distinct line styles per site
+# 11 distinct colors + line styles for all sites
 SITE_COLORS = {
+    "emory": "#E69F00",      # orange
+    "hopkins": "#56B4E9",    # sky blue
     "mimic_iv": "#0072B2",   # blue
-    "nu": "#E69F00",         # orange
-    "rush": "#009E73",       # green
-    "ucmc": "#CC79A7",       # pink
+    "nu": "#009E73",         # green
+    "ohsu": "#D55E00",       # vermilion
+    "rush": "#CC79A7",       # pink
+    "ucmc": "#000000",       # black
+    "ucsf": "#F0E442",       # yellow
+    "umich": "#8B4513",      # brown
+    "umn": "#882255",        # wine
+    "upenn": "#44AA99",      # teal
 }
 SITE_LINESTYLES = {
+    "emory": "-",
+    "hopkins": "--",
     "mimic_iv": "-",
     "nu": "--",
+    "ohsu": "-.",
     "rush": "-.",
-    "ucmc": ":",
+    "ucmc": "-",
+    "ucsf": ":",
+    "umich": ":",
+    "umn": "-.",
+    "upenn": "--",
 }
 
 # Figures in display order: (filename, title)
@@ -160,45 +190,54 @@ def build_combined_consort(sites: list[Path]) -> str:
     # Sum numeric values by counter; percentages will be recomputed
     summed = df.groupby("counter")["value"].sum().to_dict()
 
-    # Derive step counts (same logic as create_consort_diagram_straight_flow)
+    # Derive step counts
     get = lambda k, d=0: summed.get(k, d)
     start_n = get("1b_after_stitching", get("1_adult_hospitalizations"))
     n_crrt = get("2_crrt_blocks")
     n_no_esrd = get("3_encounter_blocks_without_esrd", n_crrt)
-    n_with_weight = get("4_encounter_blocks_with_weight", n_no_esrd)
-    n_with_settings = get("5_encounter_blocks_with_crrt_settings", n_with_weight)
-    n_with_labs = get("6_encounter_blocks_with_required_labs", n_with_settings)
 
-    # Build steps
+    # Use Table 1 n_hospitalizations (Baseline) as the final analytical cohort
+    t1_frames = []
+    for site_dir in sites:
+        csv_path = site_dir / "final" / "table1_crrt_long.csv"
+        if csv_path.exists():
+            t1_frames.append(pd.read_csv(csv_path))
+    if t1_frames:
+        t1_df = pd.concat(t1_frames, ignore_index=True)
+        n_final = int(
+            t1_df[(t1_df["variable"] == "n_hospitalizations")
+                   & (t1_df["subgroup"] == "Baseline")]["n"].sum()
+        )
+    else:
+        n_final = int(get("6_encounter_blocks_with_required_labs", n_no_esrd))
+
+    # Build steps: No CRRT → ESRD → combined missing data
     steps = []
     parent = start_n
     for remaining_n, label, excl_label in [
         (n_crrt, "CRRT hospitalizations", "Excluded: No CRRT"),
         (n_no_esrd, "After ESRD exclusion", "Excluded: ESRD diagnosis"),
-        (n_with_weight, "With documented weight", "Excluded: Missing weight"),
-        (n_with_settings, "With CRRT settings", "Excluded: Missing CRRT settings"),
-        (n_with_labs, "With required labs", "Excluded: Missing required labs"),
+        (n_final, "Analytical cohort", "Excluded: Missing data\n(weight, CRRT settings, or labs)"),
     ]:
         excluded = max(parent - remaining_n, 0)
         if excluded > 0 or remaining_n > 0:
             steps.append((remaining_n, label, excluded, excl_label, parent))
         if excluded > 0:
             parent = remaining_n
-        # If excluded == 0, skip the step but keep parent unchanged
         elif remaining_n == parent:
-            steps.pop()  # remove the just-added zero-exclusion step
+            steps.pop()
 
     # Draw figure
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(10, 6))
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    box_h, box_w = 0.08, 0.40
+    box_h, box_w = 0.10, 0.40
     x_main_start = 0.05
     x_main_center = x_main_start + box_w / 2
     x_excl_start = 0.55
-    v_spacing = 0.14
+    v_spacing = 0.20
     excl_arrow_gap = 0.015
 
     def draw_box(x, y, w, h, text, fontsize=11):
@@ -240,24 +279,6 @@ def build_combined_consort(sites: list[Path]) -> str:
                          xytext=(x_main_center, mid_y),
                          arrowprops=arrow_props, annotation_clip=False)
 
-    # Analytical notes
-    n_aki = get("6_encounter_blocks_with_AKI_no_esrd", 0)
-    n_hosp_no_icu = get("6_number_hosp_without_ICU_stay", 0)
-    if n_with_labs > 0:
-        pct_aki = 100.0 * n_aki / n_with_labs
-        n_with_icu = int(n_with_labs - n_hosp_no_icu)
-        pct_icu = 100.0 * n_with_icu / n_with_labs
-        note = (
-            f"AKI codes present (non-ESRD): {int(n_aki):,} / {int(n_with_labs):,} ({pct_aki:.1f}%)\n"
-            f"CRRT hospitalizations with ICU admission: {n_with_icu:,} / {int(n_with_labs):,} ({pct_icu:.1f}%)"
-        )
-        note_rect = FancyBboxPatch(
-            (0.05, 0.005), 0.89, 0.085, boxstyle="round,pad=0.01",
-            linewidth=1, edgecolor="#bbbbbb", facecolor="#f6f6ee", zorder=0,
-        )
-        ax.add_patch(note_rect)
-        ax.text(0.5, 0.05, note, ha="center", va="center", fontsize=11)
-
     data_uri = fig_to_data_uri(fig)
     return (
         f'<div class="figure-block">'
@@ -268,6 +289,17 @@ def build_combined_consort(sites: list[Path]) -> str:
 
 
 # ── Combined Table 1 ─────────────────────────────────────────────────────
+
+
+CRRT_DETAIL_VARS = {
+    "last_crrt_mode",
+    "crrt_dose_ml_kg_hr",
+    "blood_flow_rate",
+    "pre_filter_replacement_fluid_rate",
+    "post_filter_replacement_fluid_rate",
+    "dialysate_flow_rate",
+    "ultrafiltration_out",
+}
 
 
 def build_combined_table1(sites: list[Path]) -> str:
@@ -282,10 +314,13 @@ def build_combined_table1(sites: list[Path]) -> str:
 
     df = pd.concat(frames, ignore_index=True)
 
+    # Skip CRRT detail rows (keep Duration of CRRT)
+    df = df[~df["variable"].str.split(",").str[0].isin(CRRT_DETAIL_VARS)]
+
     # Aggregate by (variable, level, subgroup, stat_type)
     group_cols = ["variable", "level", "subgroup", "stat_type"]
     rows = []
-    for key, grp in df.groupby(group_cols, dropna=False):
+    for key, grp in df.groupby(group_cols, dropna=False, sort=False):
         variable, level, subgroup, stat_type = key
         if stat_type == "count":
             rows.append({
@@ -424,8 +459,9 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend()
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=len(sites), fontsize=9)
     ax.grid(True, alpha=0.3)
+    fig.subplots_adjust(bottom=0.2)
     data_uri = fig_to_data_uri(fig)
     return (
         f'<div class="figure-block"><h3>{title}</h3>'
@@ -485,7 +521,6 @@ def _build_lab_overlay(sites) -> str:
         ax.set_title(lab_name.replace("_", " ").title())
         ax.set_xlabel("Hour")
         ax.set_ylabel("Median")
-        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     # Hide unused subplots
@@ -494,6 +529,10 @@ def _build_lab_overlay(sites) -> str:
         axes[r][c].set_visible(False)
 
     fig.suptitle("Lab Distributions Over CRRT (Median)", fontsize=14, y=1.01)
+    # Shared legend at figure bottom
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
+               bbox_to_anchor=(0.5, -0.04))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -524,7 +563,6 @@ def _build_respiratory_overlay(sites) -> str:
     ax1.set_title("FiO2 (Median)")
     ax1.set_xlabel("Hour")
     ax1.set_ylabel("FiO2")
-    ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
 
     # Panel 2: IMV proportion
@@ -541,10 +579,12 @@ def _build_respiratory_overlay(sites) -> str:
     ax2.set_title("IMV Proportion")
     ax2.set_xlabel("Hour")
     ax2.set_ylabel("IMV %")
-    ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
     fig.suptitle("Respiratory Over CRRT", fontsize=14, y=1.02)
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
+               bbox_to_anchor=(0.5, -0.06))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -582,10 +622,12 @@ def _build_patient_state_overlay(sites) -> str:
         ax.set_title(label)
         ax.set_xlabel("Hour")
         ax.set_ylabel("Proportion (%)")
-        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     fig.suptitle("Patient State Over CRRT Course", fontsize=14, y=1.01)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
+               bbox_to_anchor=(0.5, -0.04))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -602,6 +644,9 @@ def build_overall_content(sites: list[Path]) -> str:
     print("  Building combined CONSORT diagram...")
     consort_html = build_combined_consort(sites)
 
+    print("  Building combined Table 1...")
+    table1_html = build_combined_table1(sites)
+
     print("  Building overlay graphs...")
     graph_blocks = [
         _build_dose_overlay(sites),
@@ -617,6 +662,10 @@ def build_overall_content(sites: list[Path]) -> str:
         <div class="section">
             <h2>CONSORT/STROBE Diagram</h2>
             {consort_html}
+        </div>
+        <div class="section">
+            <h2>Table 1 (All Sites Combined)</h2>
+            {table1_html}
         </div>
         <div class="section">
             <h2>Figures (Site Overlay)</h2>
@@ -653,6 +702,23 @@ def main():
         '</div>'
     )
 
+    # Severity Analysis tab
+    print("  Building severity analysis tab...")
+    df_table1 = load_all_table1(sites)
+    if not df_table1.empty:
+        sev = extract_severity_data(df_table1)
+        severity_content = generate_severity_html(sev, labels=SITE_LABELS)
+        tab_buttons.append(
+            '<button class="tab-btn" '
+            "onclick=\"switchTab('severity')\" "
+            'id="btn-severity">Severity Analysis</button>'
+        )
+        tab_panels.append(
+            '<div class="tab-panel" id="panel-severity" style="display:none;">'
+            f'{severity_content}'
+            '</div>'
+        )
+
     # Per-site tabs
     for site_dir in sites:
         site_id = site_dir.name
@@ -675,8 +741,8 @@ def main():
     tabs_bar = "\n".join(tab_buttons)
     panels = "\n".join(tab_panels)
 
-    # Site IDs for JS (include "overall")
-    all_tab_ids = ["overall"] + [s.name for s in sites]
+    # Site IDs for JS (include "overall" and "severity")
+    all_tab_ids = ["overall", "severity"] + [s.name for s in sites]
     site_ids_js = ", ".join(f'"{tid}"' for tid in all_tab_ids)
 
     html = f"""<!DOCTYPE html>

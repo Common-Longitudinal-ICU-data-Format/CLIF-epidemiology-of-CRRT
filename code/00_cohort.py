@@ -1881,7 +1881,9 @@ print(f"   30-day deaths: {death_info['death_30d'].sum():,} ({death_info['death_
 # 6. COMBINE ALL OUTCOMES
 # ============================================================================
 print("\n6. Combining all outcomes...")
-outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
+# Deduplicate to one row per encounter_block (stitched hospitalizations share an encounter_block)
+cohort_base = cohort_df[['hospitalization_id', 'encounter_block']].drop_duplicates(subset='encounter_block', keep='first')
+outcomes_df = cohort_base.merge(
     icu_los_summary, on='encounter_block', how='left'
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
