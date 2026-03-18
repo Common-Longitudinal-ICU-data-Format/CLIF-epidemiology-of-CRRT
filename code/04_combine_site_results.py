@@ -45,6 +45,12 @@ SITE_LABELS = {
     "upenn": "UPenn",
 }
 
+# Anonymized labels: alphabetical by real name → "Site 1", "Site 2", …
+ANON_LABELS = {
+    k: f"Site {i}"
+    for i, k in enumerate(sorted(SITE_LABELS, key=lambda k: SITE_LABELS[k]), 1)
+}
+
 # 11 distinct colors + line styles for all sites
 SITE_COLORS = {
     "emory": "#E69F00",      # orange
@@ -383,7 +389,7 @@ def build_combined_table1(sites: list[Path]) -> str:
 
         # Clean display name
         disp_var = variable.replace("_", " ") if variable else ""
-        disp_level = str(level) if pd.notna(level) else ""
+        disp_level = str(level) if pd.notna(level) else "Missing"
 
         cells = []
         for sg in subgroups:
@@ -440,8 +446,11 @@ def _load_site_csv(sites: list[Path], rel_path: str) -> pd.DataFrame:
     return df
 
 
-def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str:
+def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel,
+                    labels=None) -> str:
     """Single-panel overlay: one line per site."""
+    if labels is None:
+        labels = SITE_LABELS
     df = _load_site_csv(sites, rel_path)
     if df.empty:
         return f'<p class="missing">{title}: data not available.</p>'
@@ -452,7 +461,7 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
         sub = df[df["site_id"] == sid].sort_values(x_col)
         if sub.empty:
             continue
-        label = SITE_LABELS.get(sid, sid)
+        label = labels.get(sid, sid)
         ax.plot(sub[x_col], sub[y_col], color=SITE_COLORS.get(sid, "gray"),
                 linestyle=SITE_LINESTYLES.get(sid, "-"),
                 label=label, linewidth=1.5)
@@ -469,32 +478,37 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel) -> str
     )
 
 
-def _build_dose_overlay(sites) -> str:
+def _build_dose_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/crrt_dose_hourly.csv",
         "hour", "median_dose",
         "CRRT Dose Over Time (Median)", "Hour", "Dose (mL/kg/hr)",
+        labels=labels,
     )
 
 
-def _build_map_overlay(sites) -> str:
+def _build_map_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/map_over_crrt.csv",
         "hour", "median",
         "MAP Over CRRT (Median)", "Hour", "MAP (mmHg)",
+        labels=labels,
     )
 
 
-def _build_nee_overlay(sites) -> str:
+def _build_nee_overlay(sites, labels=None) -> str:
     return _simple_overlay(
         sites, "graphs/nee_over_crrt.csv",
         "hour", "median",
         "NEE Over CRRT (Median)", "Hour", "NEE (mcg/kg/min)",
+        labels=labels,
     )
 
 
-def _build_lab_overlay(sites) -> str:
+def _build_lab_overlay(sites, labels=None) -> str:
     """3x2 grid of lab panels."""
+    if labels is None:
+        labels = SITE_LABELS
     df = _load_site_csv(sites, "graphs/lab_distributions_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Lab distributions: data not available.</p>'
@@ -517,7 +531,7 @@ def _build_lab_overlay(sites) -> str:
             ax.plot(sub["hour"], sub["median"],
                     color=SITE_COLORS.get(sid, "gray"),
                     linestyle=SITE_LINESTYLES.get(sid, "-"),
-                    label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                    label=labels.get(sid, sid), linewidth=1.5)
         ax.set_title(lab_name.replace("_", " ").title())
         ax.set_xlabel("Hour")
         ax.set_ylabel("Median")
@@ -541,8 +555,10 @@ def _build_lab_overlay(sites) -> str:
     )
 
 
-def _build_respiratory_overlay(sites) -> str:
+def _build_respiratory_overlay(sites, labels=None) -> str:
     """Two-panel: FiO2 median + IMV proportion."""
+    if labels is None:
+        labels = SITE_LABELS
     df = _load_site_csv(sites, "graphs/respiratory_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Respiratory data not available.</p>'
@@ -559,7 +575,7 @@ def _build_respiratory_overlay(sites) -> str:
         ax1.plot(sub["hour"], sub["median"],
                  color=SITE_COLORS.get(sid, "gray"),
                  linestyle=SITE_LINESTYLES.get(sid, "-"),
-                 label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                 label=labels.get(sid, sid), linewidth=1.5)
     ax1.set_title("FiO2 (Median)")
     ax1.set_xlabel("Hour")
     ax1.set_ylabel("FiO2")
@@ -575,7 +591,7 @@ def _build_respiratory_overlay(sites) -> str:
         ax2.plot(sub["hour"], sub["imv_proportion"],
                  color=SITE_COLORS.get(sid, "gray"),
                  linestyle=SITE_LINESTYLES.get(sid, "-"),
-                 label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                 label=labels.get(sid, sid), linewidth=1.5)
     ax2.set_title("IMV Proportion")
     ax2.set_xlabel("Hour")
     ax2.set_ylabel("IMV %")
@@ -593,8 +609,10 @@ def _build_respiratory_overlay(sites) -> str:
     )
 
 
-def _build_patient_state_overlay(sites) -> str:
+def _build_patient_state_overlay(sites, labels=None) -> str:
     """Four-line overlay: prop_dead, prop_imv, prop_off_imv, prop_discharged."""
+    if labels is None:
+        labels = SITE_LABELS
     df = _load_site_csv(sites, "graphs/patient_state_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Patient state data not available.</p>'
@@ -618,7 +636,7 @@ def _build_patient_state_overlay(sites) -> str:
             ax.plot(sub["hour"], sub[col],
                     color=SITE_COLORS.get(sid, "gray"),
                     linestyle=SITE_LINESTYLES.get(sid, "-"),
-                    label=SITE_LABELS.get(sid, sid), linewidth=1.5)
+                    label=labels.get(sid, sid), linewidth=1.5)
         ax.set_title(label)
         ax.set_xlabel("Hour")
         ax.set_ylabel("Proportion (%)")
@@ -636,10 +654,226 @@ def _build_patient_state_overlay(sites) -> str:
     )
 
 
+# ── UCMC IHD Tab ─────────────────────────────────────────────────────────
+
+
+def build_ihd_tab() -> str | None:
+    """Build UCMC IHD-after-CRRT tab from 06_ihd_after_crrt.py outputs."""
+    ihd_dir = Path(__file__).resolve().parent.parent / "output" / "final" / "ihd_analysis"
+    summary_path = ihd_dir / "ihd_summary.csv"
+    flowchart_path = ihd_dir / "ihd_flowchart.txt"
+    missingness_path = ihd_dir / "ihd_missingness.csv"
+    if not summary_path.exists():
+        return None
+
+    summary = pd.read_csv(summary_path)
+    s = summary.iloc[0]
+    boundary_qc_path = ihd_dir / "session_boundary_qc.csv"
+
+    # ── Flowchart ──
+    flowchart_html = ""
+    if flowchart_path.exists():
+        flowchart_text = flowchart_path.read_text()
+        flowchart_html = (
+            '<div class="section">'
+            '<h2>Cohort Flow</h2>'
+            f'<pre style="font-size:14px; line-height:1.6; background:#f8f8f8; '
+            f'padding:20px; border-radius:6px; border:1px solid #ddd;">'
+            f'{flowchart_text}</pre>'
+            '</div>'
+        )
+
+    # ── Summary table ──
+    summary_html = (
+        '<table><thead><tr>'
+        '<th>Metric</th><th>Value</th>'
+        '</tr></thead><tbody>'
+    )
+    rows = [
+        ("Total CRRT cohort (UCMC)", f"{int(s['n_cohort']):,}"),
+        ("Received IHD after CRRT", f"{int(s['n_with_ihd']):,} ({s['pct_with_ihd']:.1f}%)"),
+        ("No IHD after CRRT", f"{int(s['n_without_ihd']):,}"),
+        ("Mortality — IHD group", f"{int(s['died_with_ihd']):,} / {int(s['n_with_ihd']):,} ({s['mortality_with_ihd_pct']:.1f}%)"),
+        ("Mortality — No IHD group", f"{int(s['died_without_ihd']):,} / {int(s['n_without_ihd']):,} ({s['mortality_without_ihd_pct']:.1f}%)"),
+        ("Median hours CRRT end → first IHD", f"{s['median_hours_to_first_ihd']:.1f}"),
+        ("IHD sessions per patient (median [IQR])", f"{s['median_ihd_sessions']:.0f} [{s['ihd_sessions_q1']:.0f}, {s['ihd_sessions_q3']:.0f}]"),
+    ]
+    # Off-IHD metrics (if present)
+    if "n_survivors_with_ihd" in s and s["n_survivors_with_ihd"] > 0:
+        rows += [
+            ("Survivors with IHD", f"{int(s['n_survivors_with_ihd']):,}"),
+            ("Off IHD ≥2 days before discharge", f"{s['pct_off_ihd_2d_before_dc']:.1f}%"),
+        ]
+        if "pct_off_ihd_3d_before_dc" in s:
+            rows.append(("Off IHD ≥3 days before discharge", f"{s['pct_off_ihd_3d_before_dc']:.1f}%"))
+        if "pct_off_ihd_5d_before_dc" in s:
+            rows.append(("Off IHD ≥5 days before discharge", f"{s['pct_off_ihd_5d_before_dc']:.1f}%"))
+        rows.append(("Off IHD ≥7 days before discharge", f"{s['pct_off_ihd_7d_before_dc']:.1f}%"))
+    for label, val in rows:
+        summary_html += f"<tr><td>{label}</td><td>{val}</td></tr>"
+
+    # Session definition note with boundary gap QC
+    boundary_note = ""
+    if boundary_qc_path.exists():
+        bqc = pd.read_csv(boundary_qc_path)
+        median_gap = bqc["gap_hours"].median()
+        q25_gap = bqc["gap_hours"].quantile(0.25)
+        q75_gap = bqc["gap_hours"].quantile(0.75)
+        boundary_note = (
+            f" Among the {len(bqc):,} session boundaries, the median inter-session gap "
+            f"was {median_gap:.1f} hours (IQR [{q25_gap:.1f}, {q75_gap:.1f}]), "
+            f"confirming the 6-hour threshold is well below the natural gap between IHD sessions."
+        )
+    summary_html += (
+        '<tr><td colspan="2" style="font-size:11px; color:#666; font-style:italic; '
+        'background:#f8f8f8; border-top:2px solid #ddd;">'
+        '<b>Session definition:</b> IHD records are sorted by (encounter_block, recorded_dttm). '
+        'A new session begins whenever (a) the time gap from the previous record exceeds 6 hours, '
+        'or (b) the device_id changes to a different non-null value (forward-filled to bridge NaN gaps), '
+        'or (c) at the patient\'s first record.'
+        f'{boundary_note}</td></tr>'
+    )
+    summary_html += "</tbody></table>"
+
+    # ── IHD Missingness table ──
+    miss_html = ""
+    if missingness_path.exists():
+        miss_df = pd.read_csv(missingness_path)
+        miss_html = (
+            '<div class="section">'
+            '<h2>IHD Variable Missingness (Post-CRRT Patients)</h2>'
+            '<table><thead><tr>'
+            '<th>Variable</th><th>Patients with any value</th>'
+            '<th>% Patients</th><th>Row-level non-null %</th>'
+            '</tr></thead><tbody>'
+        )
+        for _, r in miss_df.iterrows():
+            miss_html += (
+                f"<tr><td>{r['column']}</td>"
+                f"<td>{int(r['n_patients_with_any_value']):,}</td>"
+                f"<td>{r['pct_patients_with_any_value']:.1f}%</td>"
+                f"<td>{r['pct_rows_non_null']:.1f}%</td></tr>"
+            )
+        miss_html += "</tbody></table></div>"
+
+    return f"""
+        {flowchart_html}
+        <div class="section">
+            <h2>UCMC: IHD After CRRT — Summary</h2>
+            {summary_html}
+        </div>
+        {miss_html}
+    """
+
+
+# ── Missingness Tab ──────────────────────────────────────────────────────
+
+
+def _missingness_heatmap(df: pd.DataFrame, subgroup: str, title: str) -> str | None:
+    """Generate a single availability heatmap for the given subgroup."""
+    import matplotlib.colors as mcolors
+
+    cont = df[(df["stat_type"] == "continuous") & (df["subgroup"] == subgroup)].copy()
+    if cont.empty:
+        return None
+
+    # Deduplicate (CRRT treatment vars have multiple rows per site/mode)
+    cont = cont.sort_values("n", ascending=False).drop_duplicates(
+        subset=["site", "variable"], keep="first"
+    )
+
+    cont["avail_pct"] = np.where(cont["total"] > 0, 100.0 * cont["n"] / cont["total"], 0)
+
+    pivot = cont.pivot_table(index="variable", columns="site", values="avail_pct", aggfunc="first")
+    pivot.index = [v.replace("_", " ") for v in pivot.index]
+    pivot.columns = [SITE_LABELS.get(c, c) for c in pivot.columns]
+
+    # Sort: most missing first
+    pivot["mean_avail"] = pivot.mean(axis=1)
+    pivot = pivot.sort_values("mean_avail")
+    pivot = pivot.drop(columns="mean_avail")
+
+    n_vars = len(pivot)
+    fig_h = max(6, n_vars * 0.35 + 2)
+    fig, ax = plt.subplots(figsize=(max(10, len(pivot.columns) * 1.2), fig_h))
+
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "avail", ["#d73027", "#fee08b", "#1a9850"], N=256
+    )
+    data = pivot.values.astype(float)
+    im = ax.imshow(data, cmap=cmap, aspect="auto", vmin=0, vmax=100)
+
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=10)
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels(pivot.index, fontsize=9)
+
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            val = data[i, j]
+            if np.isnan(val):
+                txt, color = "—", "gray"
+            else:
+                txt = f"{val:.0f}"
+                color = "white" if val < 40 else "black"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
+    cbar.set_label("% Available", fontsize=10)
+    ax.set_title(title, fontsize=13, pad=12)
+    fig.tight_layout()
+
+    return fig_to_data_uri(fig)
+
+
+def build_missingness_tab(sites: list[Path]) -> str | None:
+    """Heatmaps of data availability: Baseline and 72h Survivors."""
+    frames = []
+    for site_dir in sites:
+        csv_path = site_dir / "final" / "table1_crrt_long.csv"
+        if csv_path.exists():
+            tmp = pd.read_csv(csv_path)
+            tmp["site"] = site_dir.name
+            frames.append(tmp)
+    if not frames:
+        return None
+
+    df = pd.concat(frames, ignore_index=True)
+
+    sections = []
+    for subgroup, label in [
+        ("Baseline", "Baseline"),
+        ("At 72h - Survivors", "At 72h (Survivors)"),
+    ]:
+        uri = _missingness_heatmap(
+            df, subgroup,
+            f"Data Availability — {label}",
+        )
+        if uri:
+            sections.append(f"""
+                <div class="figure-block">
+                    <h3>{label}</h3>
+                    <img src="{uri}" alt="Availability {label}" style="max-width:100%;">
+                </div>
+            """)
+
+    if not sections:
+        return None
+
+    return f"""
+        <div class="section">
+            <h2>Data Availability Heatmaps</h2>
+            <p><em>Continuous variables. Red = high missingness, green = complete.
+            Values show % of patients with data available.</em></p>
+            {"".join(sections)}
+        </div>
+    """
+
+
 # ── Build Overall Tab Content ─────────────────────────────────────────────
 
 
-def build_overall_content(sites: list[Path]) -> str:
+def build_overall_content(sites: list[Path], labels=None) -> str:
     """Assemble the full Overall tab HTML: CONSORT + Table 1 + overlay graphs."""
     print("  Building combined CONSORT diagram...")
     consort_html = build_combined_consort(sites)
@@ -649,12 +883,12 @@ def build_overall_content(sites: list[Path]) -> str:
 
     print("  Building overlay graphs...")
     graph_blocks = [
-        _build_dose_overlay(sites),
-        _build_lab_overlay(sites),
-        _build_map_overlay(sites),
-        _build_nee_overlay(sites),
-        _build_respiratory_overlay(sites),
-        _build_patient_state_overlay(sites),
+        _build_dose_overlay(sites, labels=labels),
+        _build_lab_overlay(sites, labels=labels),
+        _build_map_overlay(sites, labels=labels),
+        _build_nee_overlay(sites, labels=labels),
+        _build_respiratory_overlay(sites, labels=labels),
+        _build_patient_state_overlay(sites, labels=labels),
     ]
     graphs_html = "\n".join(graph_blocks)
 
@@ -719,6 +953,36 @@ def main():
             '</div>'
         )
 
+    # Missingness tab
+    print("  Building missingness tab...")
+    miss_content = build_missingness_tab(sites)
+    if miss_content:
+        tab_buttons.append(
+            '<button class="tab-btn" '
+            "onclick=\"switchTab('missingness')\" "
+            'id="btn-missingness">Data Availability</button>'
+        )
+        tab_panels.append(
+            '<div class="tab-panel" id="panel-missingness" style="display:none;">'
+            f'{miss_content}'
+            '</div>'
+        )
+
+    # UCMC IHD tab
+    print("  Building UCMC IHD tab...")
+    ihd_content = build_ihd_tab()
+    if ihd_content:
+        tab_buttons.append(
+            '<button class="tab-btn" '
+            "onclick=\"switchTab('ihd')\" "
+            'id="btn-ihd">UCMC IHD</button>'
+        )
+        tab_panels.append(
+            '<div class="tab-panel" id="panel-ihd" style="display:none;">'
+            f'{ihd_content}'
+            '</div>'
+        )
+
     # Per-site tabs
     for site_dir in sites:
         site_id = site_dir.name
@@ -741,8 +1005,13 @@ def main():
     tabs_bar = "\n".join(tab_buttons)
     panels = "\n".join(tab_panels)
 
-    # Site IDs for JS (include "overall" and "severity")
-    all_tab_ids = ["overall", "severity"] + [s.name for s in sites]
+    # Site IDs for JS
+    all_tab_ids = ["overall", "severity"]
+    if miss_content:
+        all_tab_ids.append("missingness")
+    if ihd_content:
+        all_tab_ids.append("ihd")
+    all_tab_ids += [s.name for s in sites]
     site_ids_js = ", ".join(f'"{tid}"' for tid in all_tab_ids)
 
     html = f"""<!DOCTYPE html>
@@ -852,6 +1121,106 @@ def main():
     OUTPUT.write_text(html, encoding="utf-8")
     print(f"\nDashboard written to {OUTPUT}")
     print(f"  File size: {OUTPUT.stat().st_size / 1024 / 1024:.1f} MB")
+
+    # ── Anonymized dashboard (Overall + Severity, site names replaced) ───
+    print("\nBuilding anonymized dashboard (Overall + Severity)...")
+    anon_content = build_overall_content(sites, labels=ANON_LABELS)
+
+    # Anonymized severity analysis
+    sev_anon = sev.copy()
+    sev_anon["site_label"] = sev_anon["site_dir"].map(
+        lambda sd: ANON_LABELS.get(sd, sd)
+    )
+    sev_anon = sev_anon.sort_values("site_label").reset_index(drop=True)
+    severity_anon = generate_severity_html(sev_anon, labels=ANON_LABELS)
+
+    anon_tabs = (
+        '<button class="tab-btn active" onclick="switchTab(\'overall\')" '
+        'id="btn-overall">Overall</button>'
+        '<button class="tab-btn" onclick="switchTab(\'severity\')" '
+        'id="btn-severity">Severity Analysis</button>'
+    )
+    anon_panels = (
+        '<div class="tab-panel" id="panel-overall" style="display:block;">'
+        f'{anon_content}</div>'
+        '<div class="tab-panel" id="panel-severity" style="display:none;">'
+        f'{severity_anon}</div>'
+    )
+    anon_site_ids_js = '"overall","severity"'
+
+    anon_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CRRT Epidemiology — Multi-Site Dashboard (Anonymized)</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: 'Arial', sans-serif;
+            margin: 0; padding: 20px;
+            background: #f5f5f5;
+        }}
+        .container {{
+            max-width: 1400px; margin: 0 auto;
+            background: white; padding: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }}
+        .tab-bar {{ margin: 20px 0; display: flex; gap: 8px; flex-wrap: wrap; }}
+        .tab-btn {{
+            padding: 10px 20px; border: 1px solid #ddd;
+            background: #f0f0f0; cursor: pointer;
+            border-radius: 4px 4px 0 0; font-size: 14px;
+        }}
+        .tab-btn.active {{ background: #4CAF50; color: white; border-color: #4CAF50; }}
+        .tab-panel {{ display: none; }}
+        .section {{ margin-bottom: 40px; }}
+        .section h2 {{
+            color: #333;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 6px;
+        }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }}
+        th {{ background: #4CAF50; color: white; padding: 12px; text-align: left; border: 1px solid #ddd; }}
+        td {{ padding: 10px; border: 1px solid #ddd; vertical-align: top; }}
+        tr:nth-child(even) {{ background: #f9f9f9; }}
+        tr:hover {{ background: #f0f0f0; }}
+        .figure-block {{ margin-bottom: 32px; }}
+        .figure-block h3 {{ color: #444; margin-bottom: 8px; }}
+        .figure-block img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+        .missing {{ color: #999; font-style: italic; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>CRRT Epidemiology — Multi-Site Dashboard (Anonymized)</h1>
+    <div class="tab-bar">
+        {anon_tabs}
+    </div>
+    {anon_panels}
+</div>
+<script>
+    const SITES = [{anon_site_ids_js}];
+    function switchTab(siteId) {{
+        SITES.forEach(function(id) {{
+            document.getElementById('panel-' + id).style.display = 'none';
+            document.getElementById('btn-' + id).classList.remove('active');
+        }});
+        document.getElementById('panel-' + siteId).style.display = 'block';
+        document.getElementById('btn-' + siteId).classList.add('active');
+    }}
+</script>
+</body>
+</html>"""
+    anon_output = ROOT / "combined_dashboard_anon.html"
+    anon_output.write_text(anon_html, encoding="utf-8")
+    print(f"Anonymized dashboard written to {anon_output}")
+    print(f"  File size: {anon_output.stat().st_size / 1024 / 1024:.1f} MB")
 
 
 if __name__ == "__main__":

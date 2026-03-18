@@ -301,9 +301,9 @@ adult_encounters = adult_encounters[
 ]
 
 # Filter for admission years 2018-2024
-adult_encounters = adult_encounters[
-    (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
-]
+# adult_encounters = adult_encounters[
+#     (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
+# ]
 
 print(f"\nFiltering Results:")
 print(f"   Total hospitalizations: {len(all_encounters['hospitalization_id'].unique()):,}")
@@ -1858,13 +1858,27 @@ print(f"   - Using last_vital_dttm: {num_using_last_vital:,}")
 # ============================================================================
 print("\n5. Calculating mortality outcomes...")
 
-# In-hospital death: died AND final_outcome_dttm is between first and last vital
+# Bring in discharge_dttm for the in-hospital death check
+death_info = death_info.merge(
+    hosp_los[['encounter_block', 'discharge_dttm']].drop_duplicates('encounter_block'),
+    on='encounter_block', how='left',
+)
+
+# In-hospital death: died AND final_outcome_dttm between first vital and
+# max(last_vital, discharge). We use the max because:
+#   - Vitals often stop being charted shortly before death (median 0.57h gap),
+#     so death_dttm > last_vital_dttm is normal clinical workflow.
+#   - In some cases last_vital_dttm > discharge_dttm (vitals charted after
+#     discharge timestamp due to data entry timing).
+# Using max(last_vital, discharge) captures both patterns.
+death_info['_hosp_end'] = death_info[['last_vital_dttm', 'discharge_dttm']].max(axis=1)
 death_info['in_hosp_death'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
     (death_info['final_outcome_dttm'] >= death_info['first_vital_dttm']) &
-    (death_info['final_outcome_dttm'] <= death_info['last_vital_dttm'])
+    (death_info['final_outcome_dttm'] <= death_info['_hosp_end'])
 ).astype(int)
+death_info = death_info.drop(columns=['_hosp_end'])
 
 # 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
 death_info['death_30d'] = (
@@ -1888,7 +1902,7 @@ outcomes_df = cohort_base.merge(
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
 ).merge(
-    death_info, on='encounter_block', how='left'
+    death_info.drop(columns=['discharge_dttm'], errors='ignore'), on='encounter_block', how='left'
 )
 
 print(f"\nFinal outcomes dataset:")
