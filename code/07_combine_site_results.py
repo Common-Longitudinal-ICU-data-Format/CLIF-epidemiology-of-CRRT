@@ -1,14 +1,12 @@
 """
-04_combine_site_results.py
+07_combine_site_results.py
 Combines per-site Table 1 HTML and figures into a single tabbed dashboard.
 Output: all_site_data/combined_dashboard.html
 """
 
 import base64
-import importlib
 import io
 import re
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -18,9 +16,11 @@ from matplotlib.patches import FancyBboxPatch
 import numpy as np
 import pandas as pd
 
-# Import 05_severity_analysis (numeric prefix requires importlib)
+import importlib
+import sys
+# Import 08_severity_analysis (numeric prefix requires importlib)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-_sev_mod = importlib.import_module("05_severity_analysis")
+_sev_mod = importlib.import_module("08_severity_analysis")
 load_all_table1 = _sev_mod.load_all_table1
 extract_severity_data = _sev_mod.extract_severity_data
 generate_severity_html = _sev_mod.generate_severity_html
@@ -29,55 +29,67 @@ generate_severity_html = _sev_mod.generate_severity_html
 
 ROOT = Path(__file__).resolve().parent.parent / "all_site_data"
 OUTPUT = ROOT / "combined_dashboard.html"
+OUTPUT_ANON = ROOT / "combined_dashboard_anon.html"
 
 # Display names for sites (fallback: folder name title-cased)
 SITE_LABELS = {
-    "emory": "Emory",
-    "hopkins": "Hopkins",
     "mimic_iv": "MIMIC-IV",
     "nu": "Northwestern",
-    "ohsu": "OHSU",
     "rush": "Rush",
     "ucmc": "UChicago",
-    "ucsf": "UCSF",
     "umich": "UMichigan",
-    "umn": "UMN",
-    "upenn": "UPenn",
 }
 
-# Anonymized labels: alphabetical by real name → "Site 1", "Site 2", …
-ANON_LABELS = {
-    k: f"Site {i}"
-    for i, k in enumerate(sorted(SITE_LABELS, key=lambda k: SITE_LABELS[k]), 1)
-}
-
-# 11 distinct colors + line styles for all sites
+# Distinct palette: maximally separated hues + unique line styles per site
 SITE_COLORS = {
-    "emory": "#E69F00",      # orange
-    "hopkins": "#56B4E9",    # sky blue
     "mimic_iv": "#0072B2",   # blue
-    "nu": "#009E73",         # green
-    "ohsu": "#D55E00",       # vermilion
-    "rush": "#CC79A7",       # pink
-    "ucmc": "#000000",       # black
-    "ucsf": "#F0E442",       # yellow
-    "umich": "#8B4513",      # brown
-    "umn": "#882255",        # wine
-    "upenn": "#44AA99",      # teal
+    "nu": "#E69F00",         # orange
+    "rush": "#009E73",       # teal green
+    "ucmc": "#CC79A7",       # pink
+    "umich": "#882255",      # wine/purple
 }
 SITE_LINESTYLES = {
-    "emory": "-",
-    "hopkins": "--",
     "mimic_iv": "-",
     "nu": "--",
-    "ohsu": "-.",
     "rush": "-.",
-    "ucmc": "-",
-    "ucsf": ":",
-    "umich": ":",
-    "umn": "-.",
-    "upenn": "--",
+    "ucmc": ":",
+    "umich": (0, (3, 1, 1, 1)),  # dash-dot-dot
 }
+
+# Fallback colors and linestyles for dynamically discovered sites
+_EXTRA_COLORS = ["#332288", "#44AA99", "#DDCC77", "#AA4499", "#999933",
+                 "#88CCEE", "#661100", "#117733", "#6699CC", "#DC3220"]
+_EXTRA_LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)),
+                     (0, (5, 2)), (0, (1, 1))]
+
+
+def get_site_color(sid: str) -> str:
+    """Return a color for a site, assigning from extras if not predefined."""
+    if sid in SITE_COLORS:
+        return SITE_COLORS[sid]
+    # Deterministic assignment based on sorted unknown sites
+    if not hasattr(get_site_color, "_cache"):
+        get_site_color._cache = {}
+    if sid not in get_site_color._cache:
+        idx = len(get_site_color._cache)
+        get_site_color._cache[sid] = _EXTRA_COLORS[idx % len(_EXTRA_COLORS)]
+    return get_site_color._cache[sid]
+
+
+def get_site_linestyle(sid: str):
+    """Return a linestyle for a site, assigning from extras if not predefined."""
+    if sid in SITE_LINESTYLES:
+        return SITE_LINESTYLES[sid]
+    if not hasattr(get_site_linestyle, "_cache"):
+        get_site_linestyle._cache = {}
+    if sid not in get_site_linestyle._cache:
+        idx = len(get_site_linestyle._cache)
+        get_site_linestyle._cache[sid] = _EXTRA_LINESTYLES[idx % len(_EXTRA_LINESTYLES)]
+    return get_site_linestyle._cache[sid]
+
+def build_anon_labels(sites: list) -> dict:
+    """Dynamically assign 'Site N' labels to all discovered sites."""
+    return {site_dir.name: f"Site {i + 1}" for i, site_dir in enumerate(sites)}
 
 # Figures in display order: (filename, title)
 FIGURES = [
@@ -196,54 +208,45 @@ def build_combined_consort(sites: list[Path]) -> str:
     # Sum numeric values by counter; percentages will be recomputed
     summed = df.groupby("counter")["value"].sum().to_dict()
 
-    # Derive step counts
+    # Derive step counts (same logic as create_consort_diagram_straight_flow)
     get = lambda k, d=0: summed.get(k, d)
     start_n = get("1b_after_stitching", get("1_adult_hospitalizations"))
     n_crrt = get("2_crrt_blocks")
     n_no_esrd = get("3_encounter_blocks_without_esrd", n_crrt)
+    n_with_weight = get("4_encounter_blocks_with_weight", n_no_esrd)
+    n_with_settings = get("5_encounter_blocks_with_crrt_settings", n_with_weight)
+    n_with_labs = get("6_encounter_blocks_with_required_labs", n_with_settings)
 
-    # Use Table 1 n_hospitalizations (Baseline) as the final analytical cohort
-    t1_frames = []
-    for site_dir in sites:
-        csv_path = site_dir / "final" / "table1_crrt_long.csv"
-        if csv_path.exists():
-            t1_frames.append(pd.read_csv(csv_path))
-    if t1_frames:
-        t1_df = pd.concat(t1_frames, ignore_index=True)
-        n_final = int(
-            t1_df[(t1_df["variable"] == "n_hospitalizations")
-                   & (t1_df["subgroup"] == "Baseline")]["n"].sum()
-        )
-    else:
-        n_final = int(get("6_encounter_blocks_with_required_labs", n_no_esrd))
-
-    # Build steps: No CRRT → ESRD → combined missing data
+    # Build steps
     steps = []
     parent = start_n
     for remaining_n, label, excl_label in [
         (n_crrt, "CRRT hospitalizations", "Excluded: No CRRT"),
         (n_no_esrd, "After ESRD exclusion", "Excluded: ESRD diagnosis"),
-        (n_final, "Analytical cohort", "Excluded: Missing data\n(weight, CRRT settings, or labs)"),
+        (n_with_weight, "With documented weight", "Excluded: Missing weight"),
+        (n_with_settings, "With CRRT settings", "Excluded: Missing CRRT settings"),
+        (n_with_labs, "With required labs", "Excluded: Missing required labs"),
     ]:
         excluded = max(parent - remaining_n, 0)
         if excluded > 0 or remaining_n > 0:
             steps.append((remaining_n, label, excluded, excl_label, parent))
         if excluded > 0:
             parent = remaining_n
+        # If excluded == 0, skip the step but keep parent unchanged
         elif remaining_n == parent:
-            steps.pop()
+            steps.pop()  # remove the just-added zero-exclusion step
 
     # Draw figure
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    box_h, box_w = 0.10, 0.40
+    box_h, box_w = 0.08, 0.40
     x_main_start = 0.05
     x_main_center = x_main_start + box_w / 2
     x_excl_start = 0.55
-    v_spacing = 0.20
+    v_spacing = 0.14
     excl_arrow_gap = 0.015
 
     def draw_box(x, y, w, h, text, fontsize=11):
@@ -285,6 +288,24 @@ def build_combined_consort(sites: list[Path]) -> str:
                          xytext=(x_main_center, mid_y),
                          arrowprops=arrow_props, annotation_clip=False)
 
+    # Analytical notes
+    n_aki = get("6_encounter_blocks_with_AKI_no_esrd", 0)
+    n_hosp_no_icu = get("6_number_hosp_without_ICU_stay", 0)
+    if n_with_labs > 0:
+        pct_aki = 100.0 * n_aki / n_with_labs
+        n_with_icu = int(n_with_labs - n_hosp_no_icu)
+        pct_icu = 100.0 * n_with_icu / n_with_labs
+        note = (
+            f"AKI codes present (non-ESRD): {int(n_aki):,} / {int(n_with_labs):,} ({pct_aki:.1f}%)\n"
+            f"CRRT hospitalizations with ICU admission: {n_with_icu:,} / {int(n_with_labs):,} ({pct_icu:.1f}%)"
+        )
+        note_rect = FancyBboxPatch(
+            (0.05, 0.005), 0.89, 0.085, boxstyle="round,pad=0.01",
+            linewidth=1, edgecolor="#bbbbbb", facecolor="#f6f6ee", zorder=0,
+        )
+        ax.add_patch(note_rect)
+        ax.text(0.5, 0.05, note, ha="center", va="center", fontsize=11)
+
     data_uri = fig_to_data_uri(fig)
     return (
         f'<div class="figure-block">'
@@ -295,17 +316,6 @@ def build_combined_consort(sites: list[Path]) -> str:
 
 
 # ── Combined Table 1 ─────────────────────────────────────────────────────
-
-
-CRRT_DETAIL_VARS = {
-    "last_crrt_mode",
-    "crrt_dose_ml_kg_hr",
-    "blood_flow_rate",
-    "pre_filter_replacement_fluid_rate",
-    "post_filter_replacement_fluid_rate",
-    "dialysate_flow_rate",
-    "ultrafiltration_out",
-}
 
 
 def build_combined_table1(sites: list[Path]) -> str:
@@ -320,13 +330,10 @@ def build_combined_table1(sites: list[Path]) -> str:
 
     df = pd.concat(frames, ignore_index=True)
 
-    # Skip CRRT detail rows (keep Duration of CRRT)
-    df = df[~df["variable"].str.split(",").str[0].isin(CRRT_DETAIL_VARS)]
-
     # Aggregate by (variable, level, subgroup, stat_type)
     group_cols = ["variable", "level", "subgroup", "stat_type"]
     rows = []
-    for key, grp in df.groupby(group_cols, dropna=False, sort=False):
+    for key, grp in df.groupby(group_cols, dropna=False):
         variable, level, subgroup, stat_type = key
         if stat_type == "count":
             rows.append({
@@ -389,7 +396,7 @@ def build_combined_table1(sites: list[Path]) -> str:
 
         # Clean display name
         disp_var = variable.replace("_", " ") if variable else ""
-        disp_level = str(level) if pd.notna(level) else "Missing"
+        disp_level = str(level) if pd.notna(level) else ""
 
         cells = []
         for sg in subgroups:
@@ -449,8 +456,7 @@ def _load_site_csv(sites: list[Path], rel_path: str) -> pd.DataFrame:
 def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel,
                     labels=None) -> str:
     """Single-panel overlay: one line per site."""
-    if labels is None:
-        labels = SITE_LABELS
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, rel_path)
     if df.empty:
         return f'<p class="missing">{title}: data not available.</p>'
@@ -462,15 +468,14 @@ def _simple_overlay(sites, rel_path, x_col, y_col, title, xlabel, ylabel,
         if sub.empty:
             continue
         label = labels.get(sid, sid)
-        ax.plot(sub[x_col], sub[y_col], color=SITE_COLORS.get(sid, "gray"),
-                linestyle=SITE_LINESTYLES.get(sid, "-"),
+        ax.plot(sub[x_col], sub[y_col], color=get_site_color(sid),
+                linestyle=get_site_linestyle(sid),
                 label=label, linewidth=1.5)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=len(sites), fontsize=9)
+    ax.legend()
     ax.grid(True, alpha=0.3)
-    fig.subplots_adjust(bottom=0.2)
     data_uri = fig_to_data_uri(fig)
     return (
         f'<div class="figure-block"><h3>{title}</h3>'
@@ -507,8 +512,7 @@ def _build_nee_overlay(sites, labels=None) -> str:
 
 def _build_lab_overlay(sites, labels=None) -> str:
     """3x2 grid of lab panels."""
-    if labels is None:
-        labels = SITE_LABELS
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/lab_distributions_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Lab distributions: data not available.</p>'
@@ -529,12 +533,13 @@ def _build_lab_overlay(sites, labels=None) -> str:
             if sub.empty:
                 continue
             ax.plot(sub["hour"], sub["median"],
-                    color=SITE_COLORS.get(sid, "gray"),
-                    linestyle=SITE_LINESTYLES.get(sid, "-"),
+                    color=get_site_color(sid),
+                    linestyle=get_site_linestyle(sid),
                     label=labels.get(sid, sid), linewidth=1.5)
         ax.set_title(lab_name.replace("_", " ").title())
         ax.set_xlabel("Hour")
         ax.set_ylabel("Median")
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     # Hide unused subplots
@@ -543,10 +548,6 @@ def _build_lab_overlay(sites, labels=None) -> str:
         axes[r][c].set_visible(False)
 
     fig.suptitle("Lab Distributions Over CRRT (Median)", fontsize=14, y=1.01)
-    # Shared legend at figure bottom
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
-               bbox_to_anchor=(0.5, -0.04))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -557,8 +558,7 @@ def _build_lab_overlay(sites, labels=None) -> str:
 
 def _build_respiratory_overlay(sites, labels=None) -> str:
     """Two-panel: FiO2 median + IMV proportion."""
-    if labels is None:
-        labels = SITE_LABELS
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/respiratory_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Respiratory data not available.</p>'
@@ -573,12 +573,13 @@ def _build_respiratory_overlay(sites, labels=None) -> str:
         if sub.empty:
             continue
         ax1.plot(sub["hour"], sub["median"],
-                 color=SITE_COLORS.get(sid, "gray"),
-                 linestyle=SITE_LINESTYLES.get(sid, "-"),
+                 color=get_site_color(sid),
+                 linestyle=get_site_linestyle(sid),
                  label=labels.get(sid, sid), linewidth=1.5)
     ax1.set_title("FiO2 (Median)")
     ax1.set_xlabel("Hour")
     ax1.set_ylabel("FiO2")
+    ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
 
     # Panel 2: IMV proportion
@@ -589,18 +590,16 @@ def _build_respiratory_overlay(sites, labels=None) -> str:
         if sub.empty:
             continue
         ax2.plot(sub["hour"], sub["imv_proportion"],
-                 color=SITE_COLORS.get(sid, "gray"),
-                 linestyle=SITE_LINESTYLES.get(sid, "-"),
+                 color=get_site_color(sid),
+                 linestyle=get_site_linestyle(sid),
                  label=labels.get(sid, sid), linewidth=1.5)
     ax2.set_title("IMV Proportion")
     ax2.set_xlabel("Hour")
     ax2.set_ylabel("IMV %")
+    ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
     fig.suptitle("Respiratory Over CRRT", fontsize=14, y=1.02)
-    handles, labels = ax1.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
-               bbox_to_anchor=(0.5, -0.06))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -611,8 +610,7 @@ def _build_respiratory_overlay(sites, labels=None) -> str:
 
 def _build_patient_state_overlay(sites, labels=None) -> str:
     """Four-line overlay: prop_dead, prop_imv, prop_off_imv, prop_discharged."""
-    if labels is None:
-        labels = SITE_LABELS
+    labels = labels or SITE_LABELS
     df = _load_site_csv(sites, "graphs/patient_state_over_crrt.csv")
     if df.empty:
         return '<p class="missing">Patient state data not available.</p>'
@@ -625,7 +623,7 @@ def _build_patient_state_overlay(sites, labels=None) -> str:
     ]
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    for idx, (col, label) in enumerate(metrics):
+    for idx, (col, metric_label) in enumerate(metrics):
         r, c = divmod(idx, 2)
         ax = axes[r][c]
         for site_dir in sites:
@@ -634,18 +632,16 @@ def _build_patient_state_overlay(sites, labels=None) -> str:
             if sub.empty or col not in sub.columns:
                 continue
             ax.plot(sub["hour"], sub[col],
-                    color=SITE_COLORS.get(sid, "gray"),
-                    linestyle=SITE_LINESTYLES.get(sid, "-"),
+                    color=get_site_color(sid),
+                    linestyle=get_site_linestyle(sid),
                     label=labels.get(sid, sid), linewidth=1.5)
-        ax.set_title(label)
+        ax.set_title(metric_label)
         ax.set_xlabel("Hour")
         ax.set_ylabel("Proportion (%)")
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     fig.suptitle("Patient State Over CRRT Course", fontsize=14, y=1.01)
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=len(sites), fontsize=9,
-               bbox_to_anchor=(0.5, -0.04))
     fig.tight_layout()
     data_uri = fig_to_data_uri(fig)
     return (
@@ -654,232 +650,13 @@ def _build_patient_state_overlay(sites, labels=None) -> str:
     )
 
 
-# ── UCMC IHD Tab ─────────────────────────────────────────────────────────
-
-
-def build_ihd_tab() -> str | None:
-    """Build UCMC IHD-after-CRRT tab from 06_ihd_after_crrt.py outputs."""
-    ihd_dir = Path(__file__).resolve().parent.parent / "output" / "final" / "ihd_analysis"
-    summary_path = ihd_dir / "ihd_summary.csv"
-    flowchart_path = ihd_dir / "ihd_flowchart.txt"
-    missingness_path = ihd_dir / "ihd_missingness.csv"
-    if not summary_path.exists():
-        return None
-
-    summary = pd.read_csv(summary_path)
-    s = summary.iloc[0]
-    boundary_qc_path = ihd_dir / "session_boundary_qc.csv"
-
-    # ── Flowchart ──
-    flowchart_html = ""
-    if flowchart_path.exists():
-        flowchart_text = flowchart_path.read_text()
-        flowchart_html = (
-            '<div class="section">'
-            '<h2>Cohort Flow</h2>'
-            f'<pre style="font-size:14px; line-height:1.6; background:#f8f8f8; '
-            f'padding:20px; border-radius:6px; border:1px solid #ddd;">'
-            f'{flowchart_text}</pre>'
-            '</div>'
-        )
-
-    # ── Summary table ──
-    summary_html = (
-        '<table><thead><tr>'
-        '<th>Metric</th><th>Value</th>'
-        '</tr></thead><tbody>'
-    )
-    rows = [
-        ("Total CRRT cohort (UCMC)", f"{int(s['n_cohort']):,}"),
-        ("Received IHD after CRRT", f"{int(s['n_with_ihd']):,} ({s['pct_with_ihd']:.1f}%)"),
-        ("No IHD after CRRT", f"{int(s['n_without_ihd']):,}"),
-        ("Mortality — IHD group", f"{int(s['died_with_ihd']):,} / {int(s['n_with_ihd']):,} ({s['mortality_with_ihd_pct']:.1f}%)"),
-        ("Mortality — No IHD group", f"{int(s['died_without_ihd']):,} / {int(s['n_without_ihd']):,} ({s['mortality_without_ihd_pct']:.1f}%)"),
-        ("Median hours CRRT end → first IHD", f"{s['median_hours_to_first_ihd']:.1f}"),
-        ("IHD sessions per patient (median [IQR])", f"{s['median_ihd_sessions']:.0f} [{s['ihd_sessions_q1']:.0f}, {s['ihd_sessions_q3']:.0f}]"),
-    ]
-    # Off-IHD metrics (if present)
-    if "n_survivors_with_ihd" in s and s["n_survivors_with_ihd"] > 0:
-        rows += [
-            ("Survivors with IHD", f"{int(s['n_survivors_with_ihd']):,}"),
-            ("Off IHD ≥2 days before discharge", f"{s['pct_off_ihd_2d_before_dc']:.1f}%"),
-        ]
-        if "pct_off_ihd_3d_before_dc" in s:
-            rows.append(("Off IHD ≥3 days before discharge", f"{s['pct_off_ihd_3d_before_dc']:.1f}%"))
-        if "pct_off_ihd_5d_before_dc" in s:
-            rows.append(("Off IHD ≥5 days before discharge", f"{s['pct_off_ihd_5d_before_dc']:.1f}%"))
-        rows.append(("Off IHD ≥7 days before discharge", f"{s['pct_off_ihd_7d_before_dc']:.1f}%"))
-    for label, val in rows:
-        summary_html += f"<tr><td>{label}</td><td>{val}</td></tr>"
-
-    # Session definition note with boundary gap QC
-    boundary_note = ""
-    if boundary_qc_path.exists():
-        bqc = pd.read_csv(boundary_qc_path)
-        median_gap = bqc["gap_hours"].median()
-        q25_gap = bqc["gap_hours"].quantile(0.25)
-        q75_gap = bqc["gap_hours"].quantile(0.75)
-        boundary_note = (
-            f" Among the {len(bqc):,} session boundaries, the median inter-session gap "
-            f"was {median_gap:.1f} hours (IQR [{q25_gap:.1f}, {q75_gap:.1f}]), "
-            f"confirming the 6-hour threshold is well below the natural gap between IHD sessions."
-        )
-    summary_html += (
-        '<tr><td colspan="2" style="font-size:11px; color:#666; font-style:italic; '
-        'background:#f8f8f8; border-top:2px solid #ddd;">'
-        '<b>Session definition:</b> IHD records are sorted by (encounter_block, recorded_dttm). '
-        'A new session begins whenever (a) the time gap from the previous record exceeds 6 hours, '
-        'or (b) the device_id changes to a different non-null value (forward-filled to bridge NaN gaps), '
-        'or (c) at the patient\'s first record.'
-        f'{boundary_note}</td></tr>'
-    )
-    summary_html += "</tbody></table>"
-
-    # ── IHD Missingness table ──
-    miss_html = ""
-    if missingness_path.exists():
-        miss_df = pd.read_csv(missingness_path)
-        miss_html = (
-            '<div class="section">'
-            '<h2>IHD Variable Missingness (Post-CRRT Patients)</h2>'
-            '<table><thead><tr>'
-            '<th>Variable</th><th>Patients with any value</th>'
-            '<th>% Patients</th><th>Row-level non-null %</th>'
-            '</tr></thead><tbody>'
-        )
-        for _, r in miss_df.iterrows():
-            miss_html += (
-                f"<tr><td>{r['column']}</td>"
-                f"<td>{int(r['n_patients_with_any_value']):,}</td>"
-                f"<td>{r['pct_patients_with_any_value']:.1f}%</td>"
-                f"<td>{r['pct_rows_non_null']:.1f}%</td></tr>"
-            )
-        miss_html += "</tbody></table></div>"
-
-    return f"""
-        {flowchart_html}
-        <div class="section">
-            <h2>UCMC: IHD After CRRT — Summary</h2>
-            {summary_html}
-        </div>
-        {miss_html}
-    """
-
-
-# ── Missingness Tab ──────────────────────────────────────────────────────
-
-
-def _missingness_heatmap(df: pd.DataFrame, subgroup: str, title: str) -> str | None:
-    """Generate a single availability heatmap for the given subgroup."""
-    import matplotlib.colors as mcolors
-
-    cont = df[(df["stat_type"] == "continuous") & (df["subgroup"] == subgroup)].copy()
-    if cont.empty:
-        return None
-
-    # Deduplicate (CRRT treatment vars have multiple rows per site/mode)
-    cont = cont.sort_values("n", ascending=False).drop_duplicates(
-        subset=["site", "variable"], keep="first"
-    )
-
-    cont["avail_pct"] = np.where(cont["total"] > 0, 100.0 * cont["n"] / cont["total"], 0)
-
-    pivot = cont.pivot_table(index="variable", columns="site", values="avail_pct", aggfunc="first")
-    pivot.index = [v.replace("_", " ") for v in pivot.index]
-    pivot.columns = [SITE_LABELS.get(c, c) for c in pivot.columns]
-
-    # Sort: most missing first
-    pivot["mean_avail"] = pivot.mean(axis=1)
-    pivot = pivot.sort_values("mean_avail")
-    pivot = pivot.drop(columns="mean_avail")
-
-    n_vars = len(pivot)
-    fig_h = max(6, n_vars * 0.35 + 2)
-    fig, ax = plt.subplots(figsize=(max(10, len(pivot.columns) * 1.2), fig_h))
-
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        "avail", ["#d73027", "#fee08b", "#1a9850"], N=256
-    )
-    data = pivot.values.astype(float)
-    im = ax.imshow(data, cmap=cmap, aspect="auto", vmin=0, vmax=100)
-
-    ax.set_xticks(range(len(pivot.columns)))
-    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=10)
-    ax.set_yticks(range(len(pivot.index)))
-    ax.set_yticklabels(pivot.index, fontsize=9)
-
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            val = data[i, j]
-            if np.isnan(val):
-                txt, color = "—", "gray"
-            else:
-                txt = f"{val:.0f}"
-                color = "white" if val < 40 else "black"
-            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
-
-    cbar = fig.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
-    cbar.set_label("% Available", fontsize=10)
-    ax.set_title(title, fontsize=13, pad=12)
-    fig.tight_layout()
-
-    return fig_to_data_uri(fig)
-
-
-def build_missingness_tab(sites: list[Path]) -> str | None:
-    """Heatmaps of data availability: Baseline and 72h Survivors."""
-    frames = []
-    for site_dir in sites:
-        csv_path = site_dir / "final" / "table1_crrt_long.csv"
-        if csv_path.exists():
-            tmp = pd.read_csv(csv_path)
-            tmp["site"] = site_dir.name
-            frames.append(tmp)
-    if not frames:
-        return None
-
-    df = pd.concat(frames, ignore_index=True)
-
-    sections = []
-    for subgroup, label in [
-        ("Baseline", "Baseline"),
-        ("At 72h - Survivors", "At 72h (Survivors)"),
-    ]:
-        uri = _missingness_heatmap(
-            df, subgroup,
-            f"Data Availability — {label}",
-        )
-        if uri:
-            sections.append(f"""
-                <div class="figure-block">
-                    <h3>{label}</h3>
-                    <img src="{uri}" alt="Availability {label}" style="max-width:100%;">
-                </div>
-            """)
-
-    if not sections:
-        return None
-
-    return f"""
-        <div class="section">
-            <h2>Data Availability Heatmaps</h2>
-            <p><em>Continuous variables. Red = high missingness, green = complete.
-            Values show % of patients with data available.</em></p>
-            {"".join(sections)}
-        </div>
-    """
-
-
 # ── Build Overall Tab Content ─────────────────────────────────────────────
 
 
 def build_overall_content(sites: list[Path], labels=None) -> str:
-    """Assemble the full Overall tab HTML: CONSORT + Table 1 + overlay graphs."""
+    """Assemble the full Overall tab HTML: CONSORT + overlay graphs."""
     print("  Building combined CONSORT diagram...")
     consort_html = build_combined_consort(sites)
-
-    print("  Building combined Table 1...")
-    table1_html = build_combined_table1(sites)
 
     print("  Building overlay graphs...")
     graph_blocks = [
@@ -898,10 +675,6 @@ def build_overall_content(sites: list[Path], labels=None) -> str:
             {consort_html}
         </div>
         <div class="section">
-            <h2>Table 1 (All Sites Combined)</h2>
-            {table1_html}
-        </div>
-        <div class="section">
             <h2>Figures (Site Overlay)</h2>
             {graphs_html}
         </div>
@@ -910,21 +683,14 @@ def build_overall_content(sites: list[Path], labels=None) -> str:
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
-def main():
-    sites = discover_sites()
-    if not sites:
-        print("No sites found in", ROOT)
-        return
-
-    print(f"Found {len(sites)} sites: {[s.name for s in sites]}")
-
-    # Build tab buttons and tab content panels
+def build_dashboard(sites: list[Path], labels: dict, output_path: Path,
+                    include_site_tabs: bool = True) -> None:
+    """Build a complete dashboard HTML file with the given label mapping."""
     tab_buttons = []
     tab_panels = []
 
     # Overall tab (first, default active)
-    print("  Processing Overall tab...")
-    overall_content = build_overall_content(sites)
+    overall_content = build_overall_content(sites, labels=labels)
     tab_buttons.append(
         '<button class="tab-btn active" '
         "onclick=\"switchTab('overall')\" "
@@ -941,7 +707,7 @@ def main():
     df_table1 = load_all_table1(sites)
     if not df_table1.empty:
         sev = extract_severity_data(df_table1)
-        severity_content = generate_severity_html(sev, labels=SITE_LABELS)
+        severity_content = generate_severity_html(sev, labels=labels)
         tab_buttons.append(
             '<button class="tab-btn" '
             "onclick=\"switchTab('severity')\" "
@@ -953,65 +719,32 @@ def main():
             '</div>'
         )
 
-    # Missingness tab
-    print("  Building missingness tab...")
-    miss_content = build_missingness_tab(sites)
-    if miss_content:
-        tab_buttons.append(
-            '<button class="tab-btn" '
-            "onclick=\"switchTab('missingness')\" "
-            'id="btn-missingness">Data Availability</button>'
-        )
-        tab_panels.append(
-            '<div class="tab-panel" id="panel-missingness" style="display:none;">'
-            f'{miss_content}'
-            '</div>'
-        )
-
-    # UCMC IHD tab
-    print("  Building UCMC IHD tab...")
-    ihd_content = build_ihd_tab()
-    if ihd_content:
-        tab_buttons.append(
-            '<button class="tab-btn" '
-            "onclick=\"switchTab('ihd')\" "
-            'id="btn-ihd">UCMC IHD</button>'
-        )
-        tab_panels.append(
-            '<div class="tab-panel" id="panel-ihd" style="display:none;">'
-            f'{ihd_content}'
-            '</div>'
-        )
-
     # Per-site tabs
-    for site_dir in sites:
-        site_id = site_dir.name
-        label = SITE_LABELS.get(site_id, site_id.replace("_", " ").title())
+    if include_site_tabs:
+        for site_dir in sites:
+            site_id = site_dir.name
+            label = labels.get(site_id, site_id.replace("_", " ").title())
 
-        tab_buttons.append(
-            f'<button class="tab-btn" '
-            f'onclick="switchTab(\'{site_id}\')" '
-            f'id="btn-{site_id}">{label}</button>'
-        )
+            tab_buttons.append(
+                f'<button class="tab-btn" '
+                f'onclick="switchTab(\'{site_id}\')" '
+                f'id="btn-{site_id}">{label}</button>'
+            )
 
-        print(f"  Processing {label}...")
-        content = build_site_content(site_dir)
-        tab_panels.append(
-            f'<div class="tab-panel" id="panel-{site_id}" style="display:none;">'
-            f'{content}'
-            f'</div>'
-        )
+            content = build_site_content(site_dir)
+            tab_panels.append(
+                f'<div class="tab-panel" id="panel-{site_id}" style="display:none;">'
+                f'{content}'
+                f'</div>'
+            )
 
     tabs_bar = "\n".join(tab_buttons)
     panels = "\n".join(tab_panels)
 
     # Site IDs for JS
     all_tab_ids = ["overall", "severity"]
-    if miss_content:
-        all_tab_ids.append("missingness")
-    if ihd_content:
-        all_tab_ids.append("ihd")
-    all_tab_ids += [s.name for s in sites]
+    if include_site_tabs:
+        all_tab_ids += [s.name for s in sites]
     site_ids_js = ", ".join(f'"{tid}"' for tid in all_tab_ids)
 
     html = f"""<!DOCTYPE html>
@@ -1118,109 +851,27 @@ def main():
 </body>
 </html>"""
 
-    OUTPUT.write_text(html, encoding="utf-8")
-    print(f"\nDashboard written to {OUTPUT}")
-    print(f"  File size: {OUTPUT.stat().st_size / 1024 / 1024:.1f} MB")
+    output_path.write_text(html, encoding="utf-8")
+    print(f"  Written to {output_path}")
+    print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.1f} MB")
 
-    # ── Anonymized dashboard (Overall + Severity, site names replaced) ───
-    print("\nBuilding anonymized dashboard (Overall + Severity)...")
-    anon_content = build_overall_content(sites, labels=ANON_LABELS)
 
-    # Anonymized severity analysis
-    sev_anon = sev.copy()
-    sev_anon["site_label"] = sev_anon["site_dir"].map(
-        lambda sd: ANON_LABELS.get(sd, sd)
-    )
-    sev_anon = sev_anon.sort_values("site_label").reset_index(drop=True)
-    severity_anon = generate_severity_html(sev_anon, labels=ANON_LABELS)
+def main():
+    sites = discover_sites()
+    if not sites:
+        print("No sites found in", ROOT)
+        return
 
-    anon_tabs = (
-        '<button class="tab-btn active" onclick="switchTab(\'overall\')" '
-        'id="btn-overall">Overall</button>'
-        '<button class="tab-btn" onclick="switchTab(\'severity\')" '
-        'id="btn-severity">Severity Analysis</button>'
-    )
-    anon_panels = (
-        '<div class="tab-panel" id="panel-overall" style="display:block;">'
-        f'{anon_content}</div>'
-        '<div class="tab-panel" id="panel-severity" style="display:none;">'
-        f'{severity_anon}</div>'
-    )
-    anon_site_ids_js = '"overall","severity"'
+    print(f"Found {len(sites)} sites: {[s.name for s in sites]}")
 
-    anon_html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>CRRT Epidemiology — Multi-Site Dashboard (Anonymized)</title>
-    <style>
-        * {{ box-sizing: border-box; }}
-        body {{
-            font-family: 'Arial', sans-serif;
-            margin: 0; padding: 20px;
-            background: #f5f5f5;
-        }}
-        .container {{
-            max-width: 1400px; margin: 0 auto;
-            background: white; padding: 30px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #333;
-            border-bottom: 3px solid #4CAF50;
-            padding-bottom: 10px;
-            margin-top: 0;
-        }}
-        .tab-bar {{ margin: 20px 0; display: flex; gap: 8px; flex-wrap: wrap; }}
-        .tab-btn {{
-            padding: 10px 20px; border: 1px solid #ddd;
-            background: #f0f0f0; cursor: pointer;
-            border-radius: 4px 4px 0 0; font-size: 14px;
-        }}
-        .tab-btn.active {{ background: #4CAF50; color: white; border-color: #4CAF50; }}
-        .tab-panel {{ display: none; }}
-        .section {{ margin-bottom: 40px; }}
-        .section h2 {{
-            color: #333;
-            border-bottom: 2px solid #e0e0e0;
-            padding-bottom: 6px;
-        }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }}
-        th {{ background: #4CAF50; color: white; padding: 12px; text-align: left; border: 1px solid #ddd; }}
-        td {{ padding: 10px; border: 1px solid #ddd; vertical-align: top; }}
-        tr:nth-child(even) {{ background: #f9f9f9; }}
-        tr:hover {{ background: #f0f0f0; }}
-        .figure-block {{ margin-bottom: 32px; }}
-        .figure-block h3 {{ color: #444; margin-bottom: 8px; }}
-        .figure-block img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
-        .missing {{ color: #999; font-style: italic; }}
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>CRRT Epidemiology — Multi-Site Dashboard (Anonymized)</h1>
-    <div class="tab-bar">
-        {anon_tabs}
-    </div>
-    {anon_panels}
-</div>
-<script>
-    const SITES = [{anon_site_ids_js}];
-    function switchTab(siteId) {{
-        SITES.forEach(function(id) {{
-            document.getElementById('panel-' + id).style.display = 'none';
-            document.getElementById('btn-' + id).classList.remove('active');
-        }});
-        document.getElementById('panel-' + siteId).style.display = 'block';
-        document.getElementById('btn-' + siteId).classList.add('active');
-    }}
-</script>
-</body>
-</html>"""
-    anon_output = ROOT / "combined_dashboard_anon.html"
-    anon_output.write_text(anon_html, encoding="utf-8")
-    print(f"Anonymized dashboard written to {anon_output}")
-    print(f"  File size: {anon_output.stat().st_size / 1024 / 1024:.1f} MB")
+    # Named dashboard (with per-site tabs)
+    print("\nBuilding named dashboard...")
+    build_dashboard(sites, SITE_LABELS, OUTPUT, include_site_tabs=True)
+
+    # Anonymized dashboard (Overall tab only, site labels replaced)
+    print("\nBuilding anonymized dashboard...")
+    anon_labels = build_anon_labels(sites)
+    build_dashboard(sites, anon_labels, OUTPUT_ANON, include_site_tabs=False)
 
 
 if __name__ == "__main__":

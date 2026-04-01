@@ -301,9 +301,9 @@ adult_encounters = adult_encounters[
 ]
 
 # Filter for admission years 2018-2024
-# adult_encounters = adult_encounters[
-#     (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
-# ]
+adult_encounters = adult_encounters[
+    (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
+]
 
 print(f"\nFiltering Results:")
 print(f"   Total hospitalizations: {len(all_encounters['hospitalization_id'].unique()):,}")
@@ -441,6 +441,24 @@ n_crrt_blocks = crrt_df['encounter_block'].nunique()
 strobe_counts["2_crrt_blocks"] = n_crrt_blocks
 print(f"   CRRT encounter blocks after mode filter: {n_crrt_blocks:,}")
 
+# ============================================================================
+# CRRT Column Missingness Report
+# ============================================================================
+print("\n" + "=" * 80)
+print("CRRT Column Missingness Report")
+print("=" * 80)
+crrt_miss_cols = [c for c in crrt_df.columns if c not in ['hospitalization_id', 'encounter_block']]
+miss_data = []
+for col in crrt_miss_cols:
+    n_total = len(crrt_df)
+    n_missing = crrt_df[col].isna().sum()
+    pct = n_missing / n_total * 100
+    miss_data.append({'column': col, 'n_total': n_total, 'n_missing': int(n_missing), 'pct_missing': round(pct, 1)})
+    print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
+miss_report = pd.DataFrame(miss_data)
+miss_report.to_csv('../output/final/crrt_column_missingness.csv', index=False)
+print(f"\n✓ Saved to: output/final/crrt_column_missingness.csv")
+print("=" * 80)
 
 # In[16]:
 
@@ -1858,27 +1876,13 @@ print(f"   - Using last_vital_dttm: {num_using_last_vital:,}")
 # ============================================================================
 print("\n5. Calculating mortality outcomes...")
 
-# Bring in discharge_dttm for the in-hospital death check
-death_info = death_info.merge(
-    hosp_los[['encounter_block', 'discharge_dttm']].drop_duplicates('encounter_block'),
-    on='encounter_block', how='left',
-)
-
-# In-hospital death: died AND final_outcome_dttm between first vital and
-# max(last_vital, discharge). We use the max because:
-#   - Vitals often stop being charted shortly before death (median 0.57h gap),
-#     so death_dttm > last_vital_dttm is normal clinical workflow.
-#   - In some cases last_vital_dttm > discharge_dttm (vitals charted after
-#     discharge timestamp due to data entry timing).
-# Using max(last_vital, discharge) captures both patterns.
-death_info['_hosp_end'] = death_info[['last_vital_dttm', 'discharge_dttm']].max(axis=1)
+# In-hospital death: died AND final_outcome_dttm is between first and last vital
 death_info['in_hosp_death'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
     (death_info['final_outcome_dttm'] >= death_info['first_vital_dttm']) &
-    (death_info['final_outcome_dttm'] <= death_info['_hosp_end'])
+    (death_info['final_outcome_dttm'] <= death_info['last_vital_dttm'])
 ).astype(int)
-death_info = death_info.drop(columns=['_hosp_end'])
 
 # 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
 death_info['death_30d'] = (
@@ -1895,14 +1899,12 @@ print(f"   30-day deaths: {death_info['death_30d'].sum():,} ({death_info['death_
 # 6. COMBINE ALL OUTCOMES
 # ============================================================================
 print("\n6. Combining all outcomes...")
-# Deduplicate to one row per encounter_block (stitched hospitalizations share an encounter_block)
-cohort_base = cohort_df[['hospitalization_id', 'encounter_block']].drop_duplicates(subset='encounter_block', keep='first')
-outcomes_df = cohort_base.merge(
+outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
     icu_los_summary, on='encounter_block', how='left'
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
 ).merge(
-    death_info.drop(columns=['discharge_dttm'], errors='ignore'), on='encounter_block', how='left'
+    death_info, on='encounter_block', how='left'
 )
 
 print(f"\nFinal outcomes dataset:")
@@ -2136,11 +2138,27 @@ if has_crrt_settings:
     print(f"     Total rows: {len(final_df):,} (one per encounter)")
     print(f"     Total columns: {len(final_df.columns)}")
 
-    # Assign to your desired variable name
-    index_crrt_df = final_df.copy()
+    # Merge dose results back into the full index_crrt_df (left join)
+    # This preserves encounters excluded from dose calc (e.g. SCUF/AVVH, missing flows)
+    dose_only_cols = [c for c in final_df.columns if c not in ['encounter_block', 'hospitalization_id', 'crrt_initiation_time', 'weight_kg', 'crrt_mode_category']]
+    # Drop any overlapping columns from index_crrt_df before merge to avoid _x/_y suffixes
+    overlap_cols = [c for c in dose_only_cols if c in index_crrt_df.columns]
+    if overlap_cols:
+        index_crrt_df = index_crrt_df.drop(columns=overlap_cols)
+    print(f"\n   Merging dose columns back into index_crrt_df...")
+    print(f"     index_crrt_df rows before merge: {len(index_crrt_df):,}")
+    print(f"     final_df (dose-eligible) rows: {len(final_df):,}")
+    index_crrt_df = index_crrt_df.merge(
+        final_df[['encounter_block'] + dose_only_cols],
+        on='encounter_block',
+        how='left'
+    )
+    print(f"     index_crrt_df rows after merge: {len(index_crrt_df):,}")
 
     print("\n✅ Final dataframe created with one row per encounter!")
     print(f"   Stored as 'index_crrt_df' with {len(index_crrt_df)} encounters")
+    print(f"   Encounters with dose data: {index_crrt_df['crrt_dose_ml_kg_hr'].notna().sum():,}")
+    print(f"   Encounters without dose data (NaN): {index_crrt_df['crrt_dose_ml_kg_hr'].isna().sum():,}")
 
 
     # In[48]:

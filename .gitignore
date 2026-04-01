@@ -59,7 +59,7 @@ config/config_ucmc.json
 config/config.json
 
 all_site_data/
-code/05_severity_analysis.py
+code/08_severity_analysis.py
 code/archive/output/
 code/archive/
 grant/
