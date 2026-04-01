@@ -901,7 +901,7 @@ tgrid_psm <- sort(unique(tidy_ci$time))
 grp_levels <- levels(df_match$crrt_high)
 
 # Bootstrap CIs (200 replicates)
-N_BOOT_PSM <- 200
+N_BOOT_PSM <- 500
 set.seed(42)
 cat("Bootstrapping PSM CIF confidence intervals (", N_BOOT_PSM, "replicates) …\n")
 
@@ -942,7 +942,7 @@ for (b in seq_len(N_BOOT_PSM)) {
                                           rule = 2, f = 0)$y
     }
   }
-  if (b %% 50 == 0) cat("  ", b, "/", N_BOOT_PSM, "\n")
+  if (b %% 100 == 0) cat("  ", b, "/", N_BOOT_PSM, "\n")
 }
 
 # Compute pointwise 95% CIs and merge with point estimates
@@ -1052,6 +1052,33 @@ ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
        plot_sl_overlap, width=6, height=4)
 
 cat("Saved SL PS overlap plot as PNG\n")
+
+# Positivity diagnostics: extreme propensity score proportions
+ps_thresholds <- c(0.05, 0.10, 0.90, 0.95)
+ps_extremes <- data.frame(
+  threshold = ps_thresholds,
+  direction = c("< 0.05", "< 0.10", "> 0.90", "> 0.95"),
+  n = sapply(ps_thresholds, function(t) {
+    if (t <= 0.5) sum(df_tte_sl$ps < t) else sum(df_tte_sl$ps > t)
+  }),
+  pct = sapply(ps_thresholds, function(t) {
+    if (t <= 0.5) mean(df_tte_sl$ps < t) * 100 else mean(df_tte_sl$ps > t) * 100
+  })
+)
+
+cat("\nPositivity diagnostics (extreme PS proportions):\n")
+cat(sprintf("  %-10s  %5s  %6s\n", "Threshold", "N", "Pct"))
+for (i in seq_len(nrow(ps_extremes))) {
+  cat(sprintf("  %-10s  %5d  %5.1f%%\n",
+              ps_extremes$direction[i], ps_extremes$n[i], ps_extremes$pct[i]))
+}
+cat("\n")
+
+write.csv(ps_extremes,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                       "_SL_PS_extremes.csv")),
+          row.names = FALSE)
+cat("Saved PS extremes CSV\n\n")
 
 # Weighted balance check BEFORE trimming (Look for Diff.Adj being all <0.1)
 # Effective Sampling (aim for close to 1.0)
@@ -1353,7 +1380,7 @@ cif_df <- build_standardized_cifs(
 )
 
 # Bootstrap CIs (200 replicates)
-N_BOOT <- 200
+N_BOOT <- 500
 set.seed(42)
 cat("Bootstrapping IPTW CIF confidence intervals (", N_BOOT, "replicates) …\n")
 
@@ -1401,7 +1428,7 @@ for (b in seq_len(N_BOOT)) {
     boot_disch[[lv]][b, ] <- approx(lv_df$time, lv_df$cif_disch,
                                     xout = tgrid_common, rule = 2)$y
   }
-  if (b %% 50 == 0) cat("  ", b, "/", N_BOOT, "\n")
+  if (b %% 100 == 0) cat("  ", b, "/", N_BOOT, "\n")
 }
 
 # Compute 95% CIs
@@ -1517,6 +1544,462 @@ write.csv(comparison_table,
 cat("Saved model comparison CSV\n")
 
 # ============================================================= #
-# ---- 5. FINISH! ----
+# ---- 5. MODEL COMPARISON COMPLETE ----
 # ============================================================= #
-cat("Code run complete!\n")
+cat("PSM and IPTW analyses complete.\n\n")
+
+# ============================================================= #
+# ---- 5b. E-VALUE SENSITIVITY ANALYSIS ----
+# ============================================================= #
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("Section 5b: E-Value Sensitivity Analysis for Unmeasured Confounding\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+# E-values quantify the minimum strength of association that an unmeasured
+# confounder would need to have with both treatment AND outcome to fully
+# explain away the observed effect. Higher E-values = more robust to
+# unmeasured confounding.
+
+# Extract treatment-row HRs from comparison_table (already computed)
+# comparison_table has: model, HR_type, HR, HR_lower, HR_upper, p_value
+
+compute_evalue_row <- function(model_label, hr, hr_lower, hr_upper) {
+  # evalues.HR expects HR >= 1 for the point estimate direction;
+  # it handles HR < 1 internally by computing 1/HR
+  ev <- evalues.HR(est = hr, lo = hr_lower, hi = hr_upper, rare = FALSE)
+
+  # ev is a matrix; row 1 = point estimate, row 2 = CI closest to null
+  data.frame(
+    model       = model_label,
+    HR          = hr,
+    HR_lower    = hr_lower,
+    HR_upper    = hr_upper,
+    evalue_point = ev["E-values", "point"],
+    evalue_ci    = ev["E-values", "lower"],
+    stringsAsFactors = FALSE
+  )
+}
+
+evalue_results <- bind_rows(
+  compute_evalue_row("PSM FG - Death",
+                     comparison_table$HR[1],
+                     comparison_table$HR_lower[1],
+                     comparison_table$HR_upper[1]),
+  compute_evalue_row("PSM FG - Discharge",
+                     comparison_table$HR[2],
+                     comparison_table$HR_lower[2],
+                     comparison_table$HR_upper[2]),
+  compute_evalue_row("IPTW Cox - Death",
+                     comparison_table$HR[3],
+                     comparison_table$HR_lower[3],
+                     comparison_table$HR_upper[3]),
+  compute_evalue_row("IPTW Cox - Discharge",
+                     comparison_table$HR[4],
+                     comparison_table$HR_lower[4],
+                     comparison_table$HR_upper[4])
+)
+
+# Also compute E-values for the two noteworthy subgroup interactions
+# (using the IPTW subgroup-specific HRs that will be computed in Section 6,
+#  so we defer those to after Section 6 and append them)
+
+cat("E-value results:\n")
+cat(sprintf("  %-25s  HR=%5.2f (%4.2f-%4.2f)  E-value: point=%.2f, CI=%.2f\n",
+            evalue_results$model,
+            evalue_results$HR,
+            evalue_results$HR_lower,
+            evalue_results$HR_upper,
+            evalue_results$evalue_point,
+            evalue_results$evalue_ci))
+cat("\n")
+
+write.csv(evalue_results,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                       "_evalue_sensitivity.csv")),
+          row.names = FALSE)
+cat("Saved E-value sensitivity CSV\n\n")
+
+# ============================================================= #
+# ---- 6. HYPOTHESIS-GENERATING SUBGROUP ANALYSIS ----
+# ============================================================= #
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("Section 6: Subgroup Analysis (Hypothesis-Generating)\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+## ---- A. Define subgroup variables with clinical cutpoints ----
+
+# Compute CCI total (sum of 17 binary components)
+df_tte_sl$cci_total <- rowSums(df_tte_sl[, cci_vars], na.rm = TRUE)
+
+# Named list of subgroup definitions
+# Each entry: var_expr (evaluated on df), label, reference level, factor levels
+subgroup_defs <- list(
+  age_group = list(
+    var_expr = quote(ifelse(age_at_admission >= 65, ">=65", "<65")),
+    label = "Age (years)",
+    levels = c("<65", ">=65")
+  ),
+  sofa_group = list(
+    var_expr = quote(ifelse(sofa_total_0 >= 12, ">=12", "<12")),
+    label = "SOFA Score",
+    levels = c("<12", ">=12")
+  ),
+  lactate_group = list(
+    var_expr = quote(ifelse(lactate_0 >= 4, ">=4", "<4")),
+    label = "Lactate (mmol/L)",
+    levels = c("<4", ">=4")
+  ),
+  sex_group = list(
+    var_expr = quote(ifelse(sex_category == "female", "Female", "Male")),
+    label = "Sex",
+    levels = c("Male", "Female")
+  ),
+  imv_group = list(
+    var_expr = quote(ifelse(imv_status_0 == 1, "On IMV", "No IMV")),
+    label = "Mechanical Ventilation",
+    levels = c("No IMV", "On IMV")
+  ),
+  vasopressor_group = list(
+    var_expr = quote(ifelse(norepinephrine_equivalent_0 > 0.1, "High", "Low")),
+    label = "Vasopressor (NEE >0.1)",
+    levels = c("Low", "High")
+  ),
+  crrt_mode_group = list(
+    var_expr = quote(ifelse(crrt_mode_category == "cvvhdf", "CVVHDF", "Other")),
+    label = "CRRT Modality",
+    levels = c("Other", "CVVHDF")
+  ),
+  cci_group = list(
+    var_expr = quote(ifelse(cci_total >= 4, ">=4", "<4")),
+    label = "CCI Total",
+    levels = c("<4", ">=4")
+  ),
+  weight_group = list(
+    var_expr = quote(ifelse(weight_kg >= 80, ">=80 kg", "<80 kg")),
+    label = "Body Weight",
+    levels = c("<80 kg", ">=80 kg")
+  )
+)
+
+# Create subgroup columns on the IPTW analysis dataset
+cat("Subgroup distributions:\n")
+for (sg_name in names(subgroup_defs)) {
+  sg <- subgroup_defs[[sg_name]]
+  df_tte_sl[[sg_name]] <- factor(
+    eval(sg$var_expr, envir = df_tte_sl),
+    levels = sg$levels
+  )
+  tbl <- table(df_tte_sl[[sg_name]])
+  cat("  ", sg$label, ": ",
+      paste(paste0(names(tbl), "=", tbl), collapse = ", "), "\n")
+}
+cat("\n")
+
+## ---- B. Fit interaction models (one per subgroup) ----
+
+cat("Fitting interaction models for death outcome...\n")
+subgroup_results <- list()
+
+for (sg_name in names(subgroup_defs)) {
+  sg <- subgroup_defs[[sg_name]]
+
+  # Skip if either subgroup level has < 20 death events
+  event_counts <- tapply(df_tte_sl$outcome == 2, df_tte_sl[[sg_name]], sum)
+  if (any(event_counts < 20, na.rm = TRUE)) {
+    cat("  Skipping ", sg$label,
+        " -- insufficient events (", paste(event_counts, collapse = "/"), ")\n")
+    next
+  }
+
+  # Formula: Surv(...) ~ crrt_high * subgroup_var + covariates
+  int_formula <- as.formula(paste(
+    "Surv(time_to_event_30d, outcome == 2) ~",
+    "crrt_high *", sg_name, "+",
+    paste(model_covariates, collapse = " + ")
+  ))
+
+  fit_int <- tryCatch(
+    coxph(int_formula,
+          data = df_tte_sl,
+          weights = w,
+          robust = TRUE,
+          cluster = id),
+    error = function(e) {
+      cat("  Error for ", sg$label, ": ", e$message, "\n")
+      NULL
+    }
+  )
+  if (is.null(fit_int)) next
+
+  # Extract interaction p-value
+  coef_tbl <- summary(fit_int)$coefficients
+  int_rows <- grep(
+    paste0("crrt_high.*:", sg_name, "|", sg_name, ":.*crrt_high"),
+    rownames(coef_tbl)
+  )
+  p_col <- intersect(colnames(coef_tbl), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
+  p_interaction <- if (length(int_rows) > 0) coef_tbl[int_rows[1], p_col] else NA
+
+  # Extract subgroup-specific HRs via linear combination of coefficients
+  beta <- coef(fit_int)
+  V <- vcov(fit_int)
+
+  # Index of the crrt_high main effect
+  trt_idx <- grep("^crrt_high", names(beta))[1]
+
+  # Reference level: HR is the crrt_high main effect alone
+  hr_ref <- exp(beta[trt_idx])
+  se_ref <- sqrt(V[trt_idx, trt_idx])
+  hr_ref_lower <- exp(beta[trt_idx] - 1.96 * se_ref)
+  hr_ref_upper <- exp(beta[trt_idx] + 1.96 * se_ref)
+
+  # Non-reference level: HR = exp(beta_crrt + beta_interaction)
+  if (length(int_rows) > 0) {
+    int_idx <- int_rows[1]
+    beta_combined <- beta[trt_idx] + beta[int_idx]
+    se_combined <- sqrt(V[trt_idx, trt_idx] + V[int_idx, int_idx] +
+                          2 * V[trt_idx, int_idx])
+    hr_alt <- exp(beta_combined)
+    hr_alt_lower <- exp(beta_combined - 1.96 * se_combined)
+    hr_alt_upper <- exp(beta_combined + 1.96 * se_combined)
+  } else {
+    hr_alt <- hr_alt_lower <- hr_alt_upper <- NA
+  }
+
+  # Count n and death events per subgroup level
+  n_ref <- sum(df_tte_sl[[sg_name]] == sg$levels[1], na.rm = TRUE)
+  n_alt <- sum(df_tte_sl[[sg_name]] == sg$levels[2], na.rm = TRUE)
+  ev_ref <- sum(df_tte_sl[[sg_name]] == sg$levels[1] &
+                  df_tte_sl$outcome == 2, na.rm = TRUE)
+  ev_alt <- sum(df_tte_sl[[sg_name]] == sg$levels[2] &
+                  df_tte_sl$outcome == 2, na.rm = TRUE)
+
+  subgroup_results[[sg_name]] <- tibble(
+    subgroup    = sg$label,
+    level       = c(sg$levels[1], sg$levels[2]),
+    n           = c(n_ref, n_alt),
+    events      = c(ev_ref, ev_alt),
+    HR          = c(hr_ref, hr_alt),
+    HR_lower    = c(hr_ref_lower, hr_alt_lower),
+    HR_upper    = c(hr_ref_upper, hr_alt_upper),
+    p_interaction = p_interaction
+  )
+
+  cat("  ", sg$label, ": p-interaction =", sprintf("%.4f", p_interaction), "\n")
+}
+cat("\n")
+
+## ---- C. Assemble results and compute FDR q-values ----
+
+sg_results_df <- bind_rows(subgroup_results)
+
+# Add overall HR from the main IPTW model (fit_cs_death) for context
+overall_coef <- summary(fit_cs_death)$coefficients
+trt_row <- grep("crrt_high", rownames(overall_coef))[1]
+overall_ci <- confint(fit_cs_death)
+p_col_main <- intersect(
+  colnames(overall_coef), c("Pr(>|z|)", "Robust Pr(>|z|)")
+)[1]
+
+overall_row <- tibble(
+  subgroup      = "Overall",
+  level         = "All patients",
+  n             = nrow(df_tte_sl),
+  events        = sum(df_tte_sl$outcome == 2),
+  HR            = exp(overall_coef[trt_row, "coef"]),
+  HR_lower      = exp(overall_ci[trt_row, 1]),
+  HR_upper      = exp(overall_ci[trt_row, 2]),
+  p_interaction = NA
+)
+
+sg_results_df <- bind_rows(overall_row, sg_results_df)
+
+# Compute BH-adjusted FDR q-values on the unique interaction p-values
+unique_p <- sg_results_df %>%
+  filter(!is.na(p_interaction)) %>%
+  distinct(subgroup, .keep_all = TRUE) %>%
+  mutate(q_interaction = p.adjust(p_interaction, method = "BH"))
+
+sg_results_df <- sg_results_df %>%
+  left_join(unique_p %>% select(subgroup, q_interaction), by = "subgroup")
+
+# Format for display
+sg_results_df <- sg_results_df %>%
+  mutate(
+    HR_label = sprintf("%.2f (%.2f-%.2f)", HR, HR_lower, HR_upper),
+    p_int_label = ifelse(is.na(p_interaction), "",
+                         sprintf("%.3f", p_interaction)),
+    q_int_label = ifelse(is.na(q_interaction), "",
+                         sprintf("%.3f", q_interaction))
+  )
+
+# Save CSV
+write.csv(sg_results_df,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                       "_subgroup_analysis_results.csv")),
+          row.names = FALSE)
+cat("Saved subgroup analysis results CSV\n")
+
+# Print summary
+cat("\nSubgroup Analysis Summary (Death Outcome):\n")
+cat(sprintf("%-25s %-12s %5s %6s   %-22s  %s\n",
+            "Subgroup", "Level", "N", "Events", "HR (95% CI)", "p-int"))
+cat(paste(rep("-", 90), collapse = ""), "\n")
+for (i in seq_len(nrow(sg_results_df))) {
+  r <- sg_results_df[i, ]
+  cat(sprintf("%-25s %-12s %5d %6d   %-22s  %s\n",
+              r$subgroup, r$level, r$n, r$events,
+              r$HR_label, r$p_int_label))
+}
+cat("\n")
+
+## ---- D. Forest plot of subgroup-specific HRs ----
+
+# Filter out subgroup levels with NA HR (e.g., empty subgroups like CVVHDF=0)
+sg_plot_data <- sg_results_df %>%
+  filter(subgroup != "Overall") %>%
+  filter(!is.na(HR))
+
+# Also drop subgroups that lost a level after NA filtering
+sg_with_both <- sg_plot_data %>%
+  count(subgroup) %>%
+  filter(n == 2) %>%
+  pull(subgroup)
+sg_plot_data <- sg_plot_data %>% filter(subgroup %in% sg_with_both)
+
+# Build plot data with row ordering:
+#   - Overall at the top
+#   - Then each subgroup header followed by its two levels
+plot_rows <- list()
+row_counter <- 0
+
+# Overall row
+row_counter <- row_counter + 1
+plot_rows[[row_counter]] <- tibble(
+  row_label = "Overall", is_header = FALSE, is_overall = TRUE,
+  HR = overall_row$HR, HR_lower = overall_row$HR_lower,
+  HR_upper = overall_row$HR_upper,
+  p_interaction = NA, row_order = row_counter
+)
+
+# Spacer after overall
+row_counter <- row_counter + 1
+plot_rows[[row_counter]] <- tibble(
+  row_label = "", is_header = FALSE, is_overall = FALSE,
+  HR = NA, HR_lower = NA, HR_upper = NA,
+  p_interaction = NA, row_order = row_counter
+)
+
+# Each subgroup: header + two levels (only subgroups with both levels)
+for (sg_label in unique(sg_plot_data$subgroup)) {
+  sg_data <- sg_plot_data %>% filter(subgroup == sg_label)
+
+  # Subgroup header row
+  row_counter <- row_counter + 1
+  plot_rows[[row_counter]] <- tibble(
+    row_label = sg_label, is_header = TRUE, is_overall = FALSE,
+    HR = NA, HR_lower = NA, HR_upper = NA,
+    p_interaction = sg_data$p_interaction[1], row_order = row_counter
+  )
+
+  # Level rows
+  for (j in seq_len(nrow(sg_data))) {
+    row_counter <- row_counter + 1
+    r <- sg_data[j, ]
+    plot_rows[[row_counter]] <- tibble(
+      row_label = paste0("    ", r$level),
+      is_header = FALSE, is_overall = FALSE,
+      HR = r$HR, HR_lower = r$HR_lower, HR_upper = r$HR_upper,
+      p_interaction = NA, row_order = row_counter
+    )
+  }
+}
+
+plot_df <- bind_rows(plot_rows)
+
+# Reverse y so Overall is at the top
+plot_df$y_pos <- max(plot_df$row_order) - plot_df$row_order + 1
+
+# Determine x-axis range for annotation placement
+x_max_ci <- max(plot_df$HR_upper, na.rm = TRUE)
+x_annot <- x_max_ci * 1.5
+
+# Data for points (non-header, non-spacer rows with valid HR)
+point_df <- plot_df %>%
+  filter(!is.na(HR)) %>%
+  mutate(pt_color = ifelse(is_overall, "black", "steelblue"))
+
+# Build forest plot
+p_forest <- ggplot(plot_df, aes(y = y_pos)) +
+  # Reference line at HR = 1
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey50") +
+  # Point + CI
+  geom_pointrange(
+    data = point_df,
+    aes(x = HR, xmin = HR_lower, xmax = HR_upper, color = pt_color),
+    size = 0.4, fatten = 3, show.legend = FALSE
+  ) +
+  scale_color_identity() +
+  # P-interaction annotations for header rows
+  geom_text(
+    data = plot_df %>% filter(is_header & !is.na(p_interaction)),
+    aes(x = x_annot, y = y_pos,
+        label = paste0("p-int = ", sprintf("%.3f", p_interaction))),
+    hjust = 0, size = 3, fontface = "italic", color = "grey30"
+  ) +
+  # Log scale x-axis
+  scale_x_log10(
+    breaks = c(0.25, 0.5, 1, 2, 4),
+    labels = c("0.25", "0.5", "1", "2", "4")
+  ) +
+  # Y-axis labels
+  scale_y_continuous(
+    breaks = plot_df$y_pos,
+    labels = plot_df$row_label,
+    expand = expansion(add = 0.8)
+  ) +
+  coord_cartesian(xlim = c(
+    min(0.2, min(plot_df$HR_lower, na.rm = TRUE) * 0.8),
+    x_annot * 2
+  )) +
+  labs(
+    title = "Subgroup Analysis: CRRT Dose and 30-Day Mortality",
+    subtitle = paste0("IPTW Cause-Specific HR (High vs Low Dose, cutoff = ",
+                      dose_cutoff, " mL/kg/hr)"),
+    x = "Hazard Ratio (log scale)",
+    y = NULL,
+    caption = paste0(
+      "Hypothesis-generating analysis. P-interaction values are unadjusted.\n",
+      "Subgroups with <20 death events in either level were excluded."
+    )
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    axis.text.y = element_text(hjust = 0, size = 9),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    plot.caption = element_text(hjust = 0, face = "italic", size = 8),
+    plot.margin = ggplot2::margin(10, 40, 10, 10, unit = "pt")
+  )
+
+print(p_forest)
+
+# Save PNG and PDF
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_subgroup_forest_plot.png")),
+       p_forest, width = 10, height = 8, dpi = 300)
+
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                    "_subgroup_forest_plot.pdf")),
+       p_forest, width = 10, height = 8)
+
+cat("Saved subgroup forest plot (PNG + PDF)\n")
+
+# ============================================================= #
+# ---- 7. FINISH! ----
+# ============================================================= #
+cat("\nAll analyses complete!\n")
