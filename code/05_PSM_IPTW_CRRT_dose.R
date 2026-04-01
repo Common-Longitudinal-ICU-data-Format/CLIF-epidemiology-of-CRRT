@@ -70,7 +70,41 @@ if (!dir.exists(output_dir)) {
   cat("Created output directory:", output_dir, "\n")
 }
 
-## ---- D. Load configuration ----
+## ---- D. Rubin's rules helper for manual pooling ----
+# Used for models that mice::pool() doesn't support (crr, weighted coxph)
+rubins_pool <- function(betas, ses) {
+  # betas: vector of m coefficient estimates
+  # ses:   vector of m standard errors
+  # Returns: list(beta, se, hr, hr_lower, hr_upper, p_value, df)
+  m <- length(betas)
+  beta_bar <- mean(betas)
+  W <- mean(ses^2)               # Within-imputation variance
+  B <- var(betas)                 # Between-imputation variance
+  T_var <- W + (1 + 1/m) * B     # Total variance
+  se_pooled <- sqrt(T_var)
+
+  # Barnard-Rubin degrees of freedom
+  r <- (1 + 1/m) * B / W
+  df_old <- (m - 1) * (1 + 1/r)^2
+  # Simplified: use df_old (sufficient for m=5)
+  df <- df_old
+
+  t_stat <- beta_bar / se_pooled
+  p_value <- 2 * pt(abs(t_stat), df = df, lower.tail = FALSE)
+
+  list(
+    beta     = beta_bar,
+    se       = se_pooled,
+    hr       = exp(beta_bar),
+    hr_lower = exp(beta_bar - 1.96 * se_pooled),
+    hr_upper = exp(beta_bar + 1.96 * se_pooled),
+    p_value  = p_value,
+    df       = df,
+    fmi      = (B + B/m) / T_var  # Fraction of missing information
+  )
+}
+
+## ---- E. Load configuration ----
 config_path <- "config/config.json"
 if (!file.exists(config_path)) {
   stop("Configuration file not found: ", config_path)
@@ -187,13 +221,22 @@ if (n_incomplete > 0) {
   mice_vars <- mice_vars[mice_vars %in% names(df)]
 
   imp <- mice(df[, mice_vars], m = 5, method = "pmm", seed = 42, maxit = 10, printFlag = FALSE)
-  imputed_block <- complete(imp, 1)
-  df_complete <- df
-  df_complete[, mice_vars] <- imputed_block
-  cat("MICE imputed", sum(miss_counts[miss_counts > 0]), "total missing values\n")
+
+  # Retain all 5 imputed datasets for Rubin's rules pooling
+  N_IMP <- 5
+  imp_list <- lapply(seq_len(N_IMP), function(m) {
+    d <- df
+    d[, mice_vars] <- complete(imp, m)
+    d
+  })
+  df_complete <- imp_list[[1]]  # Primary dataset for PSM, SL, bootstrap, etc.
+  cat("MICE imputed", sum(miss_counts[miss_counts > 0]),
+      "total missing values (", N_IMP, "imputations retained)\n")
 } else {
   cat("No missing values — skipping MICE\n")
   df_complete <- df
+  N_IMP <- 1
+  imp_list <- list(df_complete)
 }
 
 cat("Analysis sample:", nrow(df_complete), "of", nrow(df), "\n\n")
@@ -872,6 +915,87 @@ write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
           row.names = FALSE)
 cat("Saved Fine Gray DR model results\n")
 
+### ---- I-b. Rubin's Rules Pooled Fine-Gray Models ----
+
+cat("\nPooling Fine-Gray DR models across", N_IMP, "MICE imputations...\n")
+
+# Use the same PSM matched set (from imputation 1) but substitute imputed
+# covariate values from each imputation. The matched set (row membership)
+# stays fixed — only the imputed values change.
+matched_ids <- as.integer(rownames(df_match))
+
+pool_fg_treatment <- function(failcode_val, outcome_label) {
+  betas <- numeric(N_IMP)
+  ses   <- numeric(N_IMP)
+
+  for (m in seq_len(N_IMP)) {
+    d_imp <- imp_list[[m]]
+    # Apply same data prep as df_tte_bin
+    d_imp$crrt_high <- ifelse(d_imp$crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L)
+    d_imp$crrt_high <- factor(d_imp$crrt_high, levels = c(0, 1),
+                              labels = c(paste0("<", dose_cutoff),
+                                         paste0(">=", dose_cutoff)))
+    d_imp <- tidyr::drop_na(d_imp,
+      crrt_high, age_at_admission, sex_category, sofa_total_0,
+      lactate_0, bicarbonate_0, potassium_0,
+      oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
+      time_to_event_30d, outcome
+    )
+    # Subset to matched rows
+    d_match_m <- d_imp[rownames(d_imp) %in% as.character(matched_ids), ]
+
+    X_dr_m <- model.matrix(dr_formula, data = d_match_m)[, -1, drop = FALSE]
+    colnames(X_dr_m) <- make.names(colnames(X_dr_m))
+
+    fg_m <- tryCatch(
+      cmprsk::crr(
+        ftime    = d_match_m$time_to_event_30d,
+        fstatus  = d_match_m$outcome,
+        cov1     = X_dr_m,
+        failcode = failcode_val,
+        cencode  = 0
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(fg_m)) next
+
+    s <- summary(fg_m)$coef
+    trt_row <- grep("crrt_high", rownames(s))[1]
+    betas[m] <- s[trt_row, "coef"]
+    ses[m]   <- s[trt_row, "se(coef)"]
+  }
+
+  pooled <- rubins_pool(betas, ses)
+  data.frame(
+    model    = paste0("PSM FG (pooled) - ", outcome_label),
+    HR_type  = "SHR",
+    HR       = pooled$hr,
+    HR_lower = pooled$hr_lower,
+    HR_upper = pooled$hr_upper,
+    p_value  = pooled$p_value,
+    fmi      = pooled$fmi,
+    stringsAsFactors = FALSE
+  )
+}
+
+pooled_fg_death <- pool_fg_treatment(2, "Death")
+pooled_fg_disch <- pool_fg_treatment(1, "Discharge")
+pooled_fg_results <- bind_rows(pooled_fg_death, pooled_fg_disch)
+
+cat("Pooled Fine-Gray results:\n")
+for (i in seq_len(nrow(pooled_fg_results))) {
+  r <- pooled_fg_results[i, ]
+  cat(sprintf("  %-35s SHR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
+              r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
+}
+cat("\n")
+
+write.csv(pooled_fg_results,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                       "_fg_psm_pooled_results.csv")),
+          row.names = FALSE)
+cat("Saved pooled Fine-Gray results CSV\n")
+
 ### ---- II. CIF Curves ----
 
 # Helper: tidy a cuminc object into a data.frame          
@@ -1312,6 +1436,92 @@ write.csv(
 )
 cat("Saved full IPTW Cause-Specific Cox results.\n")
 
+### ---- II-b. Rubin's Rules Pooled IPTW Cox Models (across 5 imputations) ----
+
+cat("\nPooling IPTW Cox models across", N_IMP, "MICE imputations...\n")
+
+# Build imputed SL datasets: same data prep as df_tte_sl but on each imputation
+# Reuse same SL weights (fitted on imputation 1) — standard pragmatic approach
+imp_sl_list <- lapply(seq_len(N_IMP), function(m) {
+  d <- imp_list[[m]]
+  d$crrt_high <- ifelse(d$crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L)
+  d$crrt_high <- factor(d$crrt_high, levels = c(0, 1),
+                        labels = c(paste0("<", dose_cutoff),
+                                   paste0(">=", dose_cutoff)))
+  d <- tidyr::drop_na(d,
+    crrt_high, age_at_admission, sex_category, sofa_total_0,
+    lactate_0, bicarbonate_0, potassium_0,
+    oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
+    time_to_event_30d, outcome
+  )
+  d$crrt_high <- relevel(d$crrt_high, ref = ref_label)
+  d$w  <- w_sl$weights
+  d$ps <- w_sl$ps
+  d$id <- seq_len(nrow(d))
+  d
+})
+
+# Fit Cox death + discharge on each imputed dataset
+cox_formula_death <- as.formula(
+  paste("Surv(time_to_event_30d, outcome == 2) ~", cox_rhs))
+cox_formula_disch <- as.formula(
+  paste("Surv(time_to_event_30d, outcome == 1) ~", cox_rhs))
+
+imp_cox_fits <- lapply(seq_len(N_IMP), function(m) {
+  d <- imp_sl_list[[m]]
+  fit_d <- coxph(cox_formula_death, data = d, weights = w,
+                 robust = TRUE, cluster = id)
+  fit_c <- coxph(cox_formula_disch, data = d, weights = w,
+                 robust = TRUE, cluster = id)
+  list(death = fit_d, disch = fit_c)
+})
+
+# Extract treatment coefficient from each fit and pool
+p_col_detect <- function(co) {
+  intersect(colnames(co), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
+}
+
+pool_treatment_hr <- function(fits, outcome_label) {
+  trt_name <- grep("crrt_high", names(coef(fits[[1]])), value = TRUE)[1]
+  betas <- sapply(fits, function(f) coef(f)[trt_name])
+  ses   <- sapply(fits, function(f) {
+    co <- summary(f)$coefficients
+    co[trt_name, "robust se"]
+  })
+  pooled <- rubins_pool(betas, ses)
+  data.frame(
+    model     = paste0("IPTW Cox (pooled) - ", outcome_label),
+    HR_type   = "CauseSpecific HR",
+    HR        = pooled$hr,
+    HR_lower  = pooled$hr_lower,
+    HR_upper  = pooled$hr_upper,
+    p_value   = pooled$p_value,
+    fmi       = pooled$fmi,
+    stringsAsFactors = FALSE
+  )
+}
+
+pooled_iptw_death <- pool_treatment_hr(
+  lapply(imp_cox_fits, `[[`, "death"), "Death")
+pooled_iptw_disch <- pool_treatment_hr(
+  lapply(imp_cox_fits, `[[`, "disch"), "Discharge")
+
+pooled_iptw_results <- bind_rows(pooled_iptw_death, pooled_iptw_disch)
+
+cat("Pooled IPTW Cox results:\n")
+for (i in seq_len(nrow(pooled_iptw_results))) {
+  r <- pooled_iptw_results[i, ]
+  cat(sprintf("  %-35s HR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
+              r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
+}
+cat("\n")
+
+write.csv(pooled_iptw_results,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+                                       "_IPTW_pooled_results.csv")),
+          row.names = FALSE)
+cat("Saved pooled IPTW results CSV\n")
+
 ### ---- III. Standardized CIF Curves (competing risks) ----
 
 # Helper: carry-forward cumulative baseline hazard to a common grid
@@ -1531,7 +1741,9 @@ comparison_table <- bind_rows(
   fg_death_row,
   fg_disch_row,
   iptw_death_row,
-  iptw_disch_row
+  iptw_disch_row,
+  pooled_fg_results %>% select(model, HR_type, HR, HR_lower, HR_upper, p_value),
+  pooled_iptw_results %>% select(model, HR_type, HR, HR_lower, HR_upper, p_value)
 )
 
 comparison_table
@@ -1581,28 +1793,13 @@ compute_evalue_row <- function(model_label, hr, hr_lower, hr_upper) {
   )
 }
 
-evalue_results <- bind_rows(
-  compute_evalue_row("PSM FG - Death",
-                     comparison_table$HR[1],
-                     comparison_table$HR_lower[1],
-                     comparison_table$HR_upper[1]),
-  compute_evalue_row("PSM FG - Discharge",
-                     comparison_table$HR[2],
-                     comparison_table$HR_lower[2],
-                     comparison_table$HR_upper[2]),
-  compute_evalue_row("IPTW Cox - Death",
-                     comparison_table$HR[3],
-                     comparison_table$HR_lower[3],
-                     comparison_table$HR_upper[3]),
-  compute_evalue_row("IPTW Cox - Discharge",
-                     comparison_table$HR[4],
-                     comparison_table$HR_lower[4],
-                     comparison_table$HR_upper[4])
-)
-
-# Also compute E-values for the two noteworthy subgroup interactions
-# (using the IPTW subgroup-specific HRs that will be computed in Section 6,
-#  so we defer those to after Section 6 and append them)
+# Compute E-values for all models in the comparison table
+evalue_results <- bind_rows(lapply(seq_len(nrow(comparison_table)), function(i) {
+  compute_evalue_row(comparison_table$model[i],
+                     comparison_table$HR[i],
+                     comparison_table$HR_lower[i],
+                     comparison_table$HR_upper[i])
+}))
 
 cat("E-value results:\n")
 cat(sprintf("  %-25s  HR=%5.2f (%4.2f-%4.2f)  E-value: point=%.2f, CI=%.2f\n",
@@ -1697,15 +1894,30 @@ for (sg_name in names(subgroup_defs)) {
 }
 cat("\n")
 
-## ---- B. Fit interaction models (one per subgroup) ----
+## ---- B. Fit interaction models (pooled across imputations) ----
 
-cat("Fitting interaction models for death outcome...\n")
+cat("Fitting interaction models for death outcome (pooled across",
+    N_IMP, "imputations)...\n")
 subgroup_results <- list()
+
+# Create subgroup columns on each imputed dataset
+for (m in seq_len(N_IMP)) {
+  d <- imp_sl_list[[m]]
+  d$cci_total <- rowSums(d[, cci_vars], na.rm = TRUE)
+  for (sg_name in names(subgroup_defs)) {
+    sg <- subgroup_defs[[sg_name]]
+    d[[sg_name]] <- factor(
+      eval(sg$var_expr, envir = d),
+      levels = sg$levels
+    )
+  }
+  imp_sl_list[[m]] <- d
+}
 
 for (sg_name in names(subgroup_defs)) {
   sg <- subgroup_defs[[sg_name]]
 
-  # Skip if either subgroup level has < 20 death events
+  # Skip if either subgroup level has < 20 death events (check on imp 1)
   event_counts <- tapply(df_tte_sl$outcome == 2, df_tte_sl[[sg_name]], sum)
   if (any(event_counts < 20, na.rm = TRUE)) {
     cat("  Skipping ", sg$label,
@@ -1720,55 +1932,63 @@ for (sg_name in names(subgroup_defs)) {
     paste(model_covariates, collapse = " + ")
   ))
 
-  fit_int <- tryCatch(
-    coxph(int_formula,
-          data = df_tte_sl,
-          weights = w,
-          robust = TRUE,
-          cluster = id),
-    error = function(e) {
-      cat("  Error for ", sg$label, ": ", e$message, "\n")
-      NULL
+  # Fit on each imputed dataset and collect coefficients
+  betas_ref <- numeric(N_IMP)     # Treatment effect at reference level
+  ses_ref   <- numeric(N_IMP)
+  betas_alt <- numeric(N_IMP)     # Treatment effect at non-reference level
+  ses_alt   <- numeric(N_IMP)
+  betas_int <- numeric(N_IMP)     # Interaction coefficient
+  ses_int   <- numeric(N_IMP)
+  fit_ok    <- logical(N_IMP)
+
+  for (m in seq_len(N_IMP)) {
+    fit_int <- tryCatch(
+      coxph(int_formula,
+            data = imp_sl_list[[m]],
+            weights = w,
+            robust = TRUE,
+            cluster = id),
+      error = function(e) NULL
+    )
+    if (is.null(fit_int)) next
+    fit_ok[m] <- TRUE
+
+    beta <- coef(fit_int)
+    V <- vcov(fit_int)
+
+    trt_idx <- grep("^crrt_high", names(beta))[1]
+    int_rows <- grep(
+      paste0("crrt_high.*:", sg_name, "|", sg_name, ":.*crrt_high"),
+      names(beta)
+    )
+
+    # Reference level: treatment main effect
+    betas_ref[m] <- beta[trt_idx]
+    ses_ref[m]   <- sqrt(V[trt_idx, trt_idx])
+
+    # Non-reference level: treatment + interaction
+    if (length(int_rows) > 0) {
+      int_idx <- int_rows[1]
+      betas_int[m] <- beta[int_idx]
+      ses_int[m]   <- sqrt(V[int_idx, int_idx])
+
+      betas_alt[m] <- beta[trt_idx] + beta[int_idx]
+      ses_alt[m]   <- sqrt(V[trt_idx, trt_idx] + V[int_idx, int_idx] +
+                             2 * V[trt_idx, int_idx])
     }
-  )
-  if (is.null(fit_int)) next
-
-  # Extract interaction p-value
-  coef_tbl <- summary(fit_int)$coefficients
-  int_rows <- grep(
-    paste0("crrt_high.*:", sg_name, "|", sg_name, ":.*crrt_high"),
-    rownames(coef_tbl)
-  )
-  p_col <- intersect(colnames(coef_tbl), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
-  p_interaction <- if (length(int_rows) > 0) coef_tbl[int_rows[1], p_col] else NA
-
-  # Extract subgroup-specific HRs via linear combination of coefficients
-  beta <- coef(fit_int)
-  V <- vcov(fit_int)
-
-  # Index of the crrt_high main effect
-  trt_idx <- grep("^crrt_high", names(beta))[1]
-
-  # Reference level: HR is the crrt_high main effect alone
-  hr_ref <- exp(beta[trt_idx])
-  se_ref <- sqrt(V[trt_idx, trt_idx])
-  hr_ref_lower <- exp(beta[trt_idx] - 1.96 * se_ref)
-  hr_ref_upper <- exp(beta[trt_idx] + 1.96 * se_ref)
-
-  # Non-reference level: HR = exp(beta_crrt + beta_interaction)
-  if (length(int_rows) > 0) {
-    int_idx <- int_rows[1]
-    beta_combined <- beta[trt_idx] + beta[int_idx]
-    se_combined <- sqrt(V[trt_idx, trt_idx] + V[int_idx, int_idx] +
-                          2 * V[trt_idx, int_idx])
-    hr_alt <- exp(beta_combined)
-    hr_alt_lower <- exp(beta_combined - 1.96 * se_combined)
-    hr_alt_upper <- exp(beta_combined + 1.96 * se_combined)
-  } else {
-    hr_alt <- hr_alt_lower <- hr_alt_upper <- NA
   }
 
-  # Count n and death events per subgroup level
+  if (sum(fit_ok) < 3) {
+    cat("  Skipping ", sg$label, " -- too few successful fits\n")
+    next
+  }
+
+  # Pool using Rubin's rules
+  pooled_ref <- rubins_pool(betas_ref[fit_ok], ses_ref[fit_ok])
+  pooled_alt <- rubins_pool(betas_alt[fit_ok], ses_alt[fit_ok])
+  pooled_int <- rubins_pool(betas_int[fit_ok], ses_int[fit_ok])
+
+  # Count n and death events per subgroup level (from imputation 1)
   n_ref <- sum(df_tte_sl[[sg_name]] == sg$levels[1], na.rm = TRUE)
   n_alt <- sum(df_tte_sl[[sg_name]] == sg$levels[2], na.rm = TRUE)
   ev_ref <- sum(df_tte_sl[[sg_name]] == sg$levels[1] &
@@ -1781,13 +2001,14 @@ for (sg_name in names(subgroup_defs)) {
     level       = c(sg$levels[1], sg$levels[2]),
     n           = c(n_ref, n_alt),
     events      = c(ev_ref, ev_alt),
-    HR          = c(hr_ref, hr_alt),
-    HR_lower    = c(hr_ref_lower, hr_alt_lower),
-    HR_upper    = c(hr_ref_upper, hr_alt_upper),
-    p_interaction = p_interaction
+    HR          = c(pooled_ref$hr, pooled_alt$hr),
+    HR_lower    = c(pooled_ref$hr_lower, pooled_alt$hr_lower),
+    HR_upper    = c(pooled_ref$hr_upper, pooled_alt$hr_upper),
+    p_interaction = pooled_int$p_value
   )
 
-  cat("  ", sg$label, ": p-interaction =", sprintf("%.4f", p_interaction), "\n")
+  cat("  ", sg$label, ": p-interaction =",
+      sprintf("%.4f", pooled_int$p_value), "\n")
 }
 cat("\n")
 
@@ -1795,22 +2016,15 @@ cat("\n")
 
 sg_results_df <- bind_rows(subgroup_results)
 
-# Add overall HR from the main IPTW model (fit_cs_death) for context
-overall_coef <- summary(fit_cs_death)$coefficients
-trt_row <- grep("crrt_high", rownames(overall_coef))[1]
-overall_ci <- confint(fit_cs_death)
-p_col_main <- intersect(
-  colnames(overall_coef), c("Pr(>|z|)", "Robust Pr(>|z|)")
-)[1]
-
+# Add overall HR from the pooled IPTW model for context
 overall_row <- tibble(
   subgroup      = "Overall",
   level         = "All patients",
   n             = nrow(df_tte_sl),
   events        = sum(df_tte_sl$outcome == 2),
-  HR            = exp(overall_coef[trt_row, "coef"]),
-  HR_lower      = exp(overall_ci[trt_row, 1]),
-  HR_upper      = exp(overall_ci[trt_row, 2]),
+  HR            = pooled_iptw_death$HR,
+  HR_lower      = pooled_iptw_death$HR_lower,
+  HR_upper      = pooled_iptw_death$HR_upper,
   p_interaction = NA
 )
 
