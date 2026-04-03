@@ -4,13 +4,19 @@ Multi-site analysis of Continuous Renal Replacement Therapy (CRRT) for Acute Kid
 
 **CLIF Version:** 2.1.0
 
-## Objective
+## Objectives
 
-Describe the epidemiology of CRRT for AKI across CLIF consortium hospitals:
-- Frequency of CRRT (denominator: all ICU admissions without ESRD)
-- Pre-CRRT clinical state (BMP, lactate, vasopressors, IMV, location)
-- Treatment details (CRRT mode, settings, dose, duration)
-- Outcomes (in-hospital mortality)
+1. **Descriptive epidemiology** of CRRT for AKI across CLIF consortium hospitals:
+   - Frequency of CRRT (denominator: all ICU admissions without ESRD)
+   - Pre-CRRT clinical state (BMP, lactate, vasopressors, IMV, location)
+   - Treatment details (CRRT mode, settings, dose, duration)
+   - Outcomes (in-hospital mortality, LOS, IMV duration)
+
+2. **Causal inference** — effect of CRRT dose on 30-day mortality:
+   - Point-treatment analysis (PSM, IPTW via Super Learner)
+   - Continuous dose-response (natural spline Cox, generalized propensity score)
+   - Time-varying marginal structural models (12h and 24h intervals)
+   - Hypothesis-generating subgroup analysis (9 clinically motivated subgroups)
 
 ## Required CLIF Tables
 
@@ -22,15 +28,18 @@ Describe the epidemiology of CRRT for AKI across CLIF consortium hospitals:
 | **clif_vitals** | `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value` | heart_rate, resp_rate, sbp, dbp, map, spo2, weight_kg, height_cm |
 | **clif_labs** | `hospitalization_id`, `lab_result_dttm`, `lab_category`, `lab_value`, `lab_value_numeric` | sodium, potassium, chloride, bicarbonate, bun, creatinine, glucose_serum, calcium_total, lactate, magnesium, ph_arterial, ph_venous, po2_arterial |
 | **clif_medication_admin_continuous** | `hospitalization_id`, `admin_dttm`, `med_name`, `med_category`, `med_dose`, `med_dose_unit` | norepinephrine, epinephrine, phenylephrine, vasopressin, dopamine, angiotensin, dobutamine, milrinone, isoproterenol |
+| **clif_medication_admin_intermittent** | `hospitalization_id`, `admin_dttm`, `med_category` | - |
 | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `peep_set`, `resp_rate_set`, `tidal_volume_set` | - |
 | **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm` (+ settings columns if `has_crrt_settings=true`) | - |
 | **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code`, `present_on_admission` | - |
+| **clif_microbiology_culture** | `hospitalization_id`, `collected_dttm`, `result_category` | - |
 
-
+See `config/clif_data_requirements.yaml` for the full column and category specification.
 
 ## Prerequisites
 
 - **Python 3.11+**
+- **R 4.x** (for causal inference scripts 05-06b)
 - **UV package manager** ([install here](https://docs.astral.sh/uv/))
 - Access to CLIF 2.1.0 data tables at your site
 
@@ -50,13 +59,18 @@ cp config/config_template.json config/config.json
 # 3. Install dependencies
 uv sync
 
-# 4. Run the pipeline (all 4 steps in order)
+# 4. Run the descriptive pipeline (steps 00-03)
 bash run_pipeline.sh
-# Or run individually:
-# uv run python code/00_cohort.py
-# uv run python code/01_create_wide_df.py
-# uv run python code/02_construct_crrt_tableone.py
-# uv run python code/03_crrt_visualizations.py
+
+# 5. Run causal inference scripts (require steps 00-03 first)
+uv run python code/04_build_msm_competing_risk_df.py
+Rscript code/05_PSM_IPTW_CRRT_dose.R
+Rscript code/05b_dose_response_analysis.R
+Rscript code/06_time_varying_MSM.R
+Rscript code/06b_time_varying_MSM_sensitivity.R
+
+# 6. Generate causal CONSORT diagram
+uv run python code/09_causal_consort_diagram.py
 ```
 
 ### Windows
@@ -73,17 +87,25 @@ copy config\config_template.json config\config.json
 :: 3. Install dependencies
 uv sync
 
-:: 4. Run the pipeline (all 4 steps in order)
+:: 4. Run the descriptive pipeline (steps 00-03)
 run_pipeline.bat
-:: Or run individually:
+
+:: 5. Run causal inference scripts (require steps 00-03 first)
 :: set PYTHONIOENCODING=utf-8
-:: uv run python code\00_cohort.py
-:: uv run python code\01_create_wide_df.py
-:: uv run python code\02_construct_crrt_tableone.py
-:: uv run python code\03_crrt_visualizations.py
+:: uv run python code\04_build_msm_competing_risk_df.py
+:: Rscript code\05_PSM_IPTW_CRRT_dose.R
+:: Rscript code\05b_dose_response_analysis.R
+:: Rscript code\06_time_varying_MSM.R
+:: Rscript code\06b_time_varying_MSM_sensitivity.R
 ```
 
 > **Note:** The batch script sets `PYTHONIOENCODING=utf-8` automatically. If running scripts individually on Windows, set this variable first to avoid Unicode encoding errors.
+
+### R Packages
+
+The R scripts auto-install missing CRAN packages on first run. Key dependencies include:
+
+`tidyverse`, `arrow`, `survival`, `cmprsk`, `MatchIt`, `WeightIt`, `cobalt`, `SuperLearner`, `randomForest`, `xgboost`, `gam`, `EValue`, `survminer`, `survey`, `mice`, `gtsummary`, `patchwork`, `splines`
 
 ## Configuration
 
@@ -96,7 +118,9 @@ Edit `config/config.json` (copied from `config/config_template.json`):
     "file_type": "parquet",
     "timezone": "US/Central",
     "project_root": "/path/to/CLIF-epidemiology-of-CRRT",
-    "has_crrt_settings": true
+    "has_crrt_settings": true,
+    "admission_year_start": 2018,
+    "admission_year_end": null
 }
 ```
 
@@ -108,6 +132,8 @@ Edit `config/config.json` (copied from `config/config_template.json`):
 | `timezone` | Timezone for your data (e.g., `"US/Central"`, `"US/Eastern"`) |
 | `project_root` | Absolute path to this repository's root directory |
 | `has_crrt_settings` | Set to `true` if your `clif_crrt_therapy` table includes flow rate and mode columns. Set to `false` if it only has `hospitalization_id` and `recorded_dttm`. |
+| `admission_year_start` | (Optional) Filter to admissions on or after this year |
+| `admission_year_end` | (Optional) Filter to admissions before this year. `null` for no upper bound. |
 
 ### `has_crrt_settings` Details
 
@@ -116,23 +142,129 @@ Edit `config/config.json` (copied from `config/config_template.json`):
 
 ## Pipeline Steps
 
-### Step 0: Cohort Identification (`00_cohort.py`)
-Identifies the CRRT cohort with inclusion/exclusion criteria, computes CRRT initiation times, outcomes (mortality, LOS), and IMV duration.
+### Descriptive Epidemiology (Steps 00-03)
 
-**Outputs:** `output/intermediate/outcomes_df.parquet`, `output/intermediate/index_crrt_df.parquet`, `output/intermediate/crrt_initiation.parquet`, `output/final/strobe_counts.csv`
+#### Step 00: Cohort Identification (`00_cohort.py`)
+Identifies the CRRT cohort with inclusion/exclusion criteria (excludes ESRD via ICD codes), computes CRRT initiation times, outcomes (mortality, LOS), and IMV duration. Generates a CONSORT flow diagram.
 
-### Step 1: Wide Dataset (`01_create_wide_df.py`)
-Builds a wide longitudinal dataset merging labs, vitals, medications, respiratory support, CRRT therapy, and ADT into a single time-indexed table. Includes vasopressor unit conversion and NEE computation.
+**Outputs:**
+- `output/intermediate/outcomes_df.parquet`
+- `output/intermediate/index_crrt_df.parquet`
+- `output/intermediate/crrt_initiation.parquet`
+- `output/final/crrt_epi/strobe_counts.csv`
+- `output/final/crrt_epi/graphs/consort_diagram_straight_flow_right_excl.png`
+
+#### Step 01: Wide Dataset (`01_create_wide_df.py`)
+Builds a wide longitudinal dataset merging labs, vitals, medications, respiratory support, CRRT therapy, and ADT into a single time-indexed table. Includes vasopressor unit conversion and norepinephrine-equivalent (NEE) computation.
 
 **Outputs:** `output/intermediate/wide_df.parquet`
 
-### Step 2: Table 1 (`02_construct_crrt_tableone.py`)
-Generates Table 1 with demographics, SOFA scores, labs, vasopressors, respiratory settings, and CRRT details across time windows (baseline, 72h, discharge) stratified by survival.
+#### Step 02: Table 1 (`02_construct_crrt_tableone.py`)
+Generates Table 1 with demographics, SOFA scores, labs, vasopressors, respiratory settings, and CRRT details across time windows (baseline -12h to +3h, 72h post-CRRT, discharge) stratified by survival.
 
-**Outputs:** `output/final/table1_crrt.csv`, `output/final/table1_crrt.html`
+**Outputs:**
+- `output/final/crrt_epi/table1_crrt.csv`
+- `output/final/crrt_epi/table1_crrt.html`
 
-### Step 3: Visualizations (`03_crrt_visualizations.py`)
-Generates clinical trajectory figures: CRRT dose over time, lab distributions, MAP, respiratory support, and patient state (stacked area plot).
+#### Step 03: Visualizations (`03_crrt_visualizations.py`)
+Generates clinical trajectory figures for the first 7 days post-CRRT: dose over time, lab distributions, MAP, respiratory support, and patient state (stacked area plot).
 
-**Outputs:** `output/final/graphs/` (PNG figures + CSV aggregate data)
+**Outputs:** `output/final/crrt_epi/graphs/` (PNG figures + CSV aggregate data)
 
+### Causal Inference (Steps 04-06b)
+
+> These steps require the descriptive pipeline (steps 00-03) to have completed first.
+
+#### Step 04: Competing Risk DataFrame (`04_build_msm_competing_risk_df.py`)
+Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxygenation, vasopressors, IMV, and Charlson Comorbidity Index at t=0/12/24h windows. Includes sensitivity columns for 24h/48h interval analyses. Generates a missingness heatmap.
+
+**Outputs:**
+- `output/intermediate/msm_competing_risk_df.parquet`
+- `output/final/crrt_epi/graphs/missingness_heatmap.png`
+
+#### Step 05: PSM & IPTW (`05_PSM_IPTW_CRRT_dose.R`)
+Point-treatment causal analysis of CRRT dose (high >=30 vs low <30 mL/kg/hr) on 30-day mortality. Three branches:
+- **PSM**: Nearest-neighbor matching + Fine-Gray competing risk models
+- **IPTW**: Super Learner propensity scores + cause-specific Cox models
+- **Subgroup analysis**: 9 clinically motivated subgroups with interaction tests
+
+Uses MICE imputation (5 datasets), Rubin's rules pooling, bootstrap CIF curves (500 reps), and E-value sensitivity analysis.
+
+**Outputs:** `output/final/psm_iptw/` — balance plots, CIF curves, model comparison CSV, subgroup forest plot, E-value table, pooled results. See `psm_iptw_output_guide.md` in that directory for a full listing.
+
+#### Step 05b: Dose-Response Analysis (`05b_dose_response_analysis.R`)
+Continuous dose-response analysis with three approaches:
+- **Dose decile**: Unadjusted mortality by dose decile
+- **Natural spline Cox**: Covariate-adjusted nonlinear dose-response (nonlinearity test)
+- **Generalized propensity score**: Doubly-robust causal analysis via CBPS (continuous treatment)
+
+Also generates a target trial emulation specification table and a 24h exclusion sensitivity analysis.
+
+**Outputs:** `output/final/psm_iptw/` — dose-response plots, combined 3-panel figure, GPS balance diagnostics, target trial CSV
+
+#### Step 06: Time-Varying MSM (`06_time_varying_MSM.R`)
+Time-varying marginal structural model for CRRT dose using 12h intervals. Models dose trajectories as treatment strategies with inverse-probability-of-treatment weighting.
+
+**Outputs:** `output/final/msm/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics
+
+#### Step 06b: MSM Sensitivity (`06b_time_varying_MSM_sensitivity.R`)
+Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >=48h, CRRT >=48h, has dialysate in 0-48h window).
+
+**Outputs:** `output/final/msm/time_varying_sensitivity/`
+
+### Multi-Site Aggregation (Steps 07-09)
+
+#### Step 07: Combine Site Results (`07_combine_site_results.py`)
+Aggregates per-site results into a combined dashboard. Imports `08_severity_analysis` for cross-site severity comparisons.
+
+#### Step 08: Severity Analysis (`08_severity_analysis.py`)
+Cross-site severity comparisons (imported by step 07).
+
+#### Step 09: Causal CONSORT Diagram (`09_causal_consort_diagram.py`)
+Generates a CONSORT flow diagram for the causal inference cohort (descriptive cohort -> causal analysis subset after applying dose eligibility, weight availability, and missing covariate exclusions).
+
+**Outputs:** `output/final/psm_iptw/` — `{site}_causal_consort_diagram.{png,pdf}`
+
+## Output Structure
+
+```
+output/
+├── intermediate/           # Intermediate parquet files (not committed)
+│   ├── outcomes_df.parquet
+│   ├── index_crrt_df.parquet
+│   ├── crrt_initiation.parquet
+│   ├── wide_df.parquet
+│   ├── tableone_analysis_df.parquet
+│   └── msm_competing_risk_df.parquet
+│
+└── final/
+    ├── crrt_epi/            # Descriptive epidemiology
+    │   ├── strobe_counts.csv
+    │   ├── table1_crrt.csv
+    │   ├── table1_crrt.html
+    │   ├── missingness_summary.csv
+    │   ├── crrt_settings_*.csv
+    │   └── graphs/          # Figures (PNG) + aggregate data (CSV)
+    │
+    ├── psm_iptw/            # Point-treatment causal analysis
+    │   ├── psm_iptw_output_guide.md
+    │   ├── psm_iptw_findings.md
+    │   ├── {site}_*.csv     # Balance, model results, subgroup analysis
+    │   ├── {site}_*.png     # PS overlap, love plots, CIF curves, forest plot
+    │   └── {site}_dose_response_*.png  # Dose-response figures
+    │
+    └── msm/                 # Time-varying MSM analysis
+        ├── msm_output_guide.md
+        ├── msm_sensitivity_findings.md
+        ├── time_varying/            # Primary (12h intervals)
+        └── time_varying_sensitivity/ # Sensitivity (24h intervals)
+```
+
+## Key Modules
+
+| Module | Description |
+|--------|-------------|
+| `code/sofa_calculator.py` | Polars-based SOFA score computation with timezone normalization |
+| `code/utils.py` | CRRT outlier handling using `config/outlier_config.json` thresholds |
+| `code/pipeline_helpers.py` | Config validation, intermediate file loading, safe CLIF table loading |
+| `utils/config.py` | Loads `config/config.json` and exposes as module-level `config` dict |
