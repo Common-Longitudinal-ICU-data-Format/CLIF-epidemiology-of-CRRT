@@ -68,9 +68,6 @@ Rscript code/05_PSM_IPTW_CRRT_dose.R
 Rscript code/05b_dose_response_analysis.R
 Rscript code/06_time_varying_MSM.R
 Rscript code/06b_time_varying_MSM_sensitivity.R
-
-# 6. Generate causal CONSORT diagram
-uv run python code/09_causal_consort_diagram.py
 ```
 
 ### Windows
@@ -175,12 +172,13 @@ Generates clinical trajectory figures for the first 7 days post-CRRT: dose over 
 
 > These steps require the descriptive pipeline (steps 00-03) to have completed first.
 
-#### Step 04: Competing Risk DataFrame (`04_build_msm_competing_risk_df.py`)
-Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxygenation, vasopressors, IMV, and Charlson Comorbidity Index at t=0/12/24h windows. Includes sensitivity columns for 24h/48h interval analyses. Generates a missingness heatmap.
+#### Step 04: Competing Risk DataFrame & Causal CONSORT (`04_build_msm_competing_risk_df.py`)
+Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxygenation, vasopressors, IMV, and Charlson Comorbidity Index at t=0/12/24h windows. Includes sensitivity columns for 24h/48h interval analyses. Generates a missingness heatmap and a CONSORT flow diagram showing cohort narrowing from descriptive analysis through causal eligibility criteria.
 
 **Outputs:**
 - `output/intermediate/msm_competing_risk_df.parquet`
 - `output/final/crrt_epi/graphs/missingness_heatmap.png`
+- `output/final/psm_iptw/{site}_causal_consort_diagram.{png,pdf}`
 
 #### Step 05: PSM & IPTW (`05_PSM_IPTW_CRRT_dose.R`)
 Point-treatment causal analysis of CRRT dose (high >=30 vs low <30 mL/kg/hr) on 30-day mortality. Three branches:
@@ -219,11 +217,6 @@ Aggregates per-site results into a combined dashboard. Imports `08_severity_anal
 
 #### Step 08: Severity Analysis (`08_severity_analysis.py`)
 Cross-site severity comparisons (imported by step 07).
-
-#### Step 09: Causal CONSORT Diagram (`09_causal_consort_diagram.py`)
-Generates a CONSORT flow diagram for the causal inference cohort (descriptive cohort -> causal analysis subset after applying dose eligibility, weight availability, and missing covariate exclusions).
-
-**Outputs:** `output/final/psm_iptw/` — `{site}_causal_consort_diagram.{png,pdf}`
 
 ## Output Structure
 

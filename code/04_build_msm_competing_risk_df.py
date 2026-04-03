@@ -10,6 +10,7 @@ Extends the archived 04_build_competing_risk_df.py with:
     to match R script expectations)
   - Sensitivity analysis columns for 24h/48h MSM: CRRT dose (0-24h, 24-48h),
     labs/SOFA/oxygenation/NEE/IMV at t=24, and 48h eligibility flag
+  - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
 Usage: uv run python code/04_build_msm_competing_risk_df.py
 """
@@ -44,6 +45,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 TABLES_PATH = config["tables_path"]
 FILE_TYPE = config["file_type"]
 TIMEZONE = config["timezone"]
+SITE = config["site_name"]
 
 # ===================================================================
 # STEP 1: Load intermediate files
@@ -840,6 +842,8 @@ print(f"    2 (died):              {(result['outcome'] == 2).sum()}")
 # STEP 9b: Exclude patients who died or were off CRRT within 24h
 # ===================================================================
 EXCLUDE_SHORT_CRRT = True  # Set False to keep all patients
+n_excluded_short = 0
+n_excluded_scuf = 0
 
 if EXCLUDE_SHORT_CRRT:
     short_mask = (
@@ -1038,5 +1042,134 @@ for col in final_cols:
     else:
         desc = f"{result[col].nunique()} unique"
     print(f"  {col:40s}  {str(dtype):12s}  miss={n_miss:4d} ({pct_miss:4.1f}%)  {desc}")
+
+# ===================================================================
+# STEP 11: Causal CONSORT flow diagram
+# ===================================================================
+print("\nStep 11: Generating causal CONSORT flow diagram …")
+from matplotlib.patches import FancyBboxPatch
+
+# --- Load STROBE counts from descriptive cohort (step 00) ---
+strobe = pd.read_csv(project_root / "output" / "final" / "crrt_epi" / "strobe_counts.csv")
+strobe_dict = dict(zip(strobe["counter"], strobe["value"]))
+
+n_total_hosp = int(strobe_dict.get("1b_after_stitching", strobe_dict.get("1_adult_hospitalizations", 0)))
+n_crrt = int(strobe_dict["2_crrt_blocks"])
+n_no_esrd = int(strobe_dict["3_encounter_blocks_without_esrd"])
+n_with_weight = int(strobe_dict["4_encounter_blocks_with_weight"])
+n_with_settings = int(strobe_dict.get("5_encounter_blocks_with_crrt_settings", n_with_weight))
+n_with_labs = int(strobe_dict["6_encounter_blocks_with_required_labs"])
+n_descriptive = n_with_labs
+
+# n_excluded_short and n_excluded_scuf were computed in step 9b above
+n_causal = len(result)
+n_high_dose = int((result["crrt_dose_ml_kg_hr_0"] >= 30).sum())
+n_low_dose = int((result["crrt_dose_ml_kg_hr_0"] < 30).sum())
+
+print(f"  Descriptive cohort: {n_descriptive:,}")
+print(f"  Excluded (died/off CRRT <=24h): {n_excluded_short:,}")
+print(f"  Excluded (SCUF-only): {n_excluded_scuf:,}")
+print(f"  Causal cohort: {n_causal:,} (high={n_high_dose:,}, low={n_low_dose:,})")
+
+# --- Draw the diagram (matching 00_cohort.py style) ---
+fig, ax = plt.subplots(figsize=(10, 8))
+ax.set_xlim(0, 1)
+ax.set_ylim(0, 1)
+ax.axis("off")
+
+box_h = 0.08
+box_w = 0.40
+x_main_start = 0.05
+x_main_center = x_main_start + box_w / 2
+x_excl_start = 0.55
+excl_arrow_gap = 0.015
+v_spacing = 0.14
+
+arrow_props = dict(arrowstyle="->", lw=2, color="black")
+
+
+def draw_box(x, y, w, h, text, fontsize=11, weight="normal"):
+    rect = FancyBboxPatch(
+        (x, y), w, h,
+        boxstyle="round,pad=0.01",
+        linewidth=2,
+        edgecolor="black",
+        facecolor="white",
+    )
+    ax.add_patch(rect)
+    ax.text(x + w / 2, y + h / 2, text,
+            ha="center", va="center", fontsize=fontsize, fontweight=weight,
+            wrap=True)
+    return x + w / 2, y
+
+
+ax.text(0.5, 0.98, "CRRT Causal Cohort Selection",
+        ha="center", va="center", fontsize=16, fontweight="bold")
+
+top_y = 0.90 - box_h
+draw_box(x_main_start, top_y, box_w, box_h,
+         f"All adult hospitalizations\n(2018\u20132024)\nn = {n_total_hosp:,}")
+
+rows = [
+    {"remaining_label": "Remaining hospitalizations\nCRRT hospitalizations",
+     "remaining_n": n_crrt,
+     "excluded_label": f"Excluded: No CRRT\nn = {n_total_hosp - n_crrt:,}",
+     "excluded_n": n_total_hosp - n_crrt},
+    {"remaining_label": "Remaining hospitalizations\nAfter ESRD exclusion",
+     "remaining_n": n_no_esrd,
+     "excluded_label": f"Excluded: ESRD diagnosis\nn = {n_crrt - n_no_esrd:,}",
+     "excluded_n": n_crrt - n_no_esrd},
+    {"remaining_label": "Remaining hospitalizations\nWith documented weight",
+     "remaining_n": n_with_weight,
+     "excluded_label": f"Excluded: Missing weight\nn = {n_no_esrd - n_with_weight:,}",
+     "excluded_n": n_no_esrd - n_with_weight},
+    {"remaining_label": "Remaining hospitalizations\nWith required baseline labs",
+     "remaining_n": n_with_labs,
+     "excluded_label": f"Excluded: Missing required labs\nn = {n_with_settings - n_with_labs:,}",
+     "excluded_n": n_with_settings - n_with_labs},
+]
+
+excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_short:,}"
+if n_excluded_scuf > 0:
+    excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
+rows.append({
+    "remaining_label": "Causal analysis cohort",
+    "remaining_n": n_causal,
+    "excluded_label": excl_short_label,
+    "excluded_n": n_excluded_short + n_excluded_scuf,
+})
+
+for i, row in enumerate(rows):
+    y_parent = top_y if i == 0 else top_y - (i * v_spacing)
+    current_y = top_y - ((i + 1) * v_spacing)
+
+    box_center_y_top = y_parent + box_h / 2
+    box_center_y_bottom = current_y + box_h / 2
+    arrow_vertical_center = (box_center_y_top + box_center_y_bottom) / 2
+
+    draw_box(x_main_start, current_y, box_w, box_h,
+             f"{row['remaining_label']}\nn = {row['remaining_n']:,}")
+
+    ax.annotate("", xy=(x_main_center, current_y + box_h),
+                xytext=(x_main_center, y_parent),
+                arrowprops=arrow_props)
+
+    if row["excluded_n"] > 0:
+        draw_box(x_excl_start, arrow_vertical_center - box_h / 2, box_w, box_h,
+                 row["excluded_label"])
+        ax.annotate("",
+                    xy=(x_excl_start - excl_arrow_gap, arrow_vertical_center),
+                    xytext=(x_main_center, arrow_vertical_center),
+                    arrowprops=arrow_props, annotation_clip=False)
+
+CONSORT_DIR = project_root / "output" / "final" / "psm_iptw"
+CONSORT_DIR.mkdir(parents=True, exist_ok=True)
+out_png = CONSORT_DIR / f"{SITE}_causal_consort_diagram.png"
+out_pdf = CONSORT_DIR / f"{SITE}_causal_consort_diagram.pdf"
+plt.savefig(out_png, dpi=300, bbox_inches="tight", facecolor="white")
+plt.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+plt.close(fig)
+print(f"  Saved: {out_png}")
+print(f"  Saved: {out_pdf}")
 
 print("\nDone!")
