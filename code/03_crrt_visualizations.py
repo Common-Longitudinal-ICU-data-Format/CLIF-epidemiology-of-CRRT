@@ -33,7 +33,7 @@ from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
 config = validate_config(config)
 
 INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-GRAPHS_DIR = project_root / "output" / "final" / "graphs"
+GRAPHS_DIR = project_root / "output" / "final" / "crrt_epi" / "graphs"
 GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]

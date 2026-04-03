@@ -83,7 +83,7 @@ print(f"   Has CRRT settings: {has_crrt_settings}")
 
 import os
 # Create output directories if they do not exist
-os.makedirs("../output/final/graphs", exist_ok=True)
+os.makedirs("../output/final/crrt_epi/graphs", exist_ok=True)
 os.makedirs("../output/intermediate", exist_ok=True)
 
 
@@ -445,8 +445,9 @@ for col in crrt_miss_cols:
     miss_data.append({'column': col, 'n_total': n_total, 'n_missing': int(n_missing), 'pct_missing': round(pct, 1)})
     print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
 miss_report = pd.DataFrame(miss_data)
-miss_report.to_csv('../output/final/crrt_column_missingness.csv', index=False)
-print(f"\n✓ Saved to: output/final/crrt_column_missingness.csv")
+Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+miss_report.to_csv('../output/final/crrt_epi/crrt_column_missingness.csv', index=False)
+print(f"\n✓ Saved to: output/final/crrt_epi/crrt_column_missingness.csv")
 print("=" * 80)
 
 # In[16]:
@@ -616,8 +617,8 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    Path("../output/final").mkdir(parents=True, exist_ok=True)
-    plt.savefig('../output/final/graphs/crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
+    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    plt.savefig('../output/final/crrt_epi/graphs/crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Grid histograms saved to: output/final/crrt_parameter_histograms_grid.png")
@@ -674,8 +675,8 @@ if has_crrt_settings:
     print(summary_df[display_cols].to_string(index=False))
 
     # Save detailed summary
-    summary_df.to_csv('../output/final/crrt_settings_distribution_by_mode.csv', index=False)
-    print(f"\n✓ Detailed summary saved to: output/final/crrt_settings_distribution_by_mode.csv")
+    summary_df.to_csv('../output/final/crrt_epi/crrt_settings_distribution_by_mode.csv', index=False)
+    print(f"\n✓ Detailed summary saved to: output/final/crrt_epi/crrt_settings_distribution_by_mode.csv")
 
     # Also create a simplified summary for quick reference
     simple_summary = []
@@ -704,8 +705,8 @@ if has_crrt_settings:
     print(simple_summary_df.to_string(index=False))
 
     # Save simple summary
-    simple_summary_df.to_csv('../output/final/crrt_settings_summary_simple.csv', index=False)
-    print(f"\n✓ Simple summary saved to: output/final/crrt_settings_summary_simple.csv")
+    simple_summary_df.to_csv('../output/final/crrt_epi/crrt_settings_summary_simple.csv', index=False)
+    print(f"\n✓ Simple summary saved to: output/final/crrt_epi/crrt_settings_summary_simple.csv")
     print("=" * 80)
 
 
@@ -1384,7 +1385,8 @@ print(strobe_counts)
 # Save strobe counts to CSV in ../output/intermediate
 strobe_counts_df = pd.DataFrame(list(strobe_counts.items()), columns=['counter', 'value'])
 strobe_counts_df["site"] = config["site_name"]
-strobe_counts_df.to_csv('../output/final/strobe_counts.csv', index=False)
+Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+strobe_counts_df.to_csv('../output/final/crrt_epi/strobe_counts.csv', index=False)
 
 
 # In[43]:
@@ -1398,7 +1400,7 @@ from matplotlib.patches import FancyBboxPatch
 
 def create_consort_diagram_straight_flow(
     strobe_counts: Dict,
-    output_dir: Union[str, Path] = "../output/final/graphs"
+    output_dir: Union[str, Path] = "../output/final/crrt_epi/graphs"
 ) -> Path:
     """
     Creates a CONSORT flow diagram with a straight vertical main flow 
@@ -2181,7 +2183,8 @@ if has_crrt_settings:
 
     # Save figure
     plt.tight_layout()
-    fig.savefig("../output/final/dose_comparison.png")
+    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    fig.savefig("../output/final/crrt_epi/graphs/dose_comparison.png")
     plt.close(fig)
 
 
@@ -2256,7 +2259,7 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    output_path = '../output/final/graphs/crrt_dose_comparison_by_mode.png'
+    output_path = '../output/final/crrt_epi/graphs/crrt_dose_comparison_by_mode.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"\n✓ Saved mode-specific comparison to: {output_path}")

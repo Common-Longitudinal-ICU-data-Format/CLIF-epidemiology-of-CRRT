@@ -969,7 +969,10 @@ print(f"\nSaved patient-level missingness: {diag_path}")
 print(f"  Patients with any missing covariate: {(diag_missing['total_missing'] > 0).sum()}/{len(diag_missing)}")
 
 # --- Aggregate missingness summary (safe to share) ---
-FINAL_DIR = project_root / "output" / "final"
+FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
+GRAPHS_DIR = FINAL_DIR / "graphs"
+GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
 n_total = len(result)
@@ -1006,7 +1009,7 @@ if len(agg_any) > 0:
                 f"{pct}% (n={n})", va="center", fontsize=9)
     ax.set_xlim(0, agg_any["pct_missing"].max() * 1.4)
     plt.tight_layout()
-    heatmap_path = FINAL_DIR / "missingness_heatmap.png"
+    heatmap_path = GRAPHS_DIR / "missingness_heatmap.png"
     fig.savefig(heatmap_path, dpi=150)
     plt.close(fig)
     print(f"Saved missingness heatmap: {heatmap_path}")

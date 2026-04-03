@@ -105,66 +105,38 @@ print(f"  High dose (>=30):         {n_high_dose:,}")
 print(f"  Low dose (<30):           {n_low_dose:,}")
 
 # ---------------------------------------------------------------------------
-# 2. Build the CONSORT figure
+# 2. Build the CONSORT figure (matching 00_cohort.py style)
 # ---------------------------------------------------------------------------
-fig, ax = plt.subplots(figsize=(13, 12))
+fig, ax = plt.subplots(figsize=(10, 8))
 ax.set_xlim(0, 1)
 ax.set_ylim(0, 1)
 ax.axis("off")
 
-# Geometry
-box_h = 0.05
-box_w = 0.32
-x_main = 0.08
-x_main_center = x_main + box_w / 2
-x_excl = 0.56
-excl_box_w = 0.30
-v_spacing = 0.08
-arrow_pad = 0.006  # padding so arrowheads don't touch box edges
+# Geometry — identical to 00_cohort.py
+box_h = 0.08
+box_w = 0.40
+x_main_start = 0.05
+x_main_center = x_main_start + box_w / 2  # 0.25
+x_excl_start = 0.55
+excl_arrow_gap = 0.015
+v_spacing = 0.14
 
-arrow_main = dict(arrowstyle="-|>", lw=1.8, color="#333333",
-                  mutation_scale=12)
-arrow_excl = dict(arrowstyle="-|>", lw=1.2, color="#999999",
-                  mutation_scale=10)
+arrow_props = dict(arrowstyle="->", lw=2, color="black")
 
 
-def draw_box(x, y, w, h, text, fontsize=10, weight="normal", facecolor="white",
-             edgecolor="black", linewidth=1.5, zorder=2):
+def draw_box(x, y, w, h, text, fontsize=11, weight="normal"):
     rect = FancyBboxPatch(
         (x, y), w, h,
-        boxstyle="round,pad=0.012",
-        linewidth=linewidth,
-        edgecolor=edgecolor,
-        facecolor=facecolor,
-        zorder=zorder,
+        boxstyle="round,pad=0.01",
+        linewidth=2,
+        edgecolor="black",
+        facecolor="white",
     )
     ax.add_patch(rect)
     ax.text(x + w / 2, y + h / 2, text,
             ha="center", va="center", fontsize=fontsize, fontweight=weight,
-            linespacing=1.25, zorder=zorder + 1)
+            wrap=True)
     return x + w / 2, y
-
-
-def draw_flow_arrow(x, y_from_box, y_to_box):
-    """Vertical arrow from bottom of upper box to top of lower box, with padding."""
-    ax.annotate(
-        "", xy=(x, y_to_box + box_h + arrow_pad),
-        xytext=(x, y_from_box - arrow_pad),
-        arrowprops=arrow_main, zorder=1,
-    )
-
-
-def draw_excl_arrow_and_box(y_upper_box, y_lower_box, excl_text):
-    """Horizontal arrow from right edge of vertical segment to exclusion box."""
-    mid_y = (y_upper_box + y_lower_box + box_h) / 2
-    # Arrow starts from right edge of main box column, ends at exclusion box
-    ax.annotate(
-        "", xy=(x_excl, mid_y),
-        xytext=(x_main + box_w + arrow_pad, mid_y),
-        arrowprops=arrow_excl, annotation_clip=False, zorder=1,
-    )
-    draw_box(x_excl, mid_y - box_h / 2, excl_box_w, box_h, excl_text,
-             fontsize=9, facecolor="#fef2f2", edgecolor="#dc2626", linewidth=1)
 
 
 # ---------------------------------------------------------------------------
@@ -172,71 +144,71 @@ def draw_excl_arrow_and_box(y_upper_box, y_lower_box, excl_text):
 # ---------------------------------------------------------------------------
 
 # Title
-fig.text(0.5, 0.965, f"CONSORT Flow Diagram \u2014 {site}",
-         ha="center", va="center", fontsize=16, fontweight="bold")
-fig.text(0.5, 0.94, "Descriptive Cohort through Causal Analysis",
-         ha="center", va="center", fontsize=10.5, color="#555555")
+ax.text(0.5, 0.98, "CRRT Causal Cohort Selection",
+        ha="center", va="center", fontsize=16, fontweight="bold")
 
-# Row 0: Starting cohort
-y = 0.90
-draw_box(x_main, y, box_w, box_h,
-         f"Adult hospitalizations (2018\u20132024)\nn = {n_total_hosp:,}",
-         fontsize=10, weight="bold")
+# --- Row 0: Starting cohort ---
+top_y = 0.90 - box_h
+draw_box(x_main_start, top_y, box_w, box_h,
+         f"All adult hospitalizations\n(2018\u20132024)\nn = {n_total_hosp:,}")
 
-# Row 1: CRRT
-y1 = y - v_spacing
-draw_flow_arrow(x_main_center, y, y1)
-draw_box(x_main, y1, box_w, box_h,
-         f"CRRT hospitalizations\nn = {n_crrt:,}")
-draw_excl_arrow_and_box(y, y1,
-                        f"No CRRT\nn = {n_total_hosp - n_crrt:,}")
+# Build rows data
+rows = [
+    {"remaining_label": "Remaining hospitalizations\nCRRT hospitalizations",
+     "remaining_n": n_crrt,
+     "excluded_label": f"Excluded: No CRRT\nn = {n_total_hosp - n_crrt:,}",
+     "excluded_n": n_total_hosp - n_crrt},
+    {"remaining_label": "Remaining hospitalizations\nAfter ESRD exclusion",
+     "remaining_n": n_no_esrd,
+     "excluded_label": f"Excluded: ESRD diagnosis\nn = {n_crrt - n_no_esrd:,}",
+     "excluded_n": n_crrt - n_no_esrd},
+    {"remaining_label": "Remaining hospitalizations\nWith documented weight",
+     "remaining_n": n_with_weight,
+     "excluded_label": f"Excluded: Missing weight\nn = {n_no_esrd - n_with_weight:,}",
+     "excluded_n": n_no_esrd - n_with_weight},
+    {"remaining_label": "Remaining hospitalizations\nWith required baseline labs",
+     "remaining_n": n_with_labs,
+     "excluded_label": f"Excluded: Missing required labs\nn = {n_with_settings - n_with_labs:,}",
+     "excluded_n": n_with_settings - n_with_labs},
+]
 
-# Row 2: No ESRD
-y2 = y1 - v_spacing
-draw_flow_arrow(x_main_center, y1, y2)
-draw_box(x_main, y2, box_w, box_h,
-         f"After ESRD exclusion\nn = {n_no_esrd:,}")
-draw_excl_arrow_and_box(y1, y2,
-                        f"ESRD diagnosis\nn = {n_crrt - n_no_esrd:,}")
-
-# Row 3: Weight
-y3 = y2 - v_spacing
-draw_flow_arrow(x_main_center, y2, y3)
-draw_box(x_main, y3, box_w, box_h,
-         f"With documented weight\nn = {n_with_weight:,}")
-draw_excl_arrow_and_box(y2, y3,
-                        f"Missing weight\nn = {n_no_esrd - n_with_weight:,}")
-
-# Row 4: Labs
-y4 = y3 - v_spacing
-draw_flow_arrow(x_main_center, y3, y4)
-draw_box(x_main, y4, box_w, box_h,
-         f"With required baseline labs\nn = {n_with_labs:,}",
-         fontsize=10, weight="bold", facecolor="#dcfce7", edgecolor="#16a34a")
-if n_with_settings - n_with_labs > 0:
-    draw_excl_arrow_and_box(y3, y4,
-                            f"Missing required labs\nn = {n_with_settings - n_with_labs:,}")
-
-# Descriptive cohort label
-ax.text(x_main + box_w + 0.015, y4 + box_h / 2,
-        "Descriptive\nCohort",
-        fontsize=9, fontweight="bold", color="#16a34a", va="center")
-
-# Row 5: Causal cohort
-y5 = y4 - v_spacing - 0.01
-draw_flow_arrow(x_main_center, y4, y5)
-draw_box(x_main, y5, box_w, box_h,
-         f"Causal analysis cohort\nn = {n_causal:,}",
-         fontsize=10, weight="bold", facecolor="#dbeafe", edgecolor="#2563eb")
-excl_short_text = f"Died or off CRRT within 24h\nn = {n_excluded_short:,}"
+# Add causal exclusion row
+excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_short:,}"
 if n_excluded_scuf > 0:
-    excl_short_text += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
-draw_excl_arrow_and_box(y4, y5, excl_short_text)
+    excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
+rows.append({
+    "remaining_label": "Causal analysis cohort",
+    "remaining_n": n_causal,
+    "excluded_label": excl_short_label,
+    "excluded_n": n_excluded_short + n_excluded_scuf,
+})
 
-# Causal cohort label
-ax.text(x_main + box_w + 0.015, y5 + box_h / 2,
-        "Causal\nCohort",
-        fontsize=9, fontweight="bold", color="#2563eb", va="center")
+for i, row in enumerate(rows):
+    y_parent = top_y if i == 0 else top_y - (i * v_spacing)
+    current_y = top_y - ((i + 1) * v_spacing)
+
+    # Vertical center between the two main-column box centers
+    box_center_y_top = y_parent + box_h / 2
+    box_center_y_bottom = current_y + box_h / 2
+    arrow_vertical_center = (box_center_y_top + box_center_y_bottom) / 2
+
+    # Main-column remaining box
+    draw_box(x_main_start, current_y, box_w, box_h,
+             f"{row['remaining_label']}\nn = {row['remaining_n']:,}")
+
+    # Vertical arrow (top box bottom -> bottom box top)
+    ax.annotate("", xy=(x_main_center, current_y + box_h),
+                xytext=(x_main_center, y_parent),
+                arrowprops=arrow_props)
+
+    # Exclusion box + horizontal arrow (from midpoint of vertical segment)
+    if row["excluded_n"] > 0:
+        draw_box(x_excl_start, arrow_vertical_center - box_h / 2, box_w, box_h,
+                 row["excluded_label"])
+        ax.annotate("",
+                    xy=(x_excl_start - excl_arrow_gap, arrow_vertical_center),
+                    xytext=(x_main_center, arrow_vertical_center),
+                    arrowprops=arrow_props, annotation_clip=False)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +216,6 @@ ax.text(x_main + box_w + 0.015, y5 + box_h / 2,
 # ---------------------------------------------------------------------------
 out_png = OUTPUT_DIR / f"{site}_causal_consort_diagram.png"
 out_pdf = OUTPUT_DIR / f"{site}_causal_consort_diagram.pdf"
-plt.subplots_adjust(top=0.92)
 plt.savefig(out_png, dpi=300, bbox_inches="tight", facecolor="white")
 plt.savefig(out_pdf, bbox_inches="tight", facecolor="white")
 plt.close(fig)

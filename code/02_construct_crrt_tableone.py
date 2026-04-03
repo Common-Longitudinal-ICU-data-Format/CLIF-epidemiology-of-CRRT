@@ -44,7 +44,8 @@ from sofa_calculator import compute_sofa_polars  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-FINAL_DIR = project_root / "output" / "final"
+FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]

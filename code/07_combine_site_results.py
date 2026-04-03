@@ -97,7 +97,7 @@ FIGURES = [
     ("patient_state_over_crrt.png", "Patient State Over CRRT Course"),
     ("crrt_dose_over_time.png", "CRRT Dose Over Time"),
     ("crrt_dose_comparison_by_mode.png", "CRRT Dose Comparison by Mode"),
-    ("dose_comparison.png", "Dose Comparison"),  # lives in final/, not graphs/
+    ("dose_comparison.png", "Dose Comparison"),
     ("crrt_parameter_histograms_grid.png", "CRRT Parameter Histograms"),
     ("lab_distributions_over_crrt.png", "Lab Distributions Over CRRT"),
     ("map_over_crrt.png", "MAP Over CRRT"),
@@ -137,17 +137,16 @@ def img_to_data_uri(img_path: Path) -> str:
 
 def build_site_content(site_dir: Path) -> str:
     """Build the HTML content block for one site (table + figures)."""
-    final = site_dir / "final"
-    graphs = final / "graphs"
+    crrt_epi = site_dir / "final" / "crrt_epi"
+    graphs = crrt_epi / "graphs"
 
     # Table 1
-    table_html = extract_table(final / "table1_crrt.html")
+    table_html = extract_table(crrt_epi / "table1_crrt.html")
 
     # Figures
     fig_blocks = []
     for fname, title in FIGURES:
-        # dose_comparison.png is in final/, rest in final/graphs/
-        img_path = final / fname if fname == "dose_comparison.png" else graphs / fname
+        img_path = graphs / fname
         if not img_path.exists():
             fig_blocks.append(
                 f'<div class="figure-block">'
@@ -198,7 +197,7 @@ def build_combined_consort(sites: list[Path]) -> str:
     # Load and sum strobe counts
     frames = []
     for site_dir in sites:
-        csv_path = site_dir / "final" / "strobe_counts.csv"
+        csv_path = site_dir / "final" / "crrt_epi" / "strobe_counts.csv"
         if csv_path.exists():
             frames.append(pd.read_csv(csv_path))
     if not frames:
@@ -322,7 +321,7 @@ def build_combined_table1(sites: list[Path]) -> str:
     """Aggregate table1_crrt_long.csv across sites and render HTML."""
     frames = []
     for site_dir in sites:
-        csv_path = site_dir / "final" / "table1_crrt_long.csv"
+        csv_path = site_dir / "final" / "crrt_epi" / "table1_crrt_long.csv"
         if csv_path.exists():
             frames.append(pd.read_csv(csv_path))
     if not frames:
