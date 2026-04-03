@@ -607,13 +607,168 @@ cat("Saved combined three-panel figure.\n\n")
 
 
 # ===================================================================
+# 5. SENSITIVITY: INCLUDING PATIENTS WITH CRRT < 24h
+# ===================================================================
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("Section 5: Sensitivity — Including Patients Excluded by 24h Criterion\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+# The primary analysis excludes 503 patients who died or stopped CRRT
+# within 24h. This conditions on a post-treatment variable, which could
+# bias results if high-dose CRRT causes early death. This sensitivity
+# analysis re-fits the linear dose model on the full descriptive cohort.
+
+# Load the full cohort (N=2,136) from tableone_analysis_df
+tbl_path <- "output/intermediate/tableone_analysis_df.parquet"
+if (!file.exists(tbl_path)) {
+  cat("  SKIPPED: tableone_analysis_df.parquet not found.\n\n")
+} else {
+  df_full <- arrow::read_parquet(tbl_path)
+  cat("Full descriptive cohort:", nrow(df_full), "rows\n")
+
+  # Compute time-to-event (days from CRRT initiation to death or censoring)
+  df_full$crrt_initiation_time <- as.POSIXct(df_full$crrt_initiation_time)
+  df_full$death_dttm <- as.POSIXct(df_full$death_dttm)
+  df_full$final_outcome_dttm <- as.POSIXct(df_full$final_outcome_dttm)
+
+  df_full$time_to_event_days <- as.numeric(difftime(
+    ifelse(!is.na(df_full$death_dttm), df_full$death_dttm, df_full$final_outcome_dttm),
+    df_full$crrt_initiation_time, units = "days"
+  ))
+  # Cap at 30 days
+  df_full$event_30d <- ifelse(
+    df_full$death_30d == 1 & df_full$time_to_event_days <= 30, 1, 0
+  )
+  df_full$time_30d <- pmin(df_full$time_to_event_days, 30)
+  df_full$time_30d <- pmax(df_full$time_30d, 0.01)  # avoid zero times
+
+  # Rename covariates to match the primary analysis
+  df_full <- df_full %>%
+    rename(
+      lactate_0 = lactate_baseline,
+      bicarbonate_0 = bicarbonate_baseline,
+      potassium_0 = potassium_baseline,
+      sofa_total_0 = sofa_total
+    )
+
+  # Dose from index_crrt (already in tableone_analysis_df)
+  df_full$crrt_dose <- df_full$crrt_dose_ml_kg_hr
+
+  # Identify which patients are in the primary vs excluded
+  primary_ebs <- df$encounter_block
+  df_full$in_primary <- df_full$encounter_block %in% primary_ebs
+
+  n_primary <- sum(df_full$in_primary)
+  n_excluded <- sum(!df_full$in_primary)
+  n_excluded_with_dose <- sum(!df_full$in_primary & !is.na(df_full$crrt_dose))
+  n_excluded_no_dose <- sum(!df_full$in_primary & is.na(df_full$crrt_dose))
+  n_sensitivity <- sum(!is.na(df_full$crrt_dose))
+
+  cat("\n--- Cohort Breakdown ---\n")
+  cat("  Primary analysis cohort:           ", n_primary, "\n")
+  cat("  Excluded by 24h criterion:         ", n_excluded, "\n")
+  cat("    - with computable dose:          ", n_excluded_with_dose, "\n")
+  cat("    - without dose (excluded again): ", n_excluded_no_dose, "\n")
+  cat("  Sensitivity analysis cohort:       ", n_sensitivity, "\n")
+  cat("  Patients added back:               ", n_sensitivity - n_primary, "\n\n")
+
+  # Mortality comparison
+  mort_primary <- mean(df_full$event_30d[df_full$in_primary], na.rm = TRUE)
+  mort_excluded <- mean(df_full$event_30d[!df_full$in_primary & !is.na(df_full$crrt_dose)],
+                        na.rm = TRUE)
+  cat("30-day mortality:\n")
+  cat("  Primary cohort:   ", round(mort_primary * 100, 1), "%\n")
+  cat("  Added-back group: ", round(mort_excluded * 100, 1), "%\n\n")
+
+  # Fit linear dose Cox model on full cohort with available covariates
+  # (oxygenation_index and NEE not available in tableone_analysis_df)
+  df_sens <- df_full %>% filter(!is.na(crrt_dose))
+
+  # Race collapse
+  df_sens$race_category <- forcats::fct_collapse(
+    df_sens$race_category,
+    "White" = "white", "Black" = "black or african american",
+    other_level = "Other"
+  )
+
+  # Available covariates (subset of primary model)
+  sens_covariates <- c(
+    "age_at_admission", "sex_category", "race_category",
+    "lactate_0", "bicarbonate_0", "potassium_0", "sofa_total_0"
+  )
+  # Filter to covariates with >=2 unique values
+  sens_covariates <- sens_covariates[
+    sapply(sens_covariates, function(v) {
+      v %in% names(df_sens) && length(unique(df_sens[[v]])) >= 2
+    })
+  ]
+
+  cat("Sensitivity model covariates:", paste(sens_covariates, collapse = ", "), "\n")
+  cat("(Note: oxygenation index, NEE, IMV status, and CCI not available ",
+      "for the full cohort in tableone_analysis_df)\n\n")
+
+  sens_fml <- as.formula(
+    paste0("Surv(time_30d, event_30d) ~ crrt_dose + ",
+           paste(sens_covariates, collapse = " + "))
+  )
+
+  sens_fit <- coxph(sens_fml, data = df_sens)
+  sens_summary <- summary(sens_fit)
+  dose_coef <- sens_summary$coefficients["crrt_dose", ]
+
+  cat("--- Sensitivity Result ---\n")
+  cat(sprintf("  Linear dose HR: %.4f (95%% CI: %.4f - %.4f), p = %.3f\n",
+              exp(dose_coef["coef"]),
+              exp(dose_coef["coef"] - 1.96 * dose_coef["se(coef)"]),
+              exp(dose_coef["coef"] + 1.96 * dose_coef["se(coef)"]),
+              dose_coef["Pr(>|z|)"]))
+
+  # Compare to primary analysis
+  primary_dose_coef <- summary(lin_fit)$coefficients["crrt_dose_ml_kg_hr_0", ]
+  cat(sprintf("  Primary analysis HR: %.4f (95%% CI: %.4f - %.4f), p = %.3f\n\n",
+              exp(primary_dose_coef["coef"]),
+              exp(primary_dose_coef["coef"] - 1.96 * primary_dose_coef["se(coef)"]),
+              exp(primary_dose_coef["coef"] + 1.96 * primary_dose_coef["se(coef)"]),
+              primary_dose_coef["Pr(>|z|)"]))
+
+  # Save results
+  sens_results <- data.frame(
+    analysis = c("Primary (N=1,633)", paste0("Sensitivity (N=", n_sensitivity, ")")),
+    n = c(n_primary, n_sensitivity),
+    n_deaths = c(sum(df$outcome == 2),
+                 sum(df_sens$event_30d, na.rm = TRUE)),
+    hr = c(exp(primary_dose_coef["coef"]), exp(dose_coef["coef"])),
+    hr_lower = c(
+      exp(primary_dose_coef["coef"] - 1.96 * primary_dose_coef["se(coef)"]),
+      exp(dose_coef["coef"] - 1.96 * dose_coef["se(coef)"])
+    ),
+    hr_upper = c(
+      exp(primary_dose_coef["coef"] + 1.96 * primary_dose_coef["se(coef)"]),
+      exp(dose_coef["coef"] + 1.96 * dose_coef["se(coef)"])
+    ),
+    p_value = c(primary_dose_coef["Pr(>|z|)"], dose_coef["Pr(>|z|)"]),
+    patients_added_back = c(0, n_sensitivity - n_primary),
+    mortality_rate = c(
+      round(mort_primary * 100, 1),
+      round(mean(df_sens$event_30d, na.rm = TRUE) * 100, 1)
+    ),
+    stringsAsFactors = FALSE
+  )
+  write.csv(sens_results,
+            file.path(output_dir, paste0(SITE_NAME, "_sensitivity_24h_exclusion.csv")),
+            row.names = FALSE)
+  cat("Saved sensitivity results.\n\n")
+}
+
+
+# ===================================================================
 # DONE
 # ===================================================================
 cat("\n", paste(rep("=", 80), collapse = ""), "\n")
 cat("05b complete. Outputs in:", output_dir, "\n")
 
 outputs <- list.files(output_dir,
-                      pattern = paste0(SITE_NAME, "_(dose_|gps_)"),
+                      pattern = paste0(SITE_NAME, "_(dose_|gps_|sensitivity_)"),
                       full.names = FALSE)
 cat("  Files generated:\n")
 for (f in sort(outputs)) cat("    ", f, "\n")
