@@ -66,9 +66,8 @@ config_path = "../config/config.json"
 with open(config_path, 'r') as f:
     config = json.load(f)
 
-## import outlier json
-# with open('../config/outlier_config.json', 'r', encoding='utf-8') as f:
-#     outlier_cfg = json.load(f)
+from pipeline_helpers import validate_config, safe_load_clif_table
+config = validate_config(config)
 
 print(f"\n=== Configuration:")
 has_crrt_settings = config.get('has_crrt_settings', True)
@@ -232,14 +231,7 @@ core_tables = ['patient', 'hospitalization', 'adt']
 
 print(f"\nLoading {len(core_tables)} core tables...")
 for table_name in core_tables:
-    print(f"   Loading {table_name}...", end=" ")
-    try:
-        clif.load_table(table_name)
-        table = getattr(clif, table_name)
-        print(f"✓ ({len(table.df):,} rows)")
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        raise
+    safe_load_clif_table(clif, table_name, tables_path=config['tables_path'])
 
 print("\nCore tables loaded successfully!")
 
@@ -278,10 +270,10 @@ else:
 
 
 # ============================================================================
-# STEP 1: Identify Adult Patients (Age >= 18) and Admissions 2018-2024
+# STEP 1: Identify Adult Patients (Age >= 18) and filter by admission year
 # ============================================================================
 print("\n" + "=" * 80)
-print("Step 1: Identifying Adult Patients (Age >= 18) and Admissions 2018-2024")
+print("Step 1: Identifying Adult Patients (Age >= 18) and filtering by admission year")
 print("=" * 80)
 
 print("Applying initial cohort filters...")
@@ -300,15 +292,19 @@ adult_encounters = adult_encounters[
     (adult_encounters['age_at_admission'] >= 18) & (adult_encounters['age_at_admission'].notna())
 ]
 
-# Filter for admission years 2018-2024
-adult_encounters = adult_encounters[
-    (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
-]
+# Filter for admission years (configurable, defaults: start=2018, end=None)
+year_start = config["admission_year_start"]
+year_end = config["admission_year_end"]
+year_mask = adult_encounters['admission_dttm'].dt.year >= year_start
+if year_end is not None:
+    year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year <= year_end)
+adult_encounters = adult_encounters[year_mask]
 
+year_label = f"{year_start}-{year_end if year_end else 'present'}"
 print(f"\nFiltering Results:")
 print(f"   Total hospitalizations: {len(all_encounters['hospitalization_id'].unique()):,}")
-print(f"   Adult hospitalizations (age >= 18, 2018-2024): {len(adult_encounters['hospitalization_id'].unique()):,}")
-print(f"   Excluded (age < 18 or outside 2018-2024): {len(all_encounters['hospitalization_id'].unique()) - len(adult_encounters['hospitalization_id'].unique()):,}")
+print(f"   Adult hospitalizations (age >= 18, {year_label}): {len(adult_encounters['hospitalization_id'].unique()):,}")
+print(f"   Excluded (age < 18 or outside {year_label}): {len(all_encounters['hospitalization_id'].unique()) - len(adult_encounters['hospitalization_id'].unique()):,}")
 
 
 strobe_counts["0_total_hospitalizations"] = len(all_encounters['hospitalization_id'].unique())
@@ -384,16 +380,9 @@ cohort_df = encounter_mapping.copy()
 
 
 print(f"\nLoading crrt_therapy table...")
-try:
-    clif.load_table(
-        'crrt_therapy',
-        filters={'hospitalization_id': list(adult_hosp_ids)}
-    )
-    print(f"   CRRT therapy loaded: {len(clif.crrt_therapy.df):,} rows")
-    print(f"   Unique CRRT therapy hospitalizations: {clif.crrt_therapy.df['hospitalization_id'].nunique()}")
-except Exception as e:
-    print(f"   CRRT therapy not available or error: {e}")
-    raise
+safe_load_clif_table(clif, 'crrt_therapy', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(adult_hosp_ids)})
+print(f"   Unique CRRT therapy hospitalizations: {clif.crrt_therapy.df['hospitalization_id'].nunique()}")
 
 
 # In[15]:
@@ -854,31 +843,24 @@ print(f"   Unique encounter blocks: {crrt_at_initiation['encounter_block'].nuniq
 
 
 print(f"\nLoading Hospital dx table...")
-try:
-    clif.load_table(
-        'hospital_diagnosis',
-        filters={'hospitalization_id': list(crrt_hosp_ids)}
-    )
-    print(f"   Hospital dx loaded: {len(clif.hospital_diagnosis.df):,} rows")
-    print(f"   Unique Hospital dx hospitalizations: {clif.hospital_diagnosis.df['hospitalization_id'].nunique()}")
+safe_load_clif_table(clif, 'hospital_diagnosis', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(crrt_hosp_ids)})
+print(f"   Unique Hospital dx hospitalizations: {clif.hospital_diagnosis.df['hospitalization_id'].nunique()}")
 
-    print("Merge encounter blocks with diagnosis")
-    clif.hospital_diagnosis.df = clif.hospital_diagnosis.df.merge(
-                    clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
-                    on='hospitalization_id',
-                    how='left')
+print("Merge encounter blocks with diagnosis")
+clif.hospital_diagnosis.df = clif.hospital_diagnosis.df.merge(
+                clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
+                on='hospitalization_id',
+                how='left')
 
-    n_dx_hosp = clif.hospital_diagnosis.df['hospitalization_id'].nunique()
-    n_dx_blocks = clif.hospital_diagnosis.df['encounter_block'].nunique()
-    cohort_hosp_ids = set(clif.hospital_diagnosis.df['hospitalization_id'].unique())
-    cohort_blocks = set(clif.hospital_diagnosis.df['encounter_block'].unique())
-    print(f"   Total Hospital dx records: {len(clif.hospital_diagnosis.df):,}")
-    print(f"   Records with encounter blocks: {clif.hospital_diagnosis.df['encounter_block'].notna().sum():,}")
-    print(f"   Unique encounter blocks in Hospital dx data: {n_dx_blocks}")
-    print(f"   Unique hospitalizations  in Hospital dx data: {n_dx_hosp}")
-except Exception as e:
-    print(f"   Hospital dx not available or error: {e}")
-    raise
+n_dx_hosp = clif.hospital_diagnosis.df['hospitalization_id'].nunique()
+n_dx_blocks = clif.hospital_diagnosis.df['encounter_block'].nunique()
+cohort_hosp_ids = set(clif.hospital_diagnosis.df['hospitalization_id'].unique())
+cohort_blocks = set(clif.hospital_diagnosis.df['encounter_block'].unique())
+print(f"   Total Hospital dx records: {len(clif.hospital_diagnosis.df):,}")
+print(f"   Records with encounter blocks: {clif.hospital_diagnosis.df['encounter_block'].notna().sum():,}")
+print(f"   Unique encounter blocks in Hospital dx data: {n_dx_blocks}")
+print(f"   Unique hospitalizations  in Hospital dx data: {n_dx_hosp}")
 
 
 # In[22]:
@@ -970,15 +952,10 @@ strobe_counts
 # In[24]:
 
 
-print(f"\nLoading labs table...")
-clif.load_table(
-    'vitals',
-    columns=vitals_required_columns,
-    filters={
-        'hospitalization_id': list(cohort_hosp_ids)
-    }
-)
-print(f"   Vitals loaded: {len(clif.vitals.df):,} rows")
+print(f"\nLoading vitals table...")
+safe_load_clif_table(clif, 'vitals', tables_path=config['tables_path'],
+                     columns=vitals_required_columns,
+                     filters={'hospitalization_id': list(cohort_hosp_ids)})
 print(f"   Unique vitals categories: {clif.vitals.df['vital_category'].nunique()}")
 print(f"   Unique vitals hospitalizations: {clif.vitals.df['hospitalization_id'].nunique()}")
 
@@ -1187,15 +1164,12 @@ labs_required_columns = [
 labs_of_interest = ['lactate', 'bicarbonate', 'potassium']
 
 print(f"\nLoading labs table...")
-clif.load_table(
-    'labs',
-    columns=labs_required_columns,
-    filters={
-        'hospitalization_id': cohort_df['hospitalization_id'].unique().tolist(),
-        'lab_category': labs_of_interest
-    }
-)
-print(f"   Labs loaded: {len(clif.labs.df):,} rows")
+safe_load_clif_table(clif, 'labs', tables_path=config['tables_path'],
+                     columns=labs_required_columns,
+                     filters={
+                         'hospitalization_id': cohort_df['hospitalization_id'].unique().tolist(),
+                         'lab_category': labs_of_interest
+                     })
 print(f"   Unique lab categories: {clif.labs.df['lab_category'].nunique()}")
 print(f"   Unique lab hospitalizations: {clif.labs.df['hospitalization_id'].nunique()}")
 
@@ -1564,7 +1538,7 @@ def create_consort_diagram_straight_flow(
         box_w,
         box_h,
         "All adult hospitalizations\n"
-        "(2018-2024)\n"
+        f"({year_label})\n"
         f"n = {start_n:,}",
         fontsize=11
     )
@@ -2494,16 +2468,9 @@ index_crrt_df = index_crrt_df.merge(
 
 
 print(f"\nLoading respiratory support table...")
-try:
-    clif.load_table(
-        'respiratory_support',
-        filters={'hospitalization_id': list(cohort_df["hospitalization_id"].unique())}
-    )
-    print(f"   respiratory_support loaded: {len(clif.respiratory_support.df):,} rows")
-    print(f"   Unique respiratory_support hospitalizations: {clif.respiratory_support.df['hospitalization_id'].nunique()}")
-except Exception as e:
-    print(f"   respiratory_support not available or error: {e}")
-    raise
+safe_load_clif_table(clif, 'respiratory_support', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(cohort_df["hospitalization_id"].unique())})
+print(f"   Unique respiratory_support hospitalizations: {clif.respiratory_support.df['hospitalization_id'].nunique()}")
 
 
 # In[52]:

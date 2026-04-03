@@ -32,6 +32,9 @@ sys.path.insert(0, str(project_root / "code"))
 with open(project_root / "config" / "config.json") as f:
     config = json.load(f)
 
+from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
+config = validate_config(config)
+
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
 INTERMEDIATE_DIR = project_root / "output" / "intermediate"
@@ -46,10 +49,10 @@ TIMEZONE = config["timezone"]
 # STEP 1: Load intermediate files
 # ===================================================================
 print("Step 1: Loading intermediate files …")
-outcomes_df = pd.read_parquet(INTERMEDIATE_DIR / "outcomes_df.parquet")
-index_crrt_df = pd.read_parquet(INTERMEDIATE_DIR / "index_crrt_df.parquet")
-crrt_initiation = pd.read_parquet(INTERMEDIATE_DIR / "crrt_initiation.parquet")
-tableone_df = pd.read_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet")
+outcomes_df = load_intermediate(INTERMEDIATE_DIR / "outcomes_df.parquet")
+index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
+crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
+tableone_df = load_intermediate(INTERMEDIATE_DIR / "tableone_analysis_df.parquet")
 
 eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
 print(f"  {len(outcomes_df)} encounters")
@@ -111,7 +114,7 @@ crrt_cols = [
 available = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
 needed = ["hospitalization_id", "event_dttm"] + [c for c in crrt_cols if c in available]
 
-wide_df = pd.read_parquet(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed)
+wide_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed)
 wide_df = wide_df.merge(eb_map, on="hospitalization_id", how="inner")
 wide_df = wide_df.merge(
     crrt_initiation[["encounter_block", "crrt_initiation_time"]],
@@ -277,7 +280,7 @@ print("Step 5: Labs at t=12 (last obs in +3h to +12h, baseline fallback) …")
 lab_cols_wide = ["lab_lactate", "lab_bicarbonate", "lab_potassium"]
 needed_labs = ["hospitalization_id", "event_dttm"] + [c for c in lab_cols_wide if c in available]
 
-labs_wide = pd.read_parquet(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_labs)
+labs_wide = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_labs)
 labs_wide = labs_wide.merge(eb_map, on="hospitalization_id", how="inner")
 labs_wide = labs_wide.merge(
     crrt_initiation[["encounter_block", "crrt_initiation_time"]],
@@ -436,7 +439,7 @@ oxy_nee_cols = [
     "med_cont_nee", "resp_device_category", "resp_lpm_set",
 ]
 needed_extra = ["hospitalization_id", "event_dttm"] + [c for c in oxy_nee_cols if c in available]
-extra_df = pd.read_parquet(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_extra)
+extra_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_extra)
 extra_df = extra_df.merge(eb_map, on="hospitalization_id", how="inner")
 extra_df = extra_df.merge(
     crrt_initiation[["encounter_block", "crrt_initiation_time"]],

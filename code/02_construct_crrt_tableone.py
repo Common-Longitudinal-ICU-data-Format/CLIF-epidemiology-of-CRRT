@@ -35,6 +35,9 @@ import json  # noqa: E402
 with open(project_root / "config" / "config.json") as _f:
     config = json.load(_f)
 
+from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
+config = validate_config(config)
+
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -107,9 +110,9 @@ def fmt_n_pct(count: int, total: int) -> str:
 # STEP 1: Load intermediate files
 # ===================================================================
 print("Step 1: Loading intermediate files …")
-outcomes_df = pd.read_parquet(INTERMEDIATE_DIR / "outcomes_df.parquet")
-index_crrt_df = pd.read_parquet(INTERMEDIATE_DIR / "index_crrt_df.parquet")
-crrt_initiation = pd.read_parquet(INTERMEDIATE_DIR / "crrt_initiation.parquet")
+outcomes_df = load_intermediate(INTERMEDIATE_DIR / "outcomes_df.parquet")
+index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
+crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
 
 # 1:1 hospitalization_id <-> encounter_block
 eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
@@ -282,7 +285,7 @@ available_cols = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.par
 needed_cols = ["hospitalization_id", "event_dttm"] + lab_wide + vaso_wide + nee_wide + resp_wide + adt_wide
 needed_cols = [c for c in needed_cols if c in available_cols]
 
-wide_df = pd.read_parquet(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_cols)
+wide_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_cols)
 wide_df = wide_df.merge(eb_map, on="hospitalization_id", how="inner")
 wide_df = wide_df.merge(
     crrt_initiation[["encounter_block", "crrt_initiation_time"]],

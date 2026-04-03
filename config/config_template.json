@@ -4,5 +4,7 @@
     "file_type": "parquet",
     "timezone": "US/Central",
     "project_root": "/path/to/CLIF-epidemiology-of-CRRT",
-    "has_crrt_settings": true
+    "has_crrt_settings": true,
+    "admission_year_start": 2018,
+    "admission_year_end": null
 }
