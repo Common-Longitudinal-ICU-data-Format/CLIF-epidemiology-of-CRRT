@@ -283,8 +283,6 @@ cat("\n")
 # CRRT dose cutoff (mL/kg/hr)
 dose_cutoff <- 30
 
-# Generate a label for filenames and titles
-dose_label <- paste0("CRRT_", dose_cutoff, "cutoff")
 
 cat("Using CRRT dose cutoff of:", dose_cutoff, "mL/kg/hr\n\n")
 # =================================== #
@@ -385,7 +383,7 @@ sample_chars <- data.frame(
 
 # Save sample characteristics
 write.csv(sample_chars,
-          file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_sample_characteristics.csv")),
           row.names = FALSE)
 
@@ -406,7 +404,7 @@ crrt_dose_hist <- ggplot(df_complete, aes(x = crrt_dose_ml_kg_hr_0)) +
 crrt_dose_hist
 
 # Save histogram
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_hist_crrt_dose.png")),
        crrt_dose_hist, width=6, height=4)
 cat("Saved histogram PNG\n")
@@ -440,7 +438,7 @@ bin_dist <- df_tte_bin %>%
   count(crrt_high) %>%
   mutate(prop = n/sum(n))
 write.csv(bin_dist, file.path(output_dir,
-                              paste0(SITE_NAME, "_", dose_label,
+                              paste0(SITE_NAME, "_
                                      "_crrt_bin_distribution.csv")),
           row.names = FALSE)
 cat("Saved bin distribution\n")
@@ -644,8 +642,7 @@ table1 <- table1 %>%
 gt::gtsave(
   as_gt(table1),
   filename = file.path(output_dir,
-                       paste0(SITE_NAME, "_",
-                              dose_label, "_Table1_unadjusted.html"))
+                       paste0(SITE_NAME, "_Table1_unadjusted.html"))
 )
 
 # ============================================ #
@@ -670,10 +667,10 @@ psm_bal <- summary(m.out)$sum.matched
 psm_counts <- summary(m.out)$nn %>%
   as.data.frame() %>%
   rownames_to_column(var = "Category")
-write.csv(psm_bal, file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+write.csv(psm_bal, file.path(output_dir, paste0(SITE_NAME, "_
                                                 "_psm_balance_summary.csv")),
           row.names = FALSE)
-write.csv(psm_counts, file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+write.csv(psm_counts, file.path(output_dir, paste0(SITE_NAME, "_
                                                 "_psm_counts_summary.csv")),
           row.names = FALSE)
 cat("Saved PSM summaries\n")
@@ -716,7 +713,7 @@ plot_loveplot_psm <- love.plot(
 
 print(plot_loveplot_psm)
 
-png(file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_psm_loveplot.png")),
+png(file.path(output_dir, paste0(SITE_NAME, "_psm_loveplot.png")),
     width = 8, height = 7, units = "in", res = 300)
 print(plot_loveplot_psm)
 dev.off()
@@ -835,7 +832,7 @@ gt::gtsave(
   as_gt(tableS1),
   filename = file.path(
     output_dir,
-    paste0(SITE_NAME, "_", dose_label, "_TableS1_matched.html")
+    paste0(SITE_NAME, "_TableS1_matched.html")
   )
 )
 
@@ -910,7 +907,7 @@ fg_results <- bind_rows(
   extract_fg(fg_disch_psm_dr, "Discharge")
 )
 
-write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME, "_
                                                    "_fg_psm_dr_results.csv")),
           row.names = FALSE)
 cat("Saved Fine Gray DR model results\n")
@@ -991,7 +988,7 @@ for (i in seq_len(nrow(pooled_fg_results))) {
 cat("\n")
 
 write.csv(pooled_fg_results,
-          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_fg_psm_pooled_results.csv")),
           row.names = FALSE)
 cat("Saved pooled Fine-Gray results CSV\n")
@@ -1110,7 +1107,7 @@ plot_cif_death <- ggplot(tidy_ci_death, aes(x = time, y = est,
   theme(plot.title = element_text(hjust = 0.5))
 plot_cif_death
 
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_cif_death.png")),
        plot_cif_death, width = 6, height = 4, dpi = 300)
 cat("Saved CIF for death as PNG\n")
@@ -1131,7 +1128,7 @@ plot_cif_discharge <- ggplot(tidy_ci_discharge, aes(x = time, y = est,
   theme(plot.title = element_text(hjust = 0.5))
 plot_cif_discharge
 
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_cif_discharge.png")),
        plot_cif_discharge, width = 6, height = 4, dpi = 300)
 cat("Saved CIF for discharge as PNG\n")
@@ -1171,7 +1168,7 @@ plot_sl_overlap <- ggplot(df_tte_sl, aes(x = ps, fill = crrt_high)) +
   labs(title="Propensity Score Distribution by CRRT Dose Arm (SuperLearner)",
        x="Propensity Score", y="Count", fill="CRRT Dose")
 plot_sl_overlap
-ggsave(file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_SL_PS_overlap.png")),
        plot_sl_overlap, width=6, height=4)
 
@@ -1199,7 +1196,7 @@ for (i in seq_len(nrow(ps_extremes))) {
 cat("\n")
 
 write.csv(ps_extremes,
-          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_SL_PS_extremes.csv")),
           row.names = FALSE)
 cat("Saved PS extremes CSV\n\n")
@@ -1210,7 +1207,7 @@ bal_sl <- cobalt::bal.tab(w_sl, un = TRUE)
 bal_df <- as.data.frame(bal_sl$Balance)
 bal_sl
 write.csv(bal_df, file.path(output_dir,
-                            paste0(SITE_NAME, "_", dose_label,
+                            paste0(SITE_NAME, "_
                                    "_SL_IPTW_balance.csv")),
           row.names = TRUE)
 
@@ -1219,7 +1216,7 @@ ESS_prop <- ESS / nrow(df_tte_sl)
 ESS_prop
 write_csv(
   tibble(N = nrow(df_tte_sl), ESS = ESS, ESS_prop = ESS_prop),
-  file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+  file.path(output_dir, paste0(SITE_NAME, "_
                                "_SL_IPTW_ESS.csv"))
 )
 
@@ -1245,7 +1242,7 @@ print(plot_loveplot_sl)
 
 # Save Love Plot
 png(file.path(output_dir,
-              paste0(SITE_NAME, "_", dose_label, "_SL_LovePlot.png")),
+              paste0(SITE_NAME, "_SL_LovePlot.png")),
     width = 8, height = 7, units = "in", res = 300)
 print(plot_loveplot_sl)
 dev.off()
@@ -1340,7 +1337,7 @@ gt::gtsave(
   as_gt(tableS2),
   filename = file.path(
     output_dir,
-    paste0(SITE_NAME, "_", dose_label, "_TableS2_IPTW.html")
+    paste0(SITE_NAME, "_TableS2_IPTW.html")
   )
 )
 
@@ -1430,7 +1427,7 @@ iptw_results <- bind_rows(
 )
 write.csv(
   iptw_results,
-  file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+  file.path(output_dir, paste0(SITE_NAME, "_
                                "_IPTW_CauseSpecificCox_FULLresults.csv")),
   row.names = FALSE
 )
@@ -1517,7 +1514,7 @@ for (i in seq_len(nrow(pooled_iptw_results))) {
 cat("\n")
 
 write.csv(pooled_iptw_results,
-          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_IPTW_pooled_results.csv")),
           row.names = FALSE)
 cat("Saved pooled IPTW results CSV\n")
@@ -1668,7 +1665,7 @@ plot_cif_death <- ggplot(cif_df, aes(x = time, y = cif_death,
        y = "Cumulative Incidence (Death)",
        color = "CRRT Dose", fill = "CRRT Dose")
 plot_cif_death
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_IPTW_CIF_Death.png")),
        plot_cif_death, width = 6, height = 4, dpi = 300)
 
@@ -1685,7 +1682,7 @@ plot_cif_disch <- ggplot(cif_df, aes(x = time, y = cif_disch,
        y = "Cumulative Incidence (Discharge)",
        color = "CRRT Dose", fill = "CRRT Dose")
 plot_cif_disch
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_IPTW_CIF_Discharge.png")),
        plot_cif_disch, width = 6, height = 4, dpi = 300)
 
@@ -1749,7 +1746,7 @@ comparison_table <- bind_rows(
 comparison_table
 
 write.csv(comparison_table,
-          file.path(output_dir, paste0(SITE_NAME,"_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_ModelComparison_PSMvsIPTW.csv")),
           row.names = FALSE)
 
@@ -1812,7 +1809,7 @@ cat(sprintf("  %-25s  HR=%5.2f (%4.2f-%4.2f)  E-value: point=%.2f, CI=%.2f\n",
 cat("\n")
 
 write.csv(evalue_results,
-          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_evalue_sensitivity.csv")),
           row.names = FALSE)
 cat("Saved E-value sensitivity CSV\n\n")
@@ -2051,7 +2048,7 @@ sg_results_df <- sg_results_df %>%
 
 # Save CSV
 write.csv(sg_results_df,
-          file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+          file.path(output_dir, paste0(SITE_NAME, "_
                                        "_subgroup_analysis_results.csv")),
           row.names = FALSE)
 cat("Saved subgroup analysis results CSV\n")
@@ -2203,11 +2200,11 @@ p_forest <- ggplot(plot_df, aes(y = y_pos)) +
 print(p_forest)
 
 # Save PNG and PDF
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_subgroup_forest_plot.png")),
        p_forest, width = 10, height = 8, dpi = 300)
 
-ggsave(file.path(output_dir, paste0(SITE_NAME, "_", dose_label,
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_
                                     "_subgroup_forest_plot.pdf")),
        p_forest, width = 10, height = 8)
 
