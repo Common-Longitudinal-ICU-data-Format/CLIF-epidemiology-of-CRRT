@@ -58,6 +58,7 @@ config/config_mimic.json
 config/config_ucmc.json
 config/config.json
 
+docs/
 all_site_data/
 code/08_severity_analysis.py
 code/archive/output/
