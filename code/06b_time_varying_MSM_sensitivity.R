@@ -62,6 +62,11 @@ cat("Working directory set to:", getwd(), "\n\n")
 
 ## ---- B. Load required packages, installing if needed ----
 
+# Set CRAN mirror if not already configured (needed when --no-init-file is used)
+if (is.null(getOption("repos")) || getOption("repos")["CRAN"] == "@CRAN@") {
+  options(repos = c(CRAN = "https://cloud.r-project.org"))
+}
+
 required_packages <- c("tidyverse", "readr", "arrow", "gtsummary", "cmprsk",
                        "survival", "jsonlite", "MatchIt", "WeightIt", "broom",
                        "cobalt", "EValue", "SuperLearner", "randomForest",
