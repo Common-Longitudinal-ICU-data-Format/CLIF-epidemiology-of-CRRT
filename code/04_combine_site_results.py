@@ -65,6 +65,16 @@ SITE_COLORS = {
     "umn": "#882255",        # wine
     "upenn": "#44AA99",      # teal
 }
+MODE_COLORS = {
+    "CVVHD": "#0072B5",
+    "CVVHDF": "#1BB355",
+    "CVVH": "#F16041",
+    "SCUF": "#72B7B2",
+    "AVVH": "#B279A2",
+    "OTHER": "#999999",
+}
+MODE_ORDER = ["CVVHD", "CVVHDF", "CVVH", "SCUF", "AVVH", "OTHER"]
+
 SITE_LINESTYLES = {
     "emory": "-",
     "hopkins": "--",
@@ -654,6 +664,65 @@ def _build_patient_state_overlay(sites, labels=None) -> str:
     )
 
 
+def _build_modality_bar(sites, labels=None) -> str:
+    """100% stacked horizontal bar chart of CRRT modality distribution per site (measurement rows)."""
+    if labels is None:
+        labels = SITE_LABELS
+
+    # Load measurement-row counts from crrt_settings_distribution_by_mode.csv
+    rows = []
+    for site_dir in sites:
+        csv_path = site_dir / "final" / "crrt_settings_distribution_by_mode.csv"
+        if not csv_path.exists():
+            continue
+        tmp = pd.read_csv(csv_path)
+        for _, r in tmp.iterrows():
+            rows.append({"site_id": site_dir.name, "mode": r["Mode"].upper(), "n": r["N_Total"]})
+
+    if not rows:
+        return '<p class="missing">Modality distribution: data not available.</p>'
+
+    df = pd.DataFrame(rows)
+    # Pivot: sites × modes
+    pivot = df.pivot_table(index="site_id", columns="mode", values="n", fill_value=0)
+    # Compute proportions
+    totals = pivot.sum(axis=1)
+    pct = pivot.div(totals, axis=0) * 100
+    # Order modes consistently, only include modes that exist
+    modes = [m for m in MODE_ORDER if m in pct.columns]
+    pct = pct[modes]
+    # Sort sites by decreasing CVVHDF proportion (highest at top)
+    pct["_label"] = pct.index.map(lambda s: labels.get(s, s))
+    sort_col = "CVVHDF" if "CVVHDF" in pct.columns else modes[0]
+    pct = pct.sort_values(sort_col, ascending=True)  # ascending so highest is at top of horizontal bar
+    site_labels = pct["_label"].tolist()
+    pct = pct.drop(columns=["_label"])
+
+    fig, ax = plt.subplots(figsize=(10, max(4, len(pct) * 0.6)))
+    left = np.zeros(len(pct))
+    for mode in modes:
+        vals = pct[mode].values
+        ax.barh(site_labels, vals, left=left,
+                color=MODE_COLORS.get(mode, "gray"), label=mode, edgecolor="white", linewidth=0.5)
+        # Add percentage labels for segments >= 5%
+        for i, v in enumerate(vals):
+            if v >= 5:
+                ax.text(left[i] + v / 2, i, f"{v:.0f}%", ha="center", va="center",
+                        fontsize=8, fontweight="bold", color="white")
+        left += vals
+
+    ax.set_xlabel("Proportion (%)")
+    ax.set_title("CRRT Modality Distribution by Site")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=len(modes), fontsize=9)
+    ax.set_xlim(0, 100)
+    fig.subplots_adjust(bottom=0.2)
+    data_uri = fig_to_data_uri(fig)
+    return (
+        '<div class="figure-block"><h3>CRRT Modality Distribution by Site</h3>'
+        f'<img src="{data_uri}" alt="CRRT Modality Distribution"></div>'
+    )
+
+
 # ── UCMC IHD Tab ─────────────────────────────────────────────────────────
 
 
@@ -883,6 +952,7 @@ def build_overall_content(sites: list[Path], labels=None) -> str:
 
     print("  Building overlay graphs...")
     graph_blocks = [
+        _build_modality_bar(sites, labels=labels),
         _build_dose_overlay(sites, labels=labels),
         _build_lab_overlay(sites, labels=labels),
         _build_map_overlay(sites, labels=labels),
