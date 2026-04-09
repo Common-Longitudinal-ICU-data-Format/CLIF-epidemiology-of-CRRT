@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import clifpy
 from utils.config import config
+from pipeline_helpers import load_intermediate, safe_load_clif_table
 from clifpy.utils.outlier_handler import apply_outlier_handling
 import gc
 import yaml
@@ -110,7 +111,7 @@ else:
 ################################################################################
 
 cohort_df_fp = str(OUTPUT_INTERMEDIATE_DIR / "outcomes_df.parquet")
-cohort_df = pd.read_parquet(cohort_df_fp)
+cohort_df = load_intermediate(cohort_df_fp)
 # Ensure correct dtypes for join keys
 cohort_df['hospitalization_id'] = cohort_df['hospitalization_id'].astype(str)
 cohort_df['encounter_block'] = cohort_df['encounter_block'].astype('int32')
@@ -137,15 +138,11 @@ clif = ClifOrchestrator(
     output_directory = OUTPUT_DIR
 )
 
-clif.load_table(
-        'patient',
-        filters={'patient_id': list(final_patient_ids)}
-    )
+safe_load_clif_table(clif, 'patient', tables_path=config['tables_path'],
+                     filters={'patient_id': list(final_patient_ids)})
 
-clif.load_table(
-        'hospitalization',
-        filters={'hospitalization_id': list(final_hosp_ids)}
-    )
+safe_load_clif_table(clif, 'hospitalization', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(final_hosp_ids)})
 
 patient_required_columns = clif_config['patient_required_columns']
 hosp_required_columns = clif_config['hospitalization_required_columns']
@@ -345,11 +342,9 @@ del vitals_wide, labs_wide, meds_cont_wide, labs_df, vitals_df, meds_cont_df, va
 # Respiratory Support
 ################################################################################
 
-clif.load_table(
-        'respiratory_support',
-        columns= clif_config['respiratory_support_required_columns'], 
-        filters={'hospitalization_id': list(final_hosp_ids)}
-    )
+safe_load_clif_table(clif, 'respiratory_support', tables_path=config['tables_path'],
+                     columns=clif_config['respiratory_support_required_columns'],
+                     filters={'hospitalization_id': list(final_hosp_ids)})
 
 clif.respiratory_support = clif.respiratory_support.waterfall()
 
@@ -386,11 +381,9 @@ if has_crrt_settings:
 else:
     crrt_cols_to_load = clif_config.get('crrt_minimal_columns', ['hospitalization_id', 'recorded_dttm'])
 
-clif.load_table(
-        'crrt_therapy',
-        columns=crrt_cols_to_load,
-        filters={'hospitalization_id': list(final_hosp_ids)}
-    )
+safe_load_clif_table(clif, 'crrt_therapy', tables_path=config['tables_path'],
+                     columns=crrt_cols_to_load,
+                     filters={'hospitalization_id': list(final_hosp_ids)})
 
 # =============================================================================
 # CRRT Therapy (already wide format)
@@ -416,17 +409,32 @@ wide_df = wide_df.merge(
 # Re-sort by hospitalization and time
 wide_df = wide_df.sort_values(['hospitalization_id', 'event_dttm']).reset_index(drop=True)
 
+# Apply CRRT outlier handling (same ranges as outlier_config.json)
+crrt_outlier_ranges = {
+    "crrt_blood_flow_rate": (150, 5000),
+    "crrt_dialysate_flow_rate": (0, 20000),
+    "crrt_pre_filter_replacement_fluid_rate": (0, 20000),
+    "crrt_post_filter_replacement_fluid_rate": (0, 20000),
+}
+for col, (lo, hi) in crrt_outlier_ranges.items():
+    if col in wide_df.columns:
+        n_before = wide_df[col].notna().sum()
+        wide_df.loc[wide_df[col] < lo, col] = np.nan
+        wide_df.loc[wide_df[col] > hi, col] = np.nan
+        n_after = wide_df[col].notna().sum()
+        n_removed = n_before - n_after
+        if n_removed > 0:
+            print(f"  CRRT outlier filter: {col} — {n_removed} values set to NaN")
+
 print(wide_df.columns)
 
 ################################################################################
 # ADT
 ################################################################################
 
-clif.load_table(
-        'adt',
-        columns= clif_config['adt_required_columns'], 
-        filters={'hospitalization_id': list(final_hosp_ids)}
-    )
+safe_load_clif_table(clif, 'adt', tables_path=config['tables_path'],
+                     columns=clif_config['adt_required_columns'],
+                     filters={'hospitalization_id': list(final_hosp_ids)})
 adt_df = clif.adt.df
 
 # =============================================================================

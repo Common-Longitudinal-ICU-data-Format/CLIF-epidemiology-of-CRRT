@@ -66,9 +66,8 @@ config_path = "../config/config.json"
 with open(config_path, 'r') as f:
     config = json.load(f)
 
-## import outlier json
-# with open('../config/outlier_config.json', 'r', encoding='utf-8') as f:
-#     outlier_cfg = json.load(f)
+from pipeline_helpers import validate_config, safe_load_clif_table
+config = validate_config(config)
 
 print(f"\n=== Configuration:")
 has_crrt_settings = config.get('has_crrt_settings', True)
@@ -84,7 +83,7 @@ print(f"   Has CRRT settings: {has_crrt_settings}")
 
 import os
 # Create output directories if they do not exist
-os.makedirs("../output/final/graphs", exist_ok=True)
+os.makedirs("../output/final/crrt_epi/graphs", exist_ok=True)
 os.makedirs("../output/intermediate", exist_ok=True)
 
 
@@ -232,14 +231,7 @@ core_tables = ['patient', 'hospitalization', 'adt']
 
 print(f"\nLoading {len(core_tables)} core tables...")
 for table_name in core_tables:
-    print(f"   Loading {table_name}...", end=" ")
-    try:
-        clif.load_table(table_name)
-        table = getattr(clif, table_name)
-        print(f"✓ ({len(table.df):,} rows)")
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        raise
+    safe_load_clif_table(clif, table_name, tables_path=config['tables_path'])
 
 print("\nCore tables loaded successfully!")
 
@@ -278,10 +270,10 @@ else:
 
 
 # ============================================================================
-# STEP 1: Identify Adult Patients (Age >= 18) and Admissions 2018-2024
+# STEP 1: Identify Adult Patients (Age >= 18) and filter by admission year
 # ============================================================================
 print("\n" + "=" * 80)
-print("Step 1: Identifying Adult Patients (Age >= 18) and Admissions 2018-2024")
+print("Step 1: Identifying Adult Patients (Age >= 18) and filtering by admission year")
 print("=" * 80)
 
 print("Applying initial cohort filters...")
@@ -300,15 +292,19 @@ adult_encounters = adult_encounters[
     (adult_encounters['age_at_admission'] >= 18) & (adult_encounters['age_at_admission'].notna())
 ]
 
-# Filter for admission years 2018-2024
-# adult_encounters = adult_encounters[
-#     (adult_encounters['admission_dttm'].dt.year >= 2018) & (adult_encounters['admission_dttm'].dt.year <= 2024)
-# ]
+# Filter for admission years (configurable, defaults: start=2018, end=None)
+year_start = config["admission_year_start"]
+year_end = config["admission_year_end"]
+year_mask = adult_encounters['admission_dttm'].dt.year >= year_start
+if year_end is not None:
+    year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year <= year_end)
+adult_encounters = adult_encounters[year_mask]
 
+year_label = f"{year_start}-{year_end if year_end else 'present'}"
 print(f"\nFiltering Results:")
 print(f"   Total hospitalizations: {len(all_encounters['hospitalization_id'].unique()):,}")
-print(f"   Adult hospitalizations (age >= 18, 2018-2024): {len(adult_encounters['hospitalization_id'].unique()):,}")
-print(f"   Excluded (age < 18 or outside 2018-2024): {len(all_encounters['hospitalization_id'].unique()) - len(adult_encounters['hospitalization_id'].unique()):,}")
+print(f"   Adult hospitalizations (age >= 18, {year_label}): {len(adult_encounters['hospitalization_id'].unique()):,}")
+print(f"   Excluded (age < 18 or outside {year_label}): {len(all_encounters['hospitalization_id'].unique()) - len(adult_encounters['hospitalization_id'].unique()):,}")
 
 
 strobe_counts["0_total_hospitalizations"] = len(all_encounters['hospitalization_id'].unique())
@@ -384,16 +380,9 @@ cohort_df = encounter_mapping.copy()
 
 
 print(f"\nLoading crrt_therapy table...")
-try:
-    clif.load_table(
-        'crrt_therapy',
-        filters={'hospitalization_id': list(adult_hosp_ids)}
-    )
-    print(f"   CRRT therapy loaded: {len(clif.crrt_therapy.df):,} rows")
-    print(f"   Unique CRRT therapy hospitalizations: {clif.crrt_therapy.df['hospitalization_id'].nunique()}")
-except Exception as e:
-    print(f"   CRRT therapy not available or error: {e}")
-    raise
+safe_load_clif_table(clif, 'crrt_therapy', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(adult_hosp_ids)})
+print(f"   Unique CRRT therapy hospitalizations: {clif.crrt_therapy.df['hospitalization_id'].nunique()}")
 
 
 # In[15]:
@@ -441,6 +430,25 @@ n_crrt_blocks = crrt_df['encounter_block'].nunique()
 strobe_counts["2_crrt_blocks"] = n_crrt_blocks
 print(f"   CRRT encounter blocks after mode filter: {n_crrt_blocks:,}")
 
+# ============================================================================
+# CRRT Column Missingness Report
+# ============================================================================
+print("\n" + "=" * 80)
+print("CRRT Column Missingness Report")
+print("=" * 80)
+crrt_miss_cols = [c for c in crrt_df.columns if c not in ['hospitalization_id', 'encounter_block']]
+miss_data = []
+for col in crrt_miss_cols:
+    n_total = len(crrt_df)
+    n_missing = crrt_df[col].isna().sum()
+    pct = n_missing / n_total * 100
+    miss_data.append({'column': col, 'n_total': n_total, 'n_missing': int(n_missing), 'pct_missing': round(pct, 1)})
+    print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
+miss_report = pd.DataFrame(miss_data)
+Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+miss_report.to_csv('../output/final/crrt_epi/crrt_column_missingness.csv', index=False)
+print(f"\n✓ Saved to: output/final/crrt_epi/crrt_column_missingness.csv")
+print("=" * 80)
 
 # In[16]:
 
@@ -609,8 +617,8 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    Path("../output/final").mkdir(parents=True, exist_ok=True)
-    plt.savefig('../output/final/graphs/crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
+    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    plt.savefig('../output/final/crrt_epi/graphs/crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Grid histograms saved to: output/final/crrt_parameter_histograms_grid.png")
@@ -667,8 +675,8 @@ if has_crrt_settings:
     print(summary_df[display_cols].to_string(index=False))
 
     # Save detailed summary
-    summary_df.to_csv('../output/final/crrt_settings_distribution_by_mode.csv', index=False)
-    print(f"\n✓ Detailed summary saved to: output/final/crrt_settings_distribution_by_mode.csv")
+    summary_df.to_csv('../output/final/crrt_epi/crrt_settings_distribution_by_mode.csv', index=False)
+    print(f"\n✓ Detailed summary saved to: output/final/crrt_epi/crrt_settings_distribution_by_mode.csv")
 
     # Also create a simplified summary for quick reference
     simple_summary = []
@@ -697,8 +705,8 @@ if has_crrt_settings:
     print(simple_summary_df.to_string(index=False))
 
     # Save simple summary
-    simple_summary_df.to_csv('../output/final/crrt_settings_summary_simple.csv', index=False)
-    print(f"\n✓ Simple summary saved to: output/final/crrt_settings_summary_simple.csv")
+    simple_summary_df.to_csv('../output/final/crrt_epi/crrt_settings_summary_simple.csv', index=False)
+    print(f"\n✓ Simple summary saved to: output/final/crrt_epi/crrt_settings_summary_simple.csv")
     print("=" * 80)
 
 
@@ -836,31 +844,24 @@ print(f"   Unique encounter blocks: {crrt_at_initiation['encounter_block'].nuniq
 
 
 print(f"\nLoading Hospital dx table...")
-try:
-    clif.load_table(
-        'hospital_diagnosis',
-        filters={'hospitalization_id': list(crrt_hosp_ids)}
-    )
-    print(f"   Hospital dx loaded: {len(clif.hospital_diagnosis.df):,} rows")
-    print(f"   Unique Hospital dx hospitalizations: {clif.hospital_diagnosis.df['hospitalization_id'].nunique()}")
+safe_load_clif_table(clif, 'hospital_diagnosis', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(crrt_hosp_ids)})
+print(f"   Unique Hospital dx hospitalizations: {clif.hospital_diagnosis.df['hospitalization_id'].nunique()}")
 
-    print("Merge encounter blocks with diagnosis")
-    clif.hospital_diagnosis.df = clif.hospital_diagnosis.df.merge(
-                    clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
-                    on='hospitalization_id',
-                    how='left')
+print("Merge encounter blocks with diagnosis")
+clif.hospital_diagnosis.df = clif.hospital_diagnosis.df.merge(
+                clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
+                on='hospitalization_id',
+                how='left')
 
-    n_dx_hosp = clif.hospital_diagnosis.df['hospitalization_id'].nunique()
-    n_dx_blocks = clif.hospital_diagnosis.df['encounter_block'].nunique()
-    cohort_hosp_ids = set(clif.hospital_diagnosis.df['hospitalization_id'].unique())
-    cohort_blocks = set(clif.hospital_diagnosis.df['encounter_block'].unique())
-    print(f"   Total Hospital dx records: {len(clif.hospital_diagnosis.df):,}")
-    print(f"   Records with encounter blocks: {clif.hospital_diagnosis.df['encounter_block'].notna().sum():,}")
-    print(f"   Unique encounter blocks in Hospital dx data: {n_dx_blocks}")
-    print(f"   Unique hospitalizations  in Hospital dx data: {n_dx_hosp}")
-except Exception as e:
-    print(f"   Hospital dx not available or error: {e}")
-    raise
+n_dx_hosp = clif.hospital_diagnosis.df['hospitalization_id'].nunique()
+n_dx_blocks = clif.hospital_diagnosis.df['encounter_block'].nunique()
+cohort_hosp_ids = set(clif.hospital_diagnosis.df['hospitalization_id'].unique())
+cohort_blocks = set(clif.hospital_diagnosis.df['encounter_block'].unique())
+print(f"   Total Hospital dx records: {len(clif.hospital_diagnosis.df):,}")
+print(f"   Records with encounter blocks: {clif.hospital_diagnosis.df['encounter_block'].notna().sum():,}")
+print(f"   Unique encounter blocks in Hospital dx data: {n_dx_blocks}")
+print(f"   Unique hospitalizations  in Hospital dx data: {n_dx_hosp}")
 
 
 # In[22]:
@@ -952,15 +953,10 @@ strobe_counts
 # In[24]:
 
 
-print(f"\nLoading labs table...")
-clif.load_table(
-    'vitals',
-    columns=vitals_required_columns,
-    filters={
-        'hospitalization_id': list(cohort_hosp_ids)
-    }
-)
-print(f"   Vitals loaded: {len(clif.vitals.df):,} rows")
+print(f"\nLoading vitals table...")
+safe_load_clif_table(clif, 'vitals', tables_path=config['tables_path'],
+                     columns=vitals_required_columns,
+                     filters={'hospitalization_id': list(cohort_hosp_ids)})
 print(f"   Unique vitals categories: {clif.vitals.df['vital_category'].nunique()}")
 print(f"   Unique vitals hospitalizations: {clif.vitals.df['hospitalization_id'].nunique()}")
 
@@ -1169,15 +1165,12 @@ labs_required_columns = [
 labs_of_interest = ['lactate', 'bicarbonate', 'potassium']
 
 print(f"\nLoading labs table...")
-clif.load_table(
-    'labs',
-    columns=labs_required_columns,
-    filters={
-        'hospitalization_id': cohort_df['hospitalization_id'].unique().tolist(),
-        'lab_category': labs_of_interest
-    }
-)
-print(f"   Labs loaded: {len(clif.labs.df):,} rows")
+safe_load_clif_table(clif, 'labs', tables_path=config['tables_path'],
+                     columns=labs_required_columns,
+                     filters={
+                         'hospitalization_id': cohort_df['hospitalization_id'].unique().tolist(),
+                         'lab_category': labs_of_interest
+                     })
 print(f"   Unique lab categories: {clif.labs.df['lab_category'].nunique()}")
 print(f"   Unique lab hospitalizations: {clif.labs.df['hospitalization_id'].nunique()}")
 
@@ -1392,7 +1385,8 @@ print(strobe_counts)
 # Save strobe counts to CSV in ../output/intermediate
 strobe_counts_df = pd.DataFrame(list(strobe_counts.items()), columns=['counter', 'value'])
 strobe_counts_df["site"] = config["site_name"]
-strobe_counts_df.to_csv('../output/final/strobe_counts.csv', index=False)
+Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+strobe_counts_df.to_csv('../output/final/crrt_epi/strobe_counts.csv', index=False)
 
 
 # In[43]:
@@ -1406,7 +1400,7 @@ from matplotlib.patches import FancyBboxPatch
 
 def create_consort_diagram_straight_flow(
     strobe_counts: Dict,
-    output_dir: Union[str, Path] = "../output/final/graphs"
+    output_dir: Union[str, Path] = "../output/final/crrt_epi/graphs"
 ) -> Path:
     """
     Creates a CONSORT flow diagram with a straight vertical main flow 
@@ -1546,7 +1540,7 @@ def create_consort_diagram_straight_flow(
         box_w,
         box_h,
         "All adult hospitalizations\n"
-        "(2018-2024)\n"
+        f"({year_label})\n"
         f"n = {start_n:,}",
         fontsize=11
     )
@@ -1858,27 +1852,13 @@ print(f"   - Using last_vital_dttm: {num_using_last_vital:,}")
 # ============================================================================
 print("\n5. Calculating mortality outcomes...")
 
-# Bring in discharge_dttm for the in-hospital death check
-death_info = death_info.merge(
-    hosp_los[['encounter_block', 'discharge_dttm']].drop_duplicates('encounter_block'),
-    on='encounter_block', how='left',
-)
-
-# In-hospital death: died AND final_outcome_dttm between first vital and
-# max(last_vital, discharge). We use the max because:
-#   - Vitals often stop being charted shortly before death (median 0.57h gap),
-#     so death_dttm > last_vital_dttm is normal clinical workflow.
-#   - In some cases last_vital_dttm > discharge_dttm (vitals charted after
-#     discharge timestamp due to data entry timing).
-# Using max(last_vital, discharge) captures both patterns.
-death_info['_hosp_end'] = death_info[['last_vital_dttm', 'discharge_dttm']].max(axis=1)
+# In-hospital death: died AND final_outcome_dttm is between first and last vital
 death_info['in_hosp_death'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
     (death_info['final_outcome_dttm'] >= death_info['first_vital_dttm']) &
-    (death_info['final_outcome_dttm'] <= death_info['_hosp_end'])
+    (death_info['final_outcome_dttm'] <= death_info['last_vital_dttm'])
 ).astype(int)
-death_info = death_info.drop(columns=['_hosp_end'])
 
 # 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
 death_info['death_30d'] = (
@@ -1895,14 +1875,12 @@ print(f"   30-day deaths: {death_info['death_30d'].sum():,} ({death_info['death_
 # 6. COMBINE ALL OUTCOMES
 # ============================================================================
 print("\n6. Combining all outcomes...")
-# Deduplicate to one row per encounter_block (stitched hospitalizations share an encounter_block)
-cohort_base = cohort_df[['hospitalization_id', 'encounter_block']].drop_duplicates(subset='encounter_block', keep='first')
-outcomes_df = cohort_base.merge(
+outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
     icu_los_summary, on='encounter_block', how='left'
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
 ).merge(
-    death_info.drop(columns=['discharge_dttm'], errors='ignore'), on='encounter_block', how='left'
+    death_info, on='encounter_block', how='left'
 )
 
 print(f"\nFinal outcomes dataset:")
@@ -2136,11 +2114,27 @@ if has_crrt_settings:
     print(f"     Total rows: {len(final_df):,} (one per encounter)")
     print(f"     Total columns: {len(final_df.columns)}")
 
-    # Assign to your desired variable name
-    index_crrt_df = final_df.copy()
+    # Merge dose results back into the full index_crrt_df (left join)
+    # This preserves encounters excluded from dose calc (e.g. SCUF/AVVH, missing flows)
+    dose_only_cols = [c for c in final_df.columns if c not in ['encounter_block', 'hospitalization_id', 'crrt_initiation_time', 'weight_kg', 'crrt_mode_category']]
+    # Drop any overlapping columns from index_crrt_df before merge to avoid _x/_y suffixes
+    overlap_cols = [c for c in dose_only_cols if c in index_crrt_df.columns]
+    if overlap_cols:
+        index_crrt_df = index_crrt_df.drop(columns=overlap_cols)
+    print(f"\n   Merging dose columns back into index_crrt_df...")
+    print(f"     index_crrt_df rows before merge: {len(index_crrt_df):,}")
+    print(f"     final_df (dose-eligible) rows: {len(final_df):,}")
+    index_crrt_df = index_crrt_df.merge(
+        final_df[['encounter_block'] + dose_only_cols],
+        on='encounter_block',
+        how='left'
+    )
+    print(f"     index_crrt_df rows after merge: {len(index_crrt_df):,}")
 
     print("\n✅ Final dataframe created with one row per encounter!")
     print(f"   Stored as 'index_crrt_df' with {len(index_crrt_df)} encounters")
+    print(f"   Encounters with dose data: {index_crrt_df['crrt_dose_ml_kg_hr'].notna().sum():,}")
+    print(f"   Encounters without dose data (NaN): {index_crrt_df['crrt_dose_ml_kg_hr'].isna().sum():,}")
 
 
     # In[48]:
@@ -2189,7 +2183,8 @@ if has_crrt_settings:
 
     # Save figure
     plt.tight_layout()
-    fig.savefig("../output/final/dose_comparison.png")
+    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    fig.savefig("../output/final/crrt_epi/graphs/dose_comparison.png")
     plt.close(fig)
 
 
@@ -2264,7 +2259,7 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    output_path = '../output/final/graphs/crrt_dose_comparison_by_mode.png'
+    output_path = '../output/final/crrt_epi/graphs/crrt_dose_comparison_by_mode.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"\n✓ Saved mode-specific comparison to: {output_path}")
@@ -2476,16 +2471,9 @@ index_crrt_df = index_crrt_df.merge(
 
 
 print(f"\nLoading respiratory support table...")
-try:
-    clif.load_table(
-        'respiratory_support',
-        filters={'hospitalization_id': list(cohort_df["hospitalization_id"].unique())}
-    )
-    print(f"   respiratory_support loaded: {len(clif.respiratory_support.df):,} rows")
-    print(f"   Unique respiratory_support hospitalizations: {clif.respiratory_support.df['hospitalization_id'].nunique()}")
-except Exception as e:
-    print(f"   respiratory_support not available or error: {e}")
-    raise
+safe_load_clif_table(clif, 'respiratory_support', tables_path=config['tables_path'],
+                     filters={'hospitalization_id': list(cohort_df["hospitalization_id"].unique())})
+print(f"   Unique respiratory_support hospitalizations: {clif.respiratory_support.df['hospitalization_id'].nunique()}")
 
 
 # In[52]:

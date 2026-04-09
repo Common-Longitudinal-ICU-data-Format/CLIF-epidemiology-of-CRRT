@@ -12,6 +12,7 @@ Usage: uv run python code/crrt_visualizations.py
 """
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -23,11 +24,16 @@ import pyarrow.parquet as pq
 # Setup
 # ---------------------------------------------------------------------------
 project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root / "code"))
+
 with open(project_root / "config" / "config.json") as f:
     config = json.load(f)
 
+from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
+config = validate_config(config)
+
 INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-GRAPHS_DIR = project_root / "output" / "final" / "graphs"
+GRAPHS_DIR = project_root / "output" / "final" / "crrt_epi" / "graphs"
 GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]
@@ -37,8 +43,8 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 # Load data
 # ---------------------------------------------------------------------------
 print("Loading data …")
-crrt_initiation = pd.read_parquet(INTERMEDIATE_DIR / "crrt_initiation.parquet")
-index_crrt_df = pd.read_parquet(INTERMEDIATE_DIR / "index_crrt_df.parquet")
+crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
+index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
 eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
 
 # Load only needed columns from wide_df
@@ -57,7 +63,7 @@ available = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet"
 needed = ["hospitalization_id", "event_dttm"] + \
     [c for c in crrt_cols + lab_cols + other_cols if c in available]
 
-wide_df = pd.read_parquet(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed)
+wide_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed)
 wide_df = wide_df.merge(eb_map, on="hospitalization_id", how="inner")
 wide_df = wide_df.merge(
     crrt_initiation[["encounter_block", "crrt_initiation_time"]],
@@ -384,7 +390,7 @@ print("Computing patient state proportions over CRRT course …")
 
 import matplotlib.colors as mcolors
 
-outcomes_df = pd.read_parquet(INTERMEDIATE_DIR / "outcomes_df.parquet")
+outcomes_df = load_intermediate(INTERMEDIATE_DIR / "outcomes_df.parquet")
 
 # Merge outcome timing with crrt_initiation_time
 # Use `died` (discharge_category in expired/hospice) rather than the stricter

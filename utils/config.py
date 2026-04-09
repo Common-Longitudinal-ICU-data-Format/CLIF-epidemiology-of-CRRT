@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 def load_config():
     # Get the directory where this file (config.py) is located
@@ -15,7 +16,14 @@ def load_config():
     else:
         raise FileNotFoundError("Configuration file not found.",
                                 "Please create config.json based on the config_template.")
-    
+
+    # Validate config fields
+    code_dir = os.path.join(project_root, "code")
+    if code_dir not in sys.path:
+        sys.path.insert(0, code_dir)
+    from pipeline_helpers import validate_config
+    config = validate_config(config)
+
     return config
 # Load the configuration
 config = load_config()
