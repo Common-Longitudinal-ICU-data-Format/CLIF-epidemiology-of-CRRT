@@ -187,9 +187,11 @@ if (!all(required_vars %in% names(df))) {
 }
 
 ## ---- F. Collapse race into 3 categories ----
+# Normalize to lowercase first so sites with different capitalization map correctly
+df$race_category <- tolower(as.character(df$race_category))
 df$race_category <- forcats::fct_collapse(
-  df$race_category,
-  "White"                  = "white",
+  factor(df$race_category),
+  "White" = "white",
   "Black" = "black or african american",
   other_level = "Other"
 )
@@ -244,6 +246,23 @@ if (n_incomplete > 0) {
   imp_list <- list(df_complete)
 }
 
+# Safety net: coerce NaN/Inf to NA in numeric columns (MICE doesn't handle these)
+sanitize_numeric <- function(d) {
+  num_cols <- names(d)[sapply(d, is.numeric)]
+  for (col in num_cols) {
+    bad <- is.nan(d[[col]]) | is.infinite(d[[col]])
+    if (any(bad)) {
+      cat("  Warning:", sum(bad), "NaN/Inf values in", col, "— converted to NA\n")
+      d[[col]][bad] <- NA
+    }
+  }
+  d
+}
+cat("Checking for NaN/Inf values after imputation...\n")
+df_complete <- sanitize_numeric(df_complete)
+imp_list <- lapply(imp_list, sanitize_numeric)
+cat("NaN/Inf check complete.\n\n")
+
 cat("Analysis sample:", nrow(df_complete), "of", nrow(df), "\n\n")
 
 # Check for sufficient data
@@ -281,6 +300,11 @@ psm_formula <- as.formula(
 cat("PSM/IPTW formula:\n")
 print(psm_formula)
 cat("\n")
+
+# Complete-case variable list: all model covariates + outcome/time variables
+# Used by all drop_na() calls to ensure data is complete for every formula variable
+complete_case_vars <- c(model_covariates, "sofa_total_0",
+                        "crrt_dose_ml_kg_hr_0", "time_to_event_30d", "outcome")
 
 ## ---- C. CRRT Dose Cutoff ----
 # =================================== #
@@ -424,12 +448,10 @@ df_tte_bin <- df_complete %>%
       labels = c(paste0("<", dose_cutoff), paste0(">=", dose_cutoff))
     )
   ) %>%
-  drop_na(
-    crrt_high, age_at_admission, sex_category, sofa_total_0,
-    lactate_0, bicarbonate_0, potassium_0,
-    oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
-    time_to_event_30d, outcome
-  )
+  drop_na(all_of(complete_case_vars)) %>%
+  droplevels()
+
+cat("After drop_na on all model covariates:", nrow(df_tte_bin), "rows\n")
 
 # Print Distribution
 df_tte_bin %>%
@@ -931,12 +953,8 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
     d_imp$crrt_high <- factor(d_imp$crrt_high, levels = c(0, 1),
                               labels = c(paste0("<", dose_cutoff),
                                          paste0(">=", dose_cutoff)))
-    d_imp <- tidyr::drop_na(d_imp,
-      crrt_high, age_at_admission, sex_category, sofa_total_0,
-      lactate_0, bicarbonate_0, potassium_0,
-      oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
-      time_to_event_30d, outcome
-    )
+    d_imp <- tidyr::drop_na(d_imp, dplyr::all_of(complete_case_vars))
+    d_imp <- droplevels(d_imp)
     # Subset to matched rows
     d_match_m <- d_imp[rownames(d_imp) %in% as.character(matched_ids), ]
 
@@ -1143,16 +1161,30 @@ set.seed(42)
 df_tte_sl <- df_tte_bin
 
 # IPTW using Super Learner for propensity score estimation
-# NOTE: If SL.gam fails due to spaces in race_category level names,
-#       either remove SL.gam from library or apply make.names() to data
-w_sl <- weightit(
-  psm_formula,
-  data = df_tte_sl,
-  method = "super",
-  SL.library = c("SL.glm","SL.gam","SL.randomForest"),
-  estimand = "ATE",
-  stabilize = TRUE
+# Falls back to GLM if SuperLearner fails (e.g., variable length errors at some sites)
+w_sl <- tryCatch(
+  weightit(
+    psm_formula,
+    data = df_tte_sl,
+    method = "super",
+    SL.library = c("SL.glm", "SL.gam", "SL.randomForest"),
+    estimand = "ATE",
+    stabilize = TRUE
+  ),
+  error = function(e) {
+    cat("\n*** WARNING: SuperLearner failed:", conditionMessage(e), "\n")
+    cat("*** Falling back to GLM propensity scores\n\n")
+    weightit(
+      psm_formula,
+      data = df_tte_sl,
+      method = "glm",
+      estimand = "ATE",
+      stabilize = TRUE
+    )
+  }
 )
+cat("Propensity score method used:", ifelse(inherits(w_sl, "weightit"),
+    w_sl$method, "unknown"), "\n")
 
 # attach SL weights + PS
 df_tte_sl$w  <- w_sl$weights
@@ -1438,12 +1470,8 @@ imp_sl_list <- lapply(seq_len(N_IMP), function(m) {
   d$crrt_high <- factor(d$crrt_high, levels = c(0, 1),
                         labels = c(paste0("<", dose_cutoff),
                                    paste0(">=", dose_cutoff)))
-  d <- tidyr::drop_na(d,
-    crrt_high, age_at_admission, sex_category, sofa_total_0,
-    lactate_0, bicarbonate_0, potassium_0,
-    oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
-    time_to_event_30d, outcome
-  )
+  d <- tidyr::drop_na(d, dplyr::all_of(complete_case_vars))
+  d <- droplevels(d)
   d$crrt_high <- relevel(d$crrt_high, ref = ref_label)
   d$w  <- w_sl$weights
   d$ps <- w_sl$ps
