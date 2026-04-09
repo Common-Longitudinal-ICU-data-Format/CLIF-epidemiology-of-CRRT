@@ -48,7 +48,7 @@ echo ""
 for step in "${R_STEPS[@]}"; do
     name=$(basename "$step" .R)
     echo "--- Running $name ---"
-    Rscript "$SCRIPT_DIR/code/$step"
+    Rscript --no-init-file "$SCRIPT_DIR/code/$step"
     echo "--- $name complete ---"
     echo ""
 done
