@@ -46,7 +46,7 @@ for %%S in (
     06b_time_varying_MSM_sensitivity.R
 ) do (
     echo --- Running %%~nS ---
-    Rscript "%%S"
+    Rscript "%SCRIPT_DIR%code\%%S"
     if errorlevel 1 (
         echo ERROR: %%~nS failed.
         exit /b 1
