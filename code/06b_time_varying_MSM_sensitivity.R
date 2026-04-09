@@ -168,12 +168,15 @@ if (!all(required_vars %in% names(df))) {
 }
 
 ## ---- F. Collapse race into 3 categories ----
+# Normalize to lowercase first so sites with different capitalization map correctly
+df$race_category <- tolower(as.character(df$race_category))
 df$race_category <- forcats::fct_collapse(
-  df$race_category,
+  factor(df$race_category),
   "White"                  = "white",
   "Black/African American" = "black or african american",
   other_level = "Other"
 )
+df <- droplevels(df)
 
 # ================================ #
 # ---- 1. DATA CLEANING ----
@@ -261,6 +264,30 @@ if (n_incomplete > 0) {
 } else {
   cat("No missing values — skipping MICE\n")
   df_complete <- df
+}
+
+# Safety net: coerce NaN/Inf to NA in numeric columns (MICE doesn't handle these)
+sanitize_numeric <- function(d) {
+  num_cols <- names(d)[sapply(d, is.numeric)]
+  for (col in num_cols) {
+    bad <- is.nan(d[[col]]) | is.infinite(d[[col]])
+    if (any(bad)) {
+      cat("  Warning:", sum(bad), "NaN/Inf values in", col, "— converted to NA\n")
+      d[[col]][bad] <- NA
+    }
+  }
+  d
+}
+cat("Checking for NaN/Inf values after imputation...\n")
+df_complete <- sanitize_numeric(df_complete)
+cat("NaN/Inf check complete.\n")
+
+# Drop any rows still incomplete in model_vars after MICE + sanitize
+n_still_incomplete <- sum(!complete.cases(df_complete[, model_vars]))
+if (n_still_incomplete > 0) {
+  cat("Warning:", n_still_incomplete, "rows still incomplete after MICE + sanitize — dropping\n")
+  df_complete <- df_complete[complete.cases(df_complete[, model_vars]), ]
+  df_complete <- droplevels(df_complete)
 }
 
 cat("Analysis sample:", nrow(df_complete), "\n\n")
@@ -496,6 +523,18 @@ cat("Saved combined dose histogram PNG\n")
 ## ---- C. Designate High vs Low CRRT Dose ----
 cat("Defining treatment groups using cutoff =", dose_cutoff, "mL/kg/hr\n")
 
+# Dynamic complete-case variable list: all covariates that models will touch
+complete_case_vars <- c(
+  "age_at_admission", "sex_category", "race_category", "weight_kg",
+  "sofa_total_0", "crrt_dose_ml_kg_hr_0",
+  "lactate_0", "bicarbonate_0", "potassium_0",
+  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  cci_vars,
+  "time_to_event_90d", "outcome"
+)
+# Keep only vars that exist in the data (sites without CCI columns, etc.)
+complete_case_vars <- intersect(complete_case_vars, names(df_complete))
+
 df_tte_bin <- df_complete %>%
   mutate(
     crrt_high = ifelse(crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L),
@@ -505,12 +544,10 @@ df_tte_bin <- df_complete %>%
       labels = c(paste0("<", dose_cutoff), paste0(">=", dose_cutoff))
     )
   ) %>%
-  drop_na(
-    crrt_high, age_at_admission, sex_category, sofa_total_0,
-    lactate_0, bicarbonate_0, potassium_0,
-    oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
-    time_to_event_90d, outcome
-  )
+  drop_na(all_of(complete_case_vars)) %>%
+  droplevels()
+
+cat("After drop_na on all model covariates:", nrow(df_tte_bin), "rows\n")
 
 # Print Distribution
 df_tte_bin %>%
@@ -846,16 +883,39 @@ cat(" ", paste(baseline_terms, collapse = ", "), "\n\n")
 sl_lib <- c("SL.glm","SL.gam","SL.randomForest")
 
 sl_fit_prob <- function(d, y, xvars, sl_lib) {
-  X <- d %>% select(all_of(xvars))
+  # Complete-case filter on y + xvars to prevent model.matrix row-dropping mismatch
+  keep <- complete.cases(d[, c(y, xvars)])
+  n_drop <- sum(!keep)
+  if (n_drop > 0) cat("  SL: dropping", n_drop, "incomplete rows\n")
+  d_cc <- d[keep, ]
+
+  X <- d_cc %>% select(all_of(xvars))
   mm <- model.matrix(~ . , data = X)[, -1, drop = FALSE]
   colnames(mm) <- make.names(colnames(mm))
-  fit <- SuperLearner::SuperLearner(
-    Y = d[[y]],
-    X = as.data.frame(mm),
-    family = binomial(),
-    SL.library = sl_lib
-  )
-  as.vector(fit$SL.predict)  # P(A=1|X)
+
+  preds_cc <- tryCatch({
+    fit <- SuperLearner::SuperLearner(
+      Y = d_cc[[y]],
+      X = as.data.frame(mm),
+      family = binomial(),
+      SL.library = sl_lib
+    )
+    as.vector(fit$SL.predict)
+  }, error = function(e) {
+    cat("  WARNING: SuperLearner failed:", conditionMessage(e), "\n")
+    cat("  Falling back to GLM\n")
+    glm_fit <- glm(
+      reformulate(colnames(mm), response = y),
+      data = cbind(d_cc[, y, drop = FALSE], as.data.frame(mm)),
+      family = binomial()
+    )
+    predict(glm_fit, type = "response")
+  })
+
+  # Expand back to full length — NA for dropped rows
+  out <- rep(NA_real_, nrow(d))
+  out[keep] <- preds_cc
+  out
 }
 
 df_w <- df_msm_long %>%
@@ -877,9 +937,15 @@ for (tt in c(0, 24)) {
 
   p1_denom <- sl_fit_prob(dft, y = "A", xvars = denom_vars, sl_lib = sl_lib)
   p1_num   <- sl_fit_prob(dft, y = "A", xvars = num_vars,   sl_lib = sl_lib)
-  
+
+  # Fill NA predictions (from dropped incomplete rows) with marginal P(A=1)
+  # so those patients get uninformative weights (~1)
+  marginal_p <- mean(dft$A, na.rm = TRUE)
+  p1_denom[is.na(p1_denom)] <- marginal_p
+  p1_num[is.na(p1_num)]     <- marginal_p
+
   ### ---- I. Truncate extreme propensity scores to enforce positivity  ----
-  # If unwanted, add #s 
+  # If unwanted, add #s
   p1_denom <- pmin(pmax(p1_denom, PS_FLOOR), PS_CEIL)
 
   # Probability of the observed treatment A
