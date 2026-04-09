@@ -1144,9 +1144,10 @@ extract_cox_robust <- function(fit, model_label) {
   rownames(ci) <- NULL
   names(ci)[1:2] <- c("ci_lower", "ci_upper")
 
-  # Detect the z and p-value column names (vary across survival versions)
+  # Detect the z, p-value, and SE column names (vary across survival versions)
   z_col <- intersect(c("robust z", "z"), names(co))[1]
   p_col <- intersect(c("Pr(>|z|)", "Robust Pr(>|z|)"), names(co))[1]
+  se_col <- intersect(c("robust se", "se(coef)"), names(co))[1]
 
   out <- co %>%
     dplyr::left_join(ci, by = "variable") %>%
@@ -1155,10 +1156,11 @@ extract_cox_robust <- function(fit, model_label) {
       HR = exp(coef),
       HR_lower = exp(ci_lower),
       HR_upper = exp(ci_upper),
+      se_log_hr = .data[[se_col]],
       z = .data[[z_col]],
       p_value = .data[[p_col]]
     ) %>%
-    dplyr::select(model, variable, HR, HR_lower, HR_upper, z, p_value)
+    dplyr::select(model, variable, HR, HR_lower, HR_upper, se_log_hr, z, p_value)
 
   out
 }

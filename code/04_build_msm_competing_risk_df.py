@@ -967,6 +967,7 @@ covariate_cols = [c for c in final_cols if c != "encounter_block"]
 diag_missing = result[covariate_cols].isna().astype(int)
 diag_missing.insert(0, "encounter_block", result["encounter_block"].values)
 diag_missing["total_missing"] = diag_missing.drop(columns=["encounter_block"]).sum(axis=1)
+diag_missing["site_id"] = SITE
 diag_path = OUTPUT_DIR / "missingness_diagnostic.csv"
 diag_missing.to_csv(diag_path, index=False)
 print(f"\nSaved patient-level missingness: {diag_path}")
@@ -991,7 +992,8 @@ for col in covariate_cols:
         "pct_missing": round(n_miss / n_total * 100, 2),
     })
 agg_df = pd.DataFrame(agg_rows).sort_values("pct_missing", ascending=False)
-agg_csv_path = FINAL_DIR / "missingness_summary.csv"
+agg_df["site_id"] = SITE
+agg_csv_path = FINAL_DIR / f"{SITE}_missingness_summary.csv"
 agg_df.to_csv(agg_csv_path, index=False)
 print(f"Saved aggregate missingness: {agg_csv_path}")
 
@@ -1013,7 +1015,7 @@ if len(agg_any) > 0:
                 f"{pct}% (n={n})", va="center", fontsize=9)
     ax.set_xlim(0, agg_any["pct_missing"].max() * 1.4)
     plt.tight_layout()
-    heatmap_path = GRAPHS_DIR / "missingness_heatmap.png"
+    heatmap_path = GRAPHS_DIR / f"{SITE}_missingness_heatmap.png"
     fig.savefig(heatmap_path, dpi=150)
     plt.close(fig)
     print(f"Saved missingness heatmap: {heatmap_path}")
@@ -1022,6 +1024,7 @@ else:
 
 # Save
 out_path = OUTPUT_DIR / "msm_competing_risk_df.parquet"
+result["site_id"] = SITE
 result.to_parquet(out_path, index=False)
 print(f"\nSaved: {out_path} ({len(result)} rows x {len(result.columns)} cols)")
 
@@ -1050,7 +1053,7 @@ print("\nStep 11: Generating causal CONSORT flow diagram …")
 from matplotlib.patches import FancyBboxPatch
 
 # --- Load STROBE counts from descriptive cohort (step 00) ---
-strobe = pd.read_csv(project_root / "output" / "final" / "crrt_epi" / "strobe_counts.csv")
+strobe = pd.read_csv(project_root / "output" / "final" / "crrt_epi" / f"{SITE}_strobe_counts.csv")
 strobe_dict = dict(zip(strobe["counter"], strobe["value"]))
 
 n_total_hosp = int(strobe_dict.get("1b_after_stitching", strobe_dict.get("1_adult_hospitalizations", 0)))

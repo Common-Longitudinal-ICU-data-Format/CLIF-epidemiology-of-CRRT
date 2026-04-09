@@ -787,19 +787,19 @@ print("Step 7: Writing output …")
 table1_df = pd.DataFrame(rows)
 
 # CSV (formatted, for display)
-output_csv = FINAL_DIR / "table1_crrt.csv"
+output_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt.csv"
 table1_df.to_csv(output_csv, index=False, header=False)
 print(f"  CSV: {output_csv}")
 
 # Long-format CSV (machine-readable, for multi-site aggregation)
 long_df = pd.DataFrame(long_rows)
 long_df["site"] = SITE_NAME
-output_long_csv = FINAL_DIR / "table1_crrt_long.csv"
+output_long_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt_long.csv"
 long_df.to_csv(output_long_csv, index=False)
 print(f"  Long CSV: {output_long_csv}")
 
 # HTML
-html_path = FINAL_DIR / "table1_crrt.html"
+html_path = FINAL_DIR / f"{SITE_NAME}_table1_crrt.html"
 # Use rows 3+ as the actual data table (skip the 3 header meta-rows)
 data_df = pd.DataFrame(rows[3:], columns=["Variable", "Level"] + SG_NAMES)
 

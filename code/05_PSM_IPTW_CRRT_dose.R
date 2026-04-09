@@ -963,6 +963,7 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
     HR       = pooled$hr,
     HR_lower = pooled$hr_lower,
     HR_upper = pooled$hr_upper,
+    se_log_hr = pooled$se,
     p_value  = pooled$p_value,
     fmi      = pooled$fmi,
     stringsAsFactors = FALSE
@@ -1390,10 +1391,10 @@ extract_iptw_cox <- function(fit, label){
   co <- s$coefficients
   ci <- confint(fit)    # CI already on coef scale
 
-  # detect correct z column name
+  # detect correct column names
   z_col <- intersect(colnames(co), c("robust z","z"))[1]
-  # detect correct p column name
   p_col <- intersect(colnames(co), c("Pr(>|z|)","Robust Pr(>|z|)","p"))[1]
+  se_col <- intersect(colnames(co), c("robust se","se(coef)"))[1]
 
   data.frame(
     outcome = label,
@@ -1401,6 +1402,7 @@ extract_iptw_cox <- function(fit, label){
     HR = exp(co[, "coef"]),
     HR_lower = exp(ci[,1]),
     HR_upper = exp(ci[,2]),
+    se_log_hr = co[, se_col],
     z = co[, z_col],
     p_value = co[, p_col],
     row.names = NULL,
@@ -1478,6 +1480,7 @@ pool_treatment_hr <- function(fits, outcome_label) {
     HR        = pooled$hr,
     HR_lower  = pooled$hr_lower,
     HR_upper  = pooled$hr_upper,
+    se_log_hr = pooled$se,
     p_value   = pooled$p_value,
     fmi       = pooled$fmi,
     stringsAsFactors = FALSE
@@ -1685,6 +1688,7 @@ extract_fg_trt <- function(fg, label){
     HR = tr[,"exp(coef)"],
     HR_lower = tr[,"exp(coef)"]/exp(1.96*tr[,"se(coef)"]),
     HR_upper = tr[,"exp(coef)"]*exp(1.96*tr[,"se(coef)"]),
+    se_log_hr = tr[,"se(coef)"],
     p_value = tr[,"p-value"],
     row.names = NULL
   )
@@ -1702,6 +1706,7 @@ extract_iptw_trt <- function(fit, label){
 
   # Detect column names dynamically
   p_col <- intersect(colnames(co), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
+  se_col <- intersect(colnames(co), c("robust se", "se(coef)"))[1]
 
   data.frame(
     model = label,
@@ -1709,6 +1714,7 @@ extract_iptw_trt <- function(fit, label){
     HR = exp(co[idx,"coef"]),
     HR_lower = exp(ci[idx,1]),
     HR_upper = exp(ci[idx,2]),
+    se_log_hr = co[idx, se_col],
     p_value = co[idx, p_col],
     row.names=NULL
   )
@@ -1722,8 +1728,8 @@ comparison_table <- bind_rows(
   fg_disch_row,
   iptw_death_row,
   iptw_disch_row,
-  pooled_fg_results %>% select(model, HR_type, HR, HR_lower, HR_upper, p_value),
-  pooled_iptw_results %>% select(model, HR_type, HR, HR_lower, HR_upper, p_value)
+  pooled_fg_results %>% select(model, HR_type, HR, HR_lower, HR_upper, se_log_hr, p_value),
+  pooled_iptw_results %>% select(model, HR_type, HR, HR_lower, HR_upper, se_log_hr, p_value)
 )
 
 comparison_table

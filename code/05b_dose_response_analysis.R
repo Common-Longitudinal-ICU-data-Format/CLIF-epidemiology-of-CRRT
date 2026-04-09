@@ -746,6 +746,7 @@ if (!file.exists(tbl_path)) {
       exp(primary_dose_coef["coef"] + 1.96 * primary_dose_coef["se(coef)"]),
       exp(dose_coef["coef"] + 1.96 * dose_coef["se(coef)"])
     ),
+    se_log_hr = c(primary_dose_coef["se(coef)"], dose_coef["se(coef)"]),
     p_value = c(primary_dose_coef["Pr(>|z|)"], dose_coef["Pr(>|z|)"]),
     patients_added_back = c(0, n_sensitivity - n_primary),
     mortality_rate = c(

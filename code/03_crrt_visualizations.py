@@ -126,7 +126,7 @@ if HAS_CRRT_SETTINGS:
     hourly_dose.columns = ["hour", "mean_dose", "median_dose", "std_dose", "n_patients"]
 
     # Save aggregated data
-    hourly_dose.to_csv(GRAPHS_DIR / "crrt_dose_hourly.csv", index=False)
+    hourly_dose.to_csv(GRAPHS_DIR / f"{SITE_NAME}_crrt_dose_hourly.csv", index=False)
     print(f"  Saved: {GRAPHS_DIR / 'crrt_dose_hourly.csv'} ({len(hourly_dose)} hours)")
 
     # Also compute IQR for plotting
@@ -140,7 +140,7 @@ if HAS_CRRT_SETTINGS:
 
     # Re-save with IQR
     hourly_dose["site"] = SITE_NAME
-    hourly_dose.to_csv(GRAPHS_DIR / "crrt_dose_hourly.csv", index=False)
+    hourly_dose.to_csv(GRAPHS_DIR / f"{SITE_NAME}_crrt_dose_hourly.csv", index=False)
 
     # Plot (median + IQR — robust to outliers)
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -160,7 +160,7 @@ if HAS_CRRT_SETTINGS:
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(GRAPHS_DIR / "crrt_dose_over_time.png", dpi=150)
+    fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_crrt_dose_over_time.png", dpi=150)
     plt.close(fig)
     print(f"  Saved: {GRAPHS_DIR / 'crrt_dose_over_time.png'}")
 
@@ -205,7 +205,7 @@ for col, (display_name, short_name) in lab_info.items():
 
 lab_agg_df = pd.concat(all_lab_agg, ignore_index=True)
 lab_agg_df["site"] = SITE_NAME
-lab_agg_df.to_csv(GRAPHS_DIR / "lab_distributions_over_crrt.csv", index=False)
+lab_agg_df.to_csv(GRAPHS_DIR / f"{SITE_NAME}_lab_distributions_over_crrt.csv", index=False)
 print(f"  Saved: {GRAPHS_DIR / 'lab_distributions_over_crrt.csv'}")
 
 # Plot: 3x2 grid (5 labs, hide 6th panel)
@@ -232,7 +232,7 @@ axes[5].set_visible(False)
 fig.suptitle(f"Lab Distributions Over CRRT Course (First 7 Days) — {SITE_NAME}",
              fontsize=13, y=1.01)
 fig.tight_layout()
-fig.savefig(GRAPHS_DIR / "lab_distributions_over_crrt.png", dpi=150, bbox_inches="tight")
+fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_lab_distributions_over_crrt.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"  Saved: {GRAPHS_DIR / 'lab_distributions_over_crrt.png'}")
 
@@ -248,7 +248,7 @@ if "vital_map" in post_crrt.columns:
     )
     map_agg.columns = ["hour", "median", "q25", "q75", "n"]
     map_agg["site"] = SITE_NAME
-    map_agg.to_csv(GRAPHS_DIR / "map_over_crrt.csv", index=False)
+    map_agg.to_csv(GRAPHS_DIR / f"{SITE_NAME}_map_over_crrt.csv", index=False)
     print(f"  Saved: {GRAPHS_DIR / 'map_over_crrt.csv'}")
 
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -263,7 +263,7 @@ if "vital_map" in post_crrt.columns:
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(GRAPHS_DIR / "map_over_crrt.png", dpi=150)
+    fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_map_over_crrt.png", dpi=150)
     plt.close(fig)
     print(f"  Saved: {GRAPHS_DIR / 'map_over_crrt.png'}")
 else:
@@ -281,7 +281,7 @@ if "med_cont_nee" in post_crrt.columns:
     )
     nee_agg.columns = ["hour", "median", "q25", "q75", "n"]
     nee_agg["site"] = SITE_NAME
-    nee_agg.to_csv(GRAPHS_DIR / "nee_over_crrt.csv", index=False)
+    nee_agg.to_csv(GRAPHS_DIR / f"{SITE_NAME}_nee_over_crrt.csv", index=False)
     print(f"  Saved: {GRAPHS_DIR / 'nee_over_crrt.csv'}")
 
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -296,7 +296,7 @@ if "med_cont_nee" in post_crrt.columns:
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(GRAPHS_DIR / "nee_over_crrt.png", dpi=150)
+    fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_nee_over_crrt.png", dpi=150)
     plt.close(fig)
     print(f"  Saved: {GRAPHS_DIR / 'nee_over_crrt.png'}")
 else:
@@ -337,7 +337,7 @@ if "resp_device_category" in post_crrt.columns:
 if resp_dfs:
     resp_agg_df = pd.concat(resp_dfs, ignore_index=True)
     resp_agg_df["site"] = SITE_NAME
-    resp_agg_df.to_csv(GRAPHS_DIR / "respiratory_over_crrt.csv", index=False)
+    resp_agg_df.to_csv(GRAPHS_DIR / f"{SITE_NAME}_respiratory_over_crrt.csv", index=False)
     print(f"  Saved: {GRAPHS_DIR / 'respiratory_over_crrt.csv'}")
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 9))
@@ -377,7 +377,7 @@ if resp_dfs:
     fig.suptitle(f"Respiratory Support Over CRRT Course (First 7 Days) — {SITE_NAME}",
                  fontsize=13, y=1.01)
     fig.tight_layout()
-    fig.savefig(GRAPHS_DIR / "respiratory_over_crrt.png", dpi=150, bbox_inches="tight")
+    fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_respiratory_over_crrt.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {GRAPHS_DIR / 'respiratory_over_crrt.png'}")
 else:
@@ -535,7 +535,7 @@ state_df["prop_off_imv"] = state_df["n_off_imv"] / state_df["n_total"] * 100
 state_df["site"] = SITE_NAME
 
 # Save aggregate data
-state_df.to_csv(GRAPHS_DIR / "patient_state_over_crrt.csv", index=False)
+state_df.to_csv(GRAPHS_DIR / f"{SITE_NAME}_patient_state_over_crrt.csv", index=False)
 print(f"  Saved: {GRAPHS_DIR / 'patient_state_over_crrt.csv'}")
 
 # --- Stacked area plot ---
@@ -566,7 +566,7 @@ ax.set_ylim(0, 100)
 ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=10)
 ax.grid(axis="y", alpha=0.3)
 fig.tight_layout()
-fig.savefig(GRAPHS_DIR / "patient_state_over_crrt.png", dpi=150, bbox_inches="tight")
+fig.savefig(GRAPHS_DIR / f"{SITE_NAME}_patient_state_over_crrt.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"  Saved: {GRAPHS_DIR / 'patient_state_over_crrt.png'}")
 
@@ -643,8 +643,8 @@ tte_df = pd.DataFrame(tte_rows)
 # Save both tables
 milestone_df["site"] = SITE_NAME
 tte_df["site"] = SITE_NAME
-milestone_df.to_csv(GRAPHS_DIR / "crrt_course_milestones.csv", index=False)
-tte_df.to_csv(GRAPHS_DIR / "crrt_course_time_to_event.csv", index=False)
+milestone_df.to_csv(GRAPHS_DIR / f"{SITE_NAME}_crrt_course_milestones.csv", index=False)
+tte_df.to_csv(GRAPHS_DIR / f"{SITE_NAME}_crrt_course_time_to_event.csv", index=False)
 print(f"  Saved: {GRAPHS_DIR / 'crrt_course_milestones.csv'}")
 print(f"  Saved: {GRAPHS_DIR / 'crrt_course_time_to_event.csv'}")
 

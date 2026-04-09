@@ -68,6 +68,7 @@ with open(config_path, 'r') as f:
 
 from pipeline_helpers import validate_config, safe_load_clif_table
 config = validate_config(config)
+SITE_NAME = config["site_name"]
 
 print(f"\n=== Configuration:")
 has_crrt_settings = config.get('has_crrt_settings', True)
@@ -446,7 +447,7 @@ for col in crrt_miss_cols:
     print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
 miss_report = pd.DataFrame(miss_data)
 Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
-miss_report.to_csv('../output/final/crrt_epi/crrt_column_missingness.csv', index=False)
+miss_report.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_column_missingness.csv', index=False)
 print(f"\n✓ Saved to: output/final/crrt_epi/crrt_column_missingness.csv")
 print("=" * 80)
 
@@ -618,7 +619,7 @@ if has_crrt_settings:
 
     # Save figure
     Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    plt.savefig('../output/final/crrt_epi/graphs/crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'../output/final/crrt_epi/graphs/{SITE_NAME}_crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Grid histograms saved to: output/final/crrt_parameter_histograms_grid.png")
@@ -675,7 +676,7 @@ if has_crrt_settings:
     print(summary_df[display_cols].to_string(index=False))
 
     # Save detailed summary
-    summary_df.to_csv('../output/final/crrt_epi/crrt_settings_distribution_by_mode.csv', index=False)
+    summary_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_settings_distribution_by_mode.csv', index=False)
     print(f"\n✓ Detailed summary saved to: output/final/crrt_epi/crrt_settings_distribution_by_mode.csv")
 
     # Also create a simplified summary for quick reference
@@ -705,7 +706,7 @@ if has_crrt_settings:
     print(simple_summary_df.to_string(index=False))
 
     # Save simple summary
-    simple_summary_df.to_csv('../output/final/crrt_epi/crrt_settings_summary_simple.csv', index=False)
+    simple_summary_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_settings_summary_simple.csv', index=False)
     print(f"\n✓ Simple summary saved to: output/final/crrt_epi/crrt_settings_summary_simple.csv")
     print("=" * 80)
 
@@ -1386,7 +1387,7 @@ print(strobe_counts)
 strobe_counts_df = pd.DataFrame(list(strobe_counts.items()), columns=['counter', 'value'])
 strobe_counts_df["site"] = config["site_name"]
 Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
-strobe_counts_df.to_csv('../output/final/crrt_epi/strobe_counts.csv', index=False)
+strobe_counts_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_strobe_counts.csv', index=False)
 
 
 # In[43]:
@@ -1702,7 +1703,7 @@ def create_consort_diagram_straight_flow(
     # ------------------------------------------------------------------
     # 5. Save and return path
     # ------------------------------------------------------------------
-    consort_file = output_dir / "consort_diagram_straight_flow_right_excl.png"
+    consort_file = output_dir / f"{SITE_NAME}_consort_diagram_straight_flow_right_excl.png"
     plt.savefig(consort_file, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
@@ -1882,6 +1883,13 @@ outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
 ).merge(
     death_info, on='encounter_block', how='left'
 )
+
+# Deduplicate to one row per encounter_block (stitched encounters have multiple hospitalization_ids)
+n_before_dedup = len(outcomes_df)
+outcomes_df = outcomes_df.drop_duplicates(subset='encounter_block', keep='first')
+n_after_dedup = len(outcomes_df)
+if n_before_dedup != n_after_dedup:
+    print(f"  Deduplicated outcomes_df: {n_before_dedup} → {n_after_dedup} rows ({n_before_dedup - n_after_dedup} duplicate encounter_blocks removed)")
 
 print(f"\nFinal outcomes dataset:")
 print(f"   Total records: {len(outcomes_df):,}")
@@ -2184,7 +2192,7 @@ if has_crrt_settings:
     # Save figure
     plt.tight_layout()
     Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    fig.savefig("../output/final/crrt_epi/graphs/dose_comparison.png")
+    fig.savefig(f"../output/final/crrt_epi/graphs/{SITE_NAME}_dose_comparison.png")
     plt.close(fig)
 
 
@@ -2259,7 +2267,7 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    output_path = '../output/final/crrt_epi/graphs/crrt_dose_comparison_by_mode.png'
+    output_path = f'../output/final/crrt_epi/graphs/{SITE_NAME}_crrt_dose_comparison_by_mode.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"\n✓ Saved mode-specific comparison to: {output_path}")
