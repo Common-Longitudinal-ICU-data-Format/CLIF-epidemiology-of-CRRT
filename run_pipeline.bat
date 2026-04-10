@@ -39,6 +39,10 @@ for %%S in (
 
 echo === Causal inference (R) ===
 echo.
+
+set R_LIBS_USER=%USERPROFILE%\R\win-library\4.5
+mkdir "%R_LIBS_USER%" 2>nul
+
 for %%S in (
     05_PSM_IPTW_CRRT_dose.R
     05b_dose_response_analysis.R
