@@ -68,7 +68,7 @@ if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final/time_varying"
+output_dir <- "output/final/msm/time_varying"
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")

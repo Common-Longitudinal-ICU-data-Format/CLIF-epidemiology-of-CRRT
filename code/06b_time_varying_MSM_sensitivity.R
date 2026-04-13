@@ -6,7 +6,7 @@
 #   - Uses crrt_dose_0_24 / crrt_dose_24_48 (instead of 0_12 / 12_24)
 #   - Uses _24 covariates (instead of _12) for t2 time point
 #   - Time points: tpt = 0 and tpt = 24 (instead of 0 and 12)
-#   - Output directory: output/final/time_varying_sensitivity
+#   - Output directory: output/final/msm/time_varying_sensitivity
 ###############################################################################
 
 # ================================ #
@@ -77,7 +77,7 @@ if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final/time_varying_sensitivity"
+output_dir <- "output/final/msm/time_varying_sensitivity"
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")
