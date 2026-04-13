@@ -59,15 +59,8 @@ cp config/config_template.json config/config.json
 # 3. Install dependencies
 uv sync
 
-# 4. Run the descriptive pipeline (steps 00-03)
+# 4. Run the full pipeline (descriptive 00-03, causal 04-06b)
 bash run_pipeline.sh
-
-# 5. Run causal inference scripts (require steps 00-03 first)
-uv run python code/04_build_msm_competing_risk_df.py
-Rscript code/05_PSM_IPTW_CRRT_dose.R
-Rscript code/05b_dose_response_analysis.R
-Rscript code/06_time_varying_MSM.R
-Rscript code/06b_time_varying_MSM_sensitivity.R
 ```
 
 ### Windows
@@ -84,19 +77,11 @@ copy config\config_template.json config\config.json
 :: 3. Install dependencies
 uv sync
 
-:: 4. Run the descriptive pipeline (steps 00-03)
+:: 4. Run the full pipeline (descriptive 00-03, causal 04-06b)
 run_pipeline.bat
-
-:: 5. Run causal inference scripts (require steps 00-03 first)
-:: set PYTHONIOENCODING=utf-8
-:: uv run python code\04_build_msm_competing_risk_df.py
-:: Rscript code\05_PSM_IPTW_CRRT_dose.R
-:: Rscript code\05b_dose_response_analysis.R
-:: Rscript code\06_time_varying_MSM.R
-:: Rscript code\06b_time_varying_MSM_sensitivity.R
 ```
 
-> **Note:** The batch script sets `PYTHONIOENCODING=utf-8` automatically. If running scripts individually on Windows, set this variable first to avoid Unicode encoding errors.
+> **Note:** The pipeline scripts run all steps sequentially: Python scripts 00-04 followed by R scripts 05-06b. R scripts are invoked with `--no-init-file` to avoid conflicts with user `.Rprofile` settings. CRAN mirror defaults to `https://cloud.r-project.org` if not configured.
 
 ### R Packages
 
@@ -148,8 +133,8 @@ Identifies the CRRT cohort with inclusion/exclusion criteria (excludes ESRD via 
 - `output/intermediate/outcomes_df.parquet`
 - `output/intermediate/index_crrt_df.parquet`
 - `output/intermediate/crrt_initiation.parquet`
-- `output/final/crrt_epi/strobe_counts.csv`
-- `output/final/crrt_epi/graphs/consort_diagram_straight_flow_right_excl.png`
+- `output/final/crrt_epi/{site}_strobe_counts.csv`
+- `output/final/crrt_epi/graphs/{site}_consort_diagram_straight_flow_right_excl.png`
 
 #### Step 01: Wide Dataset (`01_create_wide_df.py`)
 Builds a wide longitudinal dataset merging labs, vitals, medications, respiratory support, CRRT therapy, and ADT into a single time-indexed table. Includes vasopressor unit conversion and norepinephrine-equivalent (NEE) computation.
@@ -160,13 +145,14 @@ Builds a wide longitudinal dataset merging labs, vitals, medications, respirator
 Generates Table 1 with demographics, SOFA scores, labs, vasopressors, respiratory settings, and CRRT details across time windows (baseline -12h to +3h, 72h post-CRRT, discharge) stratified by survival.
 
 **Outputs:**
-- `output/final/crrt_epi/table1_crrt.csv`
-- `output/final/crrt_epi/table1_crrt.html`
+- `output/final/crrt_epi/{site}_table1_crrt.csv`
+- `output/final/crrt_epi/{site}_table1_crrt.html`
+- `output/final/crrt_epi/{site}_table1_crrt_long.csv`
 
 #### Step 03: Visualizations (`03_crrt_visualizations.py`)
 Generates clinical trajectory figures for the first 7 days post-CRRT: dose over time, lab distributions, MAP, respiratory support, and patient state (stacked area plot).
 
-**Outputs:** `output/final/crrt_epi/graphs/` (PNG figures + CSV aggregate data)
+**Outputs:** `output/final/crrt_epi/graphs/{site}_*.png` (figures) + `{site}_*.csv` (aggregate data)
 
 ### Causal Inference (Steps 04-06b)
 
@@ -177,7 +163,7 @@ Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxyg
 
 **Outputs:**
 - `output/intermediate/msm_competing_risk_df.parquet`
-- `output/final/crrt_epi/graphs/missingness_heatmap.png`
+- `output/final/crrt_epi/graphs/{site}_missingness_heatmap.png`
 - `output/final/psm_iptw/{site}_causal_consort_diagram.{png,pdf}`
 
 #### Step 05: PSM & IPTW (`05_PSM_IPTW_CRRT_dose.R`)
@@ -203,26 +189,25 @@ Also generates a target trial emulation specification table and a 24h exclusion 
 #### Step 06: Time-Varying MSM (`06_time_varying_MSM.R`)
 Time-varying marginal structural model for CRRT dose using 12h intervals. Models dose trajectories as treatment strategies with inverse-probability-of-treatment weighting.
 
-**Outputs:** `output/final/msm/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics
+**Outputs:** `output/final/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics
 
 #### Step 06b: MSM Sensitivity (`06b_time_varying_MSM_sensitivity.R`)
 Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >=48h, CRRT >=48h, has dialysate in 0-48h window).
 
-**Outputs:** `output/final/msm/time_varying_sensitivity/`
+**Outputs:** `output/final/time_varying_sensitivity/`
 
-### Multi-Site Aggregation (Steps 07-09)
+### Multi-Site Aggregation
 
-#### Step 07: Combine Site Results (`07_combine_site_results.py`)
-Aggregates per-site results into a combined dashboard. Imports `08_severity_analysis` for cross-site severity comparisons.
+> These scripts are run centrally after collecting `output/final/` from all sites. They are **not** part of `run_pipeline.sh`.
 
-#### Step 08: Severity Analysis (`08_severity_analysis.py`)
-Cross-site severity comparisons (imported by step 07).
+#### Step 07: Combine Descriptive Results (`07_combine_site_results.py`)
+Aggregates per-site descriptive results into a combined tabbed HTML dashboard with overlay graphs.
 
 ## Output Structure
 
 ```
 output/
-├── intermediate/           # Intermediate parquet files (not committed)
+├── intermediate/                    # Intermediate parquet files (not committed)
 │   ├── outcomes_df.parquet
 │   ├── index_crrt_df.parquet
 │   ├── crrt_initiation.parquet
@@ -230,27 +215,31 @@ output/
 │   ├── tableone_analysis_df.parquet
 │   └── msm_competing_risk_df.parquet
 │
-└── final/
-    ├── crrt_epi/            # Descriptive epidemiology
-    │   ├── strobe_counts.csv
-    │   ├── table1_crrt.csv
-    │   ├── table1_crrt.html
-    │   ├── missingness_summary.csv
-    │   ├── crrt_settings_*.csv
-    │   └── graphs/          # Figures (PNG) + aggregate data (CSV)
+└── final/                           # All files are site-prefixed (e.g., UCMC_*)
+    ├── crrt_epi/                    # Descriptive epidemiology
+    │   ├── {site}_strobe_counts.csv
+    │   ├── {site}_table1_crrt.csv
+    │   ├── {site}_table1_crrt.html
+    │   ├── {site}_table1_crrt_long.csv
+    │   ├── {site}_missingness_summary.csv
+    │   ├── {site}_crrt_settings_*.csv
+    │   └── graphs/                  # Site-prefixed PNGs + CSVs
     │
-    ├── psm_iptw/            # Point-treatment causal analysis
-    │   ├── psm_iptw_output_guide.md
-    │   ├── psm_iptw_findings.md
-    │   ├── {site}_*.csv     # Balance, model results, subgroup analysis
-    │   ├── {site}_*.png     # PS overlap, love plots, CIF curves, forest plot
-    │   └── {site}_dose_response_*.png  # Dose-response figures
+    ├── psm_iptw/                    # Point-treatment causal analysis
+    │   ├── {site}_IPTW_pooled_results.csv
+    │   ├── {site}_ModelComparison_PSMvsIPTW.csv
+    │   ├── {site}_subgroup_analysis_results.csv
+    │   ├── {site}_dose_response_*.csv
+    │   ├── {site}_evalue_sensitivity.csv
+    │   └── {site}_*.png             # PS overlap, love plots, CIF curves, forest plots
     │
-    └── msm/                 # Time-varying MSM analysis
-        ├── msm_output_guide.md
-        ├── msm_sensitivity_findings.md
-        ├── time_varying/            # Primary (12h intervals)
-        └── time_varying_sensitivity/ # Sensitivity (24h intervals)
+    ├── time_varying/                # Time-varying MSM (primary, 12h intervals)
+    │   ├── {site}_CRRT_30cutoff_MSM_*.csv
+    │   └── {site}_CRRT_30cutoff_*.png
+    │
+    └── time_varying_sensitivity/    # Time-varying MSM (sensitivity, 24h intervals)
+        ├── {site}_CRRT_30cutoff_MSM_*.csv
+        └── {site}_CRRT_30cutoff_*.png
 ```
 
 ## Key Modules
