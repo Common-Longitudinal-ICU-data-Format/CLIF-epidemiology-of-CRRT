@@ -753,6 +753,9 @@ gt::gtsave(
                        paste0(SITE_NAME, "_",
                               dose_label, "_Table1_unadjusted.html"))
 )
+write.csv(as_tibble(table1),
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_Table1_unadjusted.csv")),
+          row.names = FALSE)
 
 
 # ============================================================= #
@@ -1414,6 +1417,9 @@ gt::gtsave(
   as_gt(tableS1_msm),
   filename = file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS1_MSM_IPTW.html"))
 )
+write.csv(as_tibble(tableS1_msm),
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS1_MSM_IPTW.csv")),
+          row.names = FALSE)
 
 cat("Saved MSM Table S1.\n")
 

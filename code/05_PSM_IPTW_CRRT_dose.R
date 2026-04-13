@@ -668,6 +668,9 @@ gt::gtsave(
   filename = file.path(output_dir,
                        paste0(SITE_NAME, "_Table1_unadjusted.html"))
 )
+write.csv(as_tibble(table1),
+          file.path(output_dir, paste0(SITE_NAME, "_Table1_unadjusted.csv")),
+          row.names = FALSE)
 
 # ============================================ #
 # ---- 2. PROPENSITY SCORE MATCHING BRANCH ----
@@ -857,6 +860,9 @@ gt::gtsave(
     paste0(SITE_NAME, "_TableS1_matched.html")
   )
 )
+write.csv(as_tibble(tableS1),
+          file.path(output_dir, paste0(SITE_NAME, "_TableS1_matched.csv")),
+          row.names = FALSE)
 
 ## ---- D. Analysis of PSM ----
 ### ---- I. Fine-Gray Analysis on Matched Patients ----
@@ -1365,6 +1371,9 @@ gt::gtsave(
     paste0(SITE_NAME, "_TableS2_IPTW.html")
   )
 )
+write.csv(as_tibble(tableS2),
+          file.path(output_dir, paste0(SITE_NAME, "_TableS2_IPTW.csv")),
+          row.names = FALSE)
 
 # ============================================================= #
 ### ---- OPTIONAL TRIMMING ----
