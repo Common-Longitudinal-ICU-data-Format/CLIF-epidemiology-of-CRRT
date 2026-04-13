@@ -196,13 +196,6 @@ Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >
 
 **Outputs:** `output/final/time_varying_sensitivity/`
 
-### Multi-Site Aggregation
-
-> These scripts are run centrally after collecting `output/final/` from all sites. They are **not** part of `run_pipeline.sh`.
-
-#### Step 07: Combine Descriptive Results (`07_combine_site_results.py`)
-Aggregates per-site descriptive results into a combined tabbed HTML dashboard with overlay graphs.
-
 ## Output Structure
 
 ```
