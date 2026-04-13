@@ -1818,7 +1818,11 @@ ggsave(
   plot_cif_disch, width = 6, height = 4, dpi = 300
 )
 
-cat("MSM standardized CIF plots with CIs saved as PNGs.\n")
+# Export MSM CIF data as CSV
+write.csv(cif_df,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_MSM_CIF_data.csv")),
+          row.names = FALSE)
+cat("MSM standardized CIF plots with CIs saved as PNGs + CSV.\n")
 
 # ============================================================= #
 # ---- 8. FINISH! ----
