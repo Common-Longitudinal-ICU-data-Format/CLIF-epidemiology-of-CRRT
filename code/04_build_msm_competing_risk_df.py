@@ -33,7 +33,7 @@ sys.path.insert(0, str(project_root / "code"))
 with open(project_root / "config" / "config.json") as f:
     config = json.load(f)
 
-from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
+from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
 config = validate_config(config)
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
@@ -58,6 +58,11 @@ tableone_df = load_intermediate(INTERMEDIATE_DIR / "tableone_analysis_df.parquet
 
 eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
 print(f"  {len(outcomes_df)} encounters")
+
+# Pre-filter CLIF tables to cohort (prevents OOM during SOFA)
+cohort_hosp_ids = set(eb_map["hospitalization_id"].unique())
+cohort_patient_ids = set(outcomes_df["patient_id"].unique()) if "patient_id" in outcomes_df.columns else None
+TABLES_PATH = get_tables_path(config, cohort_hosp_ids, INTERMEDIATE_DIR, patient_ids=cohort_patient_ids)
 
 # ===================================================================
 # STEP 2: Demographics + static columns

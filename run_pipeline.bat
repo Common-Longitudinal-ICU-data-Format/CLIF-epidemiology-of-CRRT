@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 set PYTHONIOENCODING=utf-8
 set SCRIPT_DIR=%~dp0
@@ -12,13 +12,31 @@ if not exist "%SCRIPT_DIR%config\config.json" (
     exit /b 1
 )
 
+:: Set up logging
+if not exist "%SCRIPT_DIR%output\final" mkdir "%SCRIPT_DIR%output\final"
+for /f "tokens=*" %%i in ('python -c "import json; print(json.load(open(r'%SCRIPT_DIR%config\config.json'))['site_name'])" 2^>nul') do set SITE_NAME=%%i
+if "%SITE_NAME%"=="" set SITE_NAME=unknown
+for /f "tokens=2 delims==" %%a in ('wmic os get localdatetime /value') do set dt=%%a
+set TIMESTAMP=%dt:~0,8%_%dt:~8,6%
+set LOG_FILE=%SCRIPT_DIR%output\final\%SITE_NAME%_pipeline_%TIMESTAMP%.log
+
+:: Tee all output to log file + console via PowerShell
+echo === CRRT Epidemiology Pipeline === > "%LOG_FILE%"
+echo   Started: %date% %time% >> "%LOG_FILE%"
+echo   Site: %SITE_NAME% >> "%LOG_FILE%"
+echo   Log: %LOG_FILE% >> "%LOG_FILE%"
+
+echo === CRRT Epidemiology Pipeline ===
+echo   Started: %date% %time%
+echo   Site: %SITE_NAME%
+echo   Log: %LOG_FILE%
+echo.
+
 :: Scripts use relative paths like ..\config\config.json, so run from code\
 cd /d "%SCRIPT_DIR%code"
 
-echo === CRRT Epidemiology Pipeline ===
-echo.
-
 echo === Descriptive + MSM data prep (Python) ===
+echo === Descriptive + MSM data prep (Python) === >> "%LOG_FILE%"
 echo.
 for %%S in (
     00_cohort.py
@@ -28,16 +46,20 @@ for %%S in (
     04_build_msm_competing_risk_df.py
 ) do (
     echo --- Running %%~nS ---
-    uv run python "%%S"
+    echo --- Running %%~nS --- >> "%LOG_FILE%"
+    uv run python "%%S" >> "%LOG_FILE%" 2>&1
     if errorlevel 1 (
-        echo ERROR: %%~nS failed.
+        echo ERROR: %%~nS failed. See log: %LOG_FILE%
+        echo ERROR: %%~nS failed. >> "%LOG_FILE%"
         exit /b 1
     )
     echo --- %%~nS complete ---
+    echo --- %%~nS complete --- >> "%LOG_FILE%"
     echo.
 )
 
 echo === Causal inference (R) ===
+echo === Causal inference (R) === >> "%LOG_FILE%"
 echo.
 
 set R_LIBS_USER=%USERPROFILE%\R\win-library\4.5
@@ -50,14 +72,21 @@ for %%S in (
     06b_time_varying_MSM_sensitivity.R
 ) do (
     echo --- Running %%~nS ---
-    Rscript --no-init-file "%SCRIPT_DIR%code\%%S"
+    echo --- Running %%~nS --- >> "%LOG_FILE%"
+    Rscript --no-init-file "%SCRIPT_DIR%code\%%S" >> "%LOG_FILE%" 2>&1
     if errorlevel 1 (
-        echo ERROR: %%~nS failed.
+        echo ERROR: %%~nS failed. See log: %LOG_FILE%
+        echo ERROR: %%~nS failed. >> "%LOG_FILE%"
         exit /b 1
     )
     echo --- %%~nS complete ---
+    echo --- %%~nS complete --- >> "%LOG_FILE%"
     echo.
 )
 
 echo === Pipeline complete ===
-echo Results are in output\final\
+echo   Finished: %date% %time%
+echo   Results: output\final\
+echo   Log: %LOG_FILE%
+echo === Pipeline complete === >> "%LOG_FILE%"
+echo   Finished: %date% %time% >> "%LOG_FILE%"

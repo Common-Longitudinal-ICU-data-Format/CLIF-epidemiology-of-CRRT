@@ -225,7 +225,7 @@ respiratory_support_required_columns:
   - pressure_control_set
   - pressure_support_set
   - flow_rate_set
-  # - peak_inspiratory_pressure_set
+  - peak_inspiratory_pressure_set
   # - inspiratory_time_set
   - peep_set
   - tidal_volume_obs
