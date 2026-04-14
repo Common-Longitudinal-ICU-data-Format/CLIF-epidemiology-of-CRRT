@@ -588,14 +588,7 @@ df_tte_table1 <- df_tte_bin %>%
     race_category = factor(race_category),
     
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = forcats::fct_recode(
-      crrt_mode_category,
-      "CVVH" = "cvvh",
-      "CVVHD" = "cvvhd",
-      "CVVHDF" = "cvvhdf",
-      "SCUF" = "scuf",
-      "AVVH" = "avvh"
-    ),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
@@ -741,12 +734,18 @@ table1 <- df_tte_table1 %>%
     label = table1_label
   ) %>%
   add_overall() %>%
-  add_p(
-    test = list(
-      race_category ~ "chisq.test.no.correct",
-      outcome_3cat  ~ "chisq.test.no.correct"
+  {
+    tryCatch(
+      add_p(., test = list(
+        race_category ~ "chisq.test.no.correct",
+        outcome_3cat  ~ "chisq.test.no.correct"
+      )),
+      error = function(e) {
+        cat("  Warning: add_p() failed (", conditionMessage(e), "), skipping p-values\n")
+        .
+      }
     )
-  ) %>%
+  } %>%
   bold_labels() %>%
   modify_header(label ~ "**Characteristic**") %>%
   modify_spanning_header(c("stat_1","stat_2") ~ "**CRRT dose group**") %>%
