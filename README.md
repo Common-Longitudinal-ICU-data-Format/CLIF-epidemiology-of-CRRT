@@ -174,7 +174,7 @@ Point-treatment causal analysis of CRRT dose (high >=30 vs low <30 mL/kg/hr) on 
 
 Uses MICE imputation (5 datasets), Rubin's rules pooling, bootstrap CIF curves (500 reps), and E-value sensitivity analysis.
 
-**Outputs:** `output/final/psm_iptw/` — balance plots, CIF curves, model comparison CSV, subgroup forest plot, E-value table, pooled results. See `psm_iptw_output_guide.md` in that directory for a full listing.
+**Outputs:** `output/final/psm_iptw/` — balance plots, CIF curves, model comparison CSV, subgroup forest plot, E-value table, pooled results, Table 1/S1/S2 CSVs, CIF data CSVs. See `psm_iptw_output_guide.md` in that directory for a full listing.
 
 #### Step 05b: Dose-Response Analysis (`05b_dose_response_analysis.R`)
 Continuous dose-response analysis with three approaches:
@@ -184,17 +184,17 @@ Continuous dose-response analysis with three approaches:
 
 Also generates a target trial emulation specification table and a 24h exclusion sensitivity analysis.
 
-**Outputs:** `output/final/psm_iptw/` — dose-response plots, combined 3-panel figure, GPS balance diagnostics, target trial CSV
+**Outputs:** `output/final/psm_iptw/` — dose-response plots, combined 3-panel figure, GPS balance diagnostics, target trial CSV, dose decile CSV
 
 #### Step 06: Time-Varying MSM (`06_time_varying_MSM.R`)
 Time-varying marginal structural model for CRRT dose using 12h intervals. Models dose trajectories as treatment strategies with inverse-probability-of-treatment weighting.
 
-**Outputs:** `output/final/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics
+**Outputs:** `output/final/msm/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics, Table 1/S1 CSVs, CIF data CSV
 
 #### Step 06b: MSM Sensitivity (`06b_time_varying_MSM_sensitivity.R`)
 Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >=48h, CRRT >=48h, has dialysate in 0-48h window).
 
-**Outputs:** `output/final/time_varying_sensitivity/`
+**Outputs:** `output/final/msm/time_varying_sensitivity/` — same structure as primary MSM
 
 ## Output Structure
 
@@ -219,20 +219,30 @@ output/
     │   └── graphs/                  # Site-prefixed PNGs + CSVs
     │
     ├── psm_iptw/                    # Point-treatment causal analysis
+    │   ├── {site}_Table1_unadjusted.{html,csv}
+    │   ├── {site}_TableS1_matched.{html,csv}
+    │   ├── {site}_TableS2_IPTW.{html,csv}
     │   ├── {site}_IPTW_pooled_results.csv
     │   ├── {site}_ModelComparison_PSMvsIPTW.csv
     │   ├── {site}_subgroup_analysis_results.csv
+    │   ├── {site}_PSM_CIF_data.csv  # CIF curve data for multi-site combining
+    │   ├── {site}_IPTW_CIF_data.csv # CIF curve data for multi-site combining
     │   ├── {site}_dose_response_*.csv
     │   ├── {site}_evalue_sensitivity.csv
     │   └── {site}_*.png             # PS overlap, love plots, CIF curves, forest plots
     │
-    ├── time_varying/                # Time-varying MSM (primary, 12h intervals)
-    │   ├── {site}_CRRT_30cutoff_MSM_*.csv
-    │   └── {site}_CRRT_30cutoff_*.png
-    │
-    └── time_varying_sensitivity/    # Time-varying MSM (sensitivity, 24h intervals)
-        ├── {site}_CRRT_30cutoff_MSM_*.csv
-        └── {site}_CRRT_30cutoff_*.png
+    └── msm/                         # Time-varying MSM analysis
+        ├── msm_output_guide.md
+        ├── msm_sensitivity_findings.md
+        ├── time_varying/            # Primary (12h intervals)
+        │   ├── {site}_CRRT_30cutoff_Table1_unadjusted.{html,csv}
+        │   ├── {site}_CRRT_30cutoff_TableS1_MSM_IPTW.{html,csv}
+        │   ├── {site}_CRRT_30cutoff_MSM_CIF_data.csv
+        │   ├── {site}_CRRT_30cutoff_MSM_*.csv
+        │   └── {site}_CRRT_30cutoff_*.png
+        └── time_varying_sensitivity/ # Sensitivity (24h intervals)
+            ├── (same structure as time_varying/)
+            └── ...
 ```
 
 ## Key Modules

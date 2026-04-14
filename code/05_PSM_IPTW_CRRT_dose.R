@@ -668,6 +668,9 @@ gt::gtsave(
   filename = file.path(output_dir,
                        paste0(SITE_NAME, "_Table1_unadjusted.html"))
 )
+write.csv(as_tibble(table1),
+          file.path(output_dir, paste0(SITE_NAME, "_Table1_unadjusted.csv")),
+          row.names = FALSE)
 
 # ============================================ #
 # ---- 2. PROPENSITY SCORE MATCHING BRANCH ----
@@ -857,6 +860,9 @@ gt::gtsave(
     paste0(SITE_NAME, "_TableS1_matched.html")
   )
 )
+write.csv(as_tibble(tableS1),
+          file.path(output_dir, paste0(SITE_NAME, "_TableS1_matched.csv")),
+          row.names = FALSE)
 
 ## ---- D. Analysis of PSM ----
 ### ---- I. Fine-Gray Analysis on Matched Patients ----
@@ -1128,6 +1134,18 @@ ggsave(file.path(output_dir, paste0(SITE_NAME, "_cif_death.png")),
        plot_cif_death, width = 6, height = 4, dpi = 300)
 cat("Saved CIF for death as PNG\n")
 
+# Export PSM CIF data as CSV (death + discharge combined)
+psm_cif_export <- bind_rows(
+  tidy_ci_death %>% mutate(cif_lower = ci_death_lower, cif_upper = ci_death_upper) %>%
+    select(group, outcome, time, est, cif_lower, cif_upper),
+  tidy_ci_discharge %>% mutate(cif_lower = ci_disch_lower, cif_upper = ci_disch_upper) %>%
+    select(group, outcome, time, est, cif_lower, cif_upper)
+) %>% rename(cif = est)
+write.csv(psm_cif_export,
+          file.path(output_dir, paste0(SITE_NAME, "_PSM_CIF_data.csv")),
+          row.names = FALSE)
+cat("Saved PSM CIF data as CSV\n")
+
 # Plot CIF for discharge
 plot_cif_discharge <- ggplot(tidy_ci_discharge, aes(x = time, y = est,
                                                     color = group, fill = group)) +
@@ -1365,6 +1383,9 @@ gt::gtsave(
     paste0(SITE_NAME, "_TableS2_IPTW.html")
   )
 )
+write.csv(as_tibble(tableS2),
+          file.path(output_dir, paste0(SITE_NAME, "_TableS2_IPTW.csv")),
+          row.names = FALSE)
 
 # ============================================================= #
 ### ---- OPTIONAL TRIMMING ----
@@ -1705,7 +1726,11 @@ plot_cif_disch
 ggsave(file.path(output_dir, paste0(SITE_NAME, "_IPTW_CIF_Discharge.png")),
        plot_cif_disch, width = 6, height = 4, dpi = 300)
 
-cat("IPTW standardized CIF plots with CIs saved as PNGs.\n")
+# Export IPTW CIF data as CSV
+write.csv(cif_df,
+          file.path(output_dir, paste0(SITE_NAME, "_IPTW_CIF_data.csv")),
+          row.names = FALSE)
+cat("IPTW standardized CIF plots with CIs saved as PNGs + CSV.\n")
 
 # ============================================================= #
 # ----  4. MODEL COMPARISON - PSM FG vs IPTW Cox ----

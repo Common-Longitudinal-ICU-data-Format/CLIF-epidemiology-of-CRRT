@@ -68,7 +68,7 @@ if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final/time_varying"
+output_dir <- "output/final/msm/time_varying"
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")
@@ -753,6 +753,9 @@ gt::gtsave(
                        paste0(SITE_NAME, "_",
                               dose_label, "_Table1_unadjusted.html"))
 )
+write.csv(as_tibble(table1),
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_Table1_unadjusted.csv")),
+          row.names = FALSE)
 
 
 # ============================================================= #
@@ -1414,6 +1417,9 @@ gt::gtsave(
   as_gt(tableS1_msm),
   filename = file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS1_MSM_IPTW.html"))
 )
+write.csv(as_tibble(tableS1_msm),
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_TableS1_MSM_IPTW.csv")),
+          row.names = FALSE)
 
 cat("Saved MSM Table S1.\n")
 
@@ -1798,7 +1804,11 @@ ggsave(
   plot_cif_disch, width = 6, height = 4, dpi = 300
 )
 
-cat("MSM standardized CIF plots with CIs saved as PNGs.\n")
+# Export MSM CIF data as CSV
+write.csv(cif_df,
+          file.path(output_dir, paste0(SITE_NAME, "_", dose_label, "_MSM_CIF_data.csv")),
+          row.names = FALSE)
+cat("MSM standardized CIF plots with CIs saved as PNGs + CSV.\n")
 
 # ============================================================= #
 # ---- 8. FINISH! ----
