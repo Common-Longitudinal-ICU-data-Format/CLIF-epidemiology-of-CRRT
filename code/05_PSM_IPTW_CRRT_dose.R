@@ -623,12 +623,22 @@ for (v in cci_vars) {
     paste0(v, ' ~ "', cci_labels[v], '"'))
 }
 
+# Auto-detect all dichotomous variables and set value=1 for gtsummary
+table1_value <- list()
+for (i in seq_along(table1_type)) {
+  if (grepl("dichotomous", deparse(table1_type[[i]]))) {
+    vname <- all.vars(table1_type[[i]])[1]
+    table1_value[[length(table1_value) + 1]] <- as.formula(paste0(vname, " ~ 1L"))
+  }
+}
+
 table1 <- df_tte_table1 %>%
   select(crrt_group, all_of(vars_table1)
          ) %>%
   tbl_summary(
     by = crrt_group,
     type = table1_type,
+    value = table1_value,
     statistic = list(
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
