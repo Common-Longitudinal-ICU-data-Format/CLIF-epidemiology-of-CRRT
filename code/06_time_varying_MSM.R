@@ -574,7 +574,7 @@ df_tte_table1 <- df_tte_bin %>%
     race_category = factor(race_category),
     
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
+    crrt_mode_category = factor(crrt_mode_category),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
@@ -1322,14 +1322,7 @@ df_msm_tableS1 <- df_out_msm %>%
     race_category = factor(race_category),
 
     # Clean CRRT modality labels (same as Table 1)
-    crrt_mode_category = forcats::fct_recode(
-      crrt_mode_category,
-      "CVVH"   = "cvvh",
-      "CVVHD"  = "cvvhd",
-      "CVVHDF" = "cvvhdf",
-      "SCUF"   = "scuf",
-      "AVVH"   = "avvh"
-    ),
+    crrt_mode_category = factor(crrt_mode_category),
 
     # Three-category outcome (same as Table 1)
     outcome_3cat = factor(

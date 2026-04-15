@@ -481,7 +481,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "clifpy", specifier = ">=0.3.8" },
+    { name = "clifpy", specifier = "==0.4.6" },
     { name = "duckdb", specifier = ">=0.9.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "graphviz", specifier = ">=0.21" },
@@ -507,7 +507,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "clifpy"
-version = "0.3.8"
+version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "build" },
@@ -521,14 +521,15 @@ dependencies = [
     { name = "pytest" },
     { name = "pytz" },
     { name = "pyyaml" },
+    { name = "reportlab" },
     { name = "seaborn" },
     { name = "toml" },
     { name = "tqdm" },
     { name = "twine" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/d0/b8bbafd9b656712c6a753e960c50868e8b1bcf4e6e709c7506b7327f35a4/clifpy-0.3.8.tar.gz", hash = "sha256:96d801cdb9712d018a091a7778b647dc7ca9caa403c7920486d3136b4486a7fd", size = 1929855, upload-time = "2026-01-15T03:35:35.866Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/54/6aaabc24c6c748ab79d4e87441df44dda5c38f7624f06e35b62dceeefedb/clifpy-0.4.6.tar.gz", hash = "sha256:d2291582a5b4503fff397255bd4629be8346c6f20a95954cbb717838bd17a599", size = 1968563, upload-time = "2026-04-15T19:50:37.72Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/c2/09080b08d0e70562fb7274442df5a6624d883850e13d1c2286c08fddc1b8/clifpy-0.3.8-py3-none-any.whl", hash = "sha256:d86033ff98f25e5eae486f6d4b3968ae37a3dc39b968dd3c135b58d234aad092", size = 1967262, upload-time = "2026-01-15T03:35:33.797Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/fd/4a5a969b41c1ca38310849fcba3cff11e20754f6459dc445e6b8dde4475d/clifpy-0.4.6-py3-none-any.whl", hash = "sha256:d04e2e5d00800107c8a4399a01e6a2158dcb28b27f464d9f546fc4d29af82ea5", size = 2007623, upload-time = "2026-04-15T19:50:35.621Z" },
 ]
 
 [[package]]
@@ -3447,6 +3448,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2f/db/98b5c277be99dd18bfd91dd04e1b759cad18d1a338188c936e92f921c7e2/referencing-0.36.2.tar.gz", hash = "sha256:df2e89862cd09deabbdba16944cc3f10feb6b3e6f18e902f7cc25609a34775aa", size = 74744, upload-time = "2025-01-25T08:48:16.138Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/b1/3baf80dc6d2b7bc27a95a67752d0208e410351e3feb4eb78de5f77454d8d/referencing-0.36.2-py3-none-any.whl", hash = "sha256:e8699adbbf8b5c7de96d8ffa0eb5c158b3beafce084968e2ea8bb08c6794dcd0", size = 26775, upload-time = "2025-01-25T08:48:14.241Z" },
+]
+
+[[package]]
+name = "reportlab"
+version = "4.4.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "charset-normalizer" },
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/48/57/28bfbf0a775b618b6e4d854ef8dd3f5c8988e5d614d8898703502a35f61c/reportlab-4.4.10.tar.gz", hash = "sha256:5cbbb34ac3546039d0086deb2938cdec06b12da3cdb836e813258eb33cd28487", size = 3714962, upload-time = "2026-02-12T10:45:21.325Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/2e/e1798b8b248e1517e74c6cdf10dd6edd485044e7edf46b5f11ffcc5a0add/reportlab-4.4.10-py3-none-any.whl", hash = "sha256:5abc815746ae2bc44e7ff25db96814f921349ca814c992c7eac3c26029bf7c24", size = 1955400, upload-time = "2026-02-12T10:45:18.828Z" },
 ]
 
 [[package]]

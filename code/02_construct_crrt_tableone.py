@@ -112,12 +112,13 @@ def fmt_n_pct(count: int, total: int) -> str:
 # ===================================================================
 print("Step 1: Loading intermediate files …")
 outcomes_df = load_intermediate(INTERMEDIATE_DIR / "outcomes_df.parquet")
+cohort_df = load_intermediate(INTERMEDIATE_DIR / "cohort_df.parquet")
 index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
 crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
 
-# 1:1 hospitalization_id <-> encounter_block
-eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
-print(f"  {len(outcomes_df)} encounters loaded")
+# N:1 mapping — all hospitalization_ids per encounter_block (needed for stitched sites)
+eb_map = cohort_df[["hospitalization_id", "encounter_block"]].copy()
+print(f"  {len(outcomes_df)} encounters loaded ({len(eb_map)} hospitalization_ids in eb_map)")
 
 # Pre-filter CLIF tables to cohort (prevents OOM during SOFA/ASE)
 cohort_hosp_ids = set(eb_map["hospitalization_id"].unique())
