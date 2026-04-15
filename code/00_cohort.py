@@ -2602,11 +2602,16 @@ outcomes_df.to_parquet("../output/intermediate/outcomes_df.parquet", index=False
 # Filter weight_df to hospitalization_ids present in cohort_df before saving
 weight_df_filtered = weight_df[weight_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
 weight_df_filtered.to_parquet("../output/intermediate/weight_df.parquet", index=False)
-# save or use crrt_initiation df 
+# save or use crrt_initiation df
 crrt_initiation.to_parquet("../output/intermediate/crrt_initiation.parquet", index=False)
 crrt_at_initiation.to_parquet("../output/intermediate/crrt_at_initiation.parquet", index=False)
 index_crrt_df.to_parquet("../output/intermediate/index_crrt_df.parquet", index=False)
 crrt_cohort.to_parquet("../output/intermediate/crrt_cohort.parquet", index=False)
+# Save processed hospital_diagnosis (with POA normalized, codes cleaned)
+# Filtered to cohort hospitalization_ids for use by script 04
+diag_cohort = hospital_diagnosis_df[hospital_diagnosis_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
+diag_cohort.to_parquet("../output/intermediate/hospital_diagnosis_df.parquet", index=False)
+print(f"Saved hospital_diagnosis_df: {len(diag_cohort):,} rows ({diag_cohort['poa_present'].sum():,} POA=1)")
 
 
 # In[ ]:

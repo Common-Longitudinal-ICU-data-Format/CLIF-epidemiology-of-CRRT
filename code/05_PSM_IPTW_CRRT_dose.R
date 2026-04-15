@@ -624,12 +624,24 @@ for (v in cci_vars) {
 }
 
 # Auto-detect all dichotomous variables and set value=1 for gtsummary
+# Drop dichotomous vars that are all-zero (no events) — gtsummary crashes on value=1 if 1 doesn't exist
 table1_value <- list()
+drop_vars <- character(0)
 for (i in seq_along(table1_type)) {
   if (grepl("dichotomous", deparse(table1_type[[i]]))) {
     vname <- all.vars(table1_type[[i]])[1]
-    table1_value[[length(table1_value) + 1]] <- as.formula(paste0(vname, " ~ 1L"))
+    if (vname %in% names(df_tte_table1) && !any(df_tte_table1[[vname]] == 1L, na.rm = TRUE)) {
+      drop_vars <- c(drop_vars, vname)
+    } else {
+      table1_value[[length(table1_value) + 1]] <- as.formula(paste0(vname, " ~ 1L"))
+    }
   }
+}
+if (length(drop_vars) > 0) {
+  cat("  Dropping all-zero dichotomous vars from Table 1:", paste(drop_vars, collapse = ", "), "\n")
+  vars_table1 <- setdiff(vars_table1, drop_vars)
+  table1_type <- table1_type[!sapply(table1_type, function(f) all.vars(f)[1] %in% drop_vars)]
+  table1_label <- table1_label[!sapply(table1_label, function(f) all.vars(f)[1] %in% drop_vars)]
 }
 
 table1 <- df_tte_table1 %>%

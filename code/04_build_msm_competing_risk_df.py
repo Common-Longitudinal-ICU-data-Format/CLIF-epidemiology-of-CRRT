@@ -703,29 +703,38 @@ print("Step 8: Computing CCI components from hospital_diagnosis (POA only) …")
 
 import clifpy
 
-# Load hospital_diagnosis table
-diag_df = pd.read_parquet(
-    Path(TABLES_PATH) / f"clif_hospital_diagnosis.{FILE_TYPE}"
-) if FILE_TYPE == "parquet" else pd.read_csv(
-    Path(TABLES_PATH) / f"clif_hospital_diagnosis.csv"
-)
+# Load processed hospital_diagnosis (POA normalized, codes cleaned in script 00)
+diag_path = INTERMEDIATE_DIR / "hospital_diagnosis_df.parquet"
+if diag_path.exists():
+    diag_df = pd.read_parquet(diag_path)
+    print(f"  Loaded processed hospital_diagnosis from {diag_path.name}")
+else:
+    # Fallback: read raw CLIF table (for backwards compatibility)
+    print("  Warning: hospital_diagnosis_df.parquet not found, reading raw CLIF table")
+    diag_df = pd.read_parquet(
+        Path(TABLES_PATH) / f"clif_hospital_diagnosis.{FILE_TYPE}"
+    ) if FILE_TYPE == "parquet" else pd.read_csv(
+        Path(TABLES_PATH) / f"clif_hospital_diagnosis.csv"
+    )
+    # Normalize POA column
+    if "present_on_admission" in diag_df.columns:
+        diag_df = diag_df.rename(columns={"present_on_admission": "poa_present"})
+    if "poa_present" in diag_df.columns:
+        diag_df["poa_present"] = diag_df["poa_present"].astype(str).str.lower()
+        diag_df["poa_present"] = diag_df["poa_present"].map(
+            {'yes': 1, 'y': 1, 'true': 1, '1': 1, '1.0': 1,
+             'no': 0, 'n': 0, 'false': 0, '0': 0, '0.0': 0}
+        ).fillna(0).astype('int8')
+    diag_df["diagnosis_code"] = diag_df["diagnosis_code"].astype(str).str.replace(".", "", regex=False)
 
 # Filter to our cohort and present-on-admission only
-hosp_ids = set(eb_map["hospitalization_id"].unique())
+hosp_ids = set(eb_map["hospitalization_id"].astype(str).unique())
+diag_df["hospitalization_id"] = diag_df["hospitalization_id"].astype(str)
 diag_df = diag_df[
     (diag_df["hospitalization_id"].isin(hosp_ids))
     & (diag_df["poa_present"] == 1)
 ].copy()
 print(f"  {len(diag_df)} POA diagnosis rows for cohort")
-
-# Pre-clean diagnosis codes: remove dots so "E11.65" → "E1165"
-# (clifpy internally splits on "." and takes only the part before it,
-#  which loses sub-code precision needed for CCI prefix matching)
-diag_df["diagnosis_code"] = (
-    diag_df["diagnosis_code"]
-    .astype(str)
-    .str.replace(".", "", regex=False)
-)
 
 # Calculate CCI using clifpy (returns 17 condition columns + cci_score)
 cci_result = clifpy.calculate_cci(diag_df, hierarchy=True)
