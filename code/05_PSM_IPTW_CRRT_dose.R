@@ -736,11 +736,11 @@ plot_loveplot_psm <- love.plot(
   threshold = c(m = .25, v = 1.25)
 )
 
-print(plot_loveplot_psm)
+grid::grid.draw(plot_loveplot_psm)
 
 png(file.path(output_dir, paste0(SITE_NAME, "_psm_loveplot.png")),
     width = 8, height = 7, units = "in", res = 300)
-print(plot_loveplot_psm)
+grid::grid.draw(plot_loveplot_psm)
 dev.off()
 
 cat("Saved Love plot for PSM as PNG\n")
