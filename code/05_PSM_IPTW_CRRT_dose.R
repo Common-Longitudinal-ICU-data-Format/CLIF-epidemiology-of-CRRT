@@ -19,35 +19,35 @@ cat("\014")
 
 cat("Environment and plots cleared.\n")
 
-# Set working directory to project root
-# Works both interactively (RStudio) and via Rscript
-if (requireNamespace("rstudioapi", quietly = TRUE) &&
-    rstudioapi::isAvailable()) {
-  # Running in RStudio - use active document path
-  script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
-  root_dir <- dirname(script_dir)
-  setwd(root_dir)
-} else {
-  # Running via Rscript or not in RStudio
-  # Try to get script location
+# Set working directory to project root using config.json project_root
+# Try multiple config paths: relative to code/, relative to cwd, or via --file=
+.find_config <- function() {
+  candidates <- c("../config/config.json", "config/config.json")
+  # Also try relative to script location
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
-
   if (length(file_arg) > 0) {
-    script_path <- sub("^--file=", "", file_arg)
-    script_dir <- dirname(script_path)
-    root_dir <- dirname(script_dir)
-    setwd(root_dir)
-  } else {
-    # Assume already in project root or code directory
-    if (basename(getwd()) == "code") {
-      setwd("..")
-    }
-    # If current directory has 'code' subdirectory, we're in root
-    if (!dir.exists("code")) {
-      stop("Please run this script from the project root directory or use Rscript")
-    }
+    script_dir <- dirname(sub("^--file=", "", file_arg))
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
   }
+  # RStudio
+  if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
+  }
+  for (p in candidates) {
+    if (file.exists(p)) return(normalizePath(p))
+  }
+  stop("Cannot find config/config.json. Please run from the project root or code/ directory.")
+}
+
+.config_path <- .find_config()
+.config <- jsonlite::fromJSON(.config_path)
+if (!is.null(.config$project_root) && nchar(.config$project_root) > 0) {
+  setwd(.config$project_root)
+} else {
+  # Fallback: derive from config file location
+  setwd(dirname(dirname(.config_path)))
 }
 
 cat("Working directory set to:", getwd(), "\n\n")
@@ -842,6 +842,7 @@ tableS1 <- df_tte_tableS1 %>%
   tbl_summary(
     by = crrt_group,
     type = table1_type,
+    value = table1_value,
     statistic = list(
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
@@ -1359,6 +1360,7 @@ tableS2 <- tbl_svysummary(
   design_iptw,
   by = crrt_group,
   type = table1_type,
+  value = table1_value,
   statistic = list(
     all_continuous() ~ "{median} ({p25}, {p75})",
     all_categorical() ~ "{n} ({p}%)"

@@ -19,34 +19,28 @@ cat("\014")
 cat("Environment and plots cleared.\n")
 
 # Set working directory to project root
-# Works both interactively (RStudio) and via Rscript
-if (requireNamespace("rstudioapi", quietly = TRUE) &&
-    rstudioapi::isAvailable()) {
-  # Running in RStudio - use active document path
-  script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
-  root_dir <- dirname(script_dir)
-  setwd(root_dir)
-} else {
-  # Running via Rscript or not in RStudio
-  # Try to get script location
+# Set working directory to project root using config.json project_root
+.find_config <- function() {
+  candidates <- c("../config/config.json", "config/config.json")
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
-
   if (length(file_arg) > 0) {
-    script_path <- sub("^--file=", "", file_arg)
-    script_dir <- dirname(script_path)
-    root_dir <- dirname(script_dir)
-    setwd(root_dir)
-  } else {
-    # Assume already in project root or code directory
-    if (basename(getwd()) == "code") {
-      setwd("..")
-    }
-    # If current directory has 'code' subdirectory, we're in root
-    if (!dir.exists("code")) {
-      stop("Please run this script from the project root directory or use Rscript")
-    }
+    script_dir <- dirname(sub("^--file=", "", file_arg))
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
   }
+  if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
+  }
+  for (p in candidates) if (file.exists(p)) return(normalizePath(p))
+  stop("Cannot find config/config.json.")
+}
+.config_path <- .find_config()
+.config <- jsonlite::fromJSON(.config_path)
+if (!is.null(.config$project_root) && nchar(.config$project_root) > 0) {
+  setwd(.config$project_root)
+} else {
+  setwd(dirname(dirname(.config_path)))
 }
 
 cat("Working directory set to:", getwd(), "\n\n")
@@ -1376,6 +1370,24 @@ for (v in cci_vars) {
     paste0(v, ' ~ "dichotomous"'))
 }
 
+# Auto-detect dichotomous vars and set value=1; drop all-zero vars
+tableS1_value <- list()
+tableS1_drop <- character(0)
+for (i in seq_along(tableS1_type)) {
+  if (grepl("dichotomous", deparse(tableS1_type[[i]]))) {
+    vname <- all.vars(tableS1_type[[i]])[1]
+    if (vname %in% names(df_out_msm) && !any(df_out_msm[[vname]] == 1L, na.rm = TRUE)) {
+      tableS1_drop <- c(tableS1_drop, vname)
+    } else {
+      tableS1_value[[length(tableS1_value) + 1]] <- as.formula(paste0(vname, " ~ 1L"))
+    }
+  }
+}
+if (length(tableS1_drop) > 0) {
+  cat("  Dropping all-zero dichotomous vars from Table S1:", paste(tableS1_drop, collapse = ", "), "\n")
+  tableS1_type <- tableS1_type[!sapply(tableS1_type, function(f) all.vars(f)[1] %in% tableS1_drop)]
+}
+
 # Build label list for Table S1
 tableS1_label <- list(
   age_at_admission             ~ "Age at Admission (years)",
@@ -1398,11 +1410,17 @@ for (v in cci_vars) {
     paste0(v, ' ~ "', cci_labels[v], '"'))
 }
 
+# Also drop from label list
+if (length(tableS1_drop) > 0) {
+  tableS1_label <- tableS1_label[!sapply(tableS1_label, function(f) all.vars(f)[1] %in% tableS1_drop)]
+}
+
 # Build weighted Table S1
 tableS1_msm <- tbl_svysummary(
   design_msm,
   by = crrt_group,
   type = tableS1_type,
+  value = tableS1_value,
   statistic = list(
     all_continuous()  ~ "{median} ({p25}, {p75})",
     all_categorical() ~ "{n} ({p}%)"
