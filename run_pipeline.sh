@@ -66,13 +66,19 @@ fi
 
 echo "=== Causal inference (R) ==="
 echo ""
+R_FAILED=()
 for step in "${R_STEPS[@]}"; do
     name=$(basename "$step" .R)
     STEP_START=$SECONDS
     echo "--- Running $name ---"
-    Rscript --no-init-file "$SCRIPT_DIR/code/$step"
-    elapsed=$(( SECONDS - STEP_START ))
-    echo "--- $name complete (${elapsed}s) ---"
+    if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
+        elapsed=$(( SECONDS - STEP_START ))
+        echo "--- $name complete (${elapsed}s) ---"
+    else
+        elapsed=$(( SECONDS - STEP_START ))
+        echo "--- $name FAILED (${elapsed}s) ---"
+        R_FAILED+=("$step")
+    fi
     echo ""
 done
 
@@ -85,3 +91,26 @@ echo "  Finished: $(date)"
 echo "  Total time: ${total_min}m ${total_sec}s"
 echo "  Results: output/final/"
 echo "  Log: $LOG_FILE"
+
+if [ ${#R_FAILED[@]} -gt 0 ]; then
+    echo ""
+    echo "=== WARNING: ${#R_FAILED[@]} R script(s) failed ==="
+    echo "  The following R scripts did not complete:"
+    for f in "${R_FAILED[@]}"; do
+        echo "    - $f"
+    done
+    echo ""
+    echo "  To re-run manually from the project root directory:"
+    echo ""
+    for f in "${R_FAILED[@]}"; do
+        echo "    Rscript --no-init-file code/$f"
+    done
+    echo ""
+    echo "  Required R scripts and their outputs:"
+    echo "    05_PSM_IPTW_CRRT_dose.R        -> output/final/psm_iptw/"
+    echo "    05b_dose_response_analysis.R    -> output/final/psm_iptw/ (dose-response)"
+    echo "    06_time_varying_MSM.R           -> output/final/time_varying/ (primary 12h)"
+    echo "    06b_time_varying_MSM_sensitivity.R -> output/final/time_varying_sensitivity/ (24h)"
+    echo ""
+    echo "  Check the log for error details: $LOG_FILE"
+fi
