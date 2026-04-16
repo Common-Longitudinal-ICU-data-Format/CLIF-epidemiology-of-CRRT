@@ -59,6 +59,11 @@ for step in "${PYTHON_STEPS[@]}"; do
     echo ""
 done
 
+# Load R module on HPC systems (no-op if not available)
+if command -v module &>/dev/null; then
+    module load R 2>/dev/null || true
+fi
+
 echo "=== Causal inference (R) ==="
 echo ""
 for step in "${R_STEPS[@]}"; do
