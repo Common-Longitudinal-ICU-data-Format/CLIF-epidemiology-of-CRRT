@@ -66,14 +66,20 @@ print("Step 2: Demographics and static columns …")
 result = outcomes_df[["encounter_block", "age_at_admission", "sex_category",
                        "race_category", "ethnicity_category"]].copy()
 
+_idx_cols = ["encounter_block", "weight_kg", "crrt_mode_category",
+             "duration_days", "imv_duration_days"]
+if "crrt_dose_ml_kg_hr" in index_crrt_df.columns:
+    _idx_cols.append("crrt_dose_ml_kg_hr")
 result = result.merge(
-    index_crrt_df[["encounter_block", "weight_kg", "crrt_mode_category",
-                    "duration_days", "imv_duration_days"]],
+    index_crrt_df[_idx_cols],
     on="encounter_block", how="left",
 )
 result = result.rename(columns={
     "duration_days": "crrt_duration_days",
+    "crrt_dose_ml_kg_hr": "crrt_dose_median_3h",
 })
+if "crrt_dose_median_3h" not in result.columns:
+    result["crrt_dose_median_3h"] = np.nan
 # Never on IMV → 0 days (NaN means no IMV records, not missing data)
 result["imv_duration_days"] = result["imv_duration_days"].fillna(0)
 print(f"  {len(result)} rows after merge")
@@ -900,6 +906,7 @@ final_cols = [
     "weight_kg",
     "crrt_mode_category",
     "crrt_dose_ml_kg_hr_0",
+    "crrt_dose_median_3h",
     "crrt_dose_0_12",
     "crrt_dose_12_24",
     "crrt_duration_days",
@@ -1066,8 +1073,9 @@ n_descriptive = n_with_labs
 
 # n_excluded_short and n_excluded_scuf were computed in step 9b above
 n_causal = len(result)
-n_high_dose = int((result["crrt_dose_ml_kg_hr_0"] >= 30).sum())
-n_low_dose = int((result["crrt_dose_ml_kg_hr_0"] < 30).sum())
+_dose_col = "crrt_dose_median_3h" if "crrt_dose_median_3h" in result.columns else "crrt_dose_ml_kg_hr_0"
+n_high_dose = int((result[_dose_col] >= 30).sum())
+n_low_dose = int((result[_dose_col] < 30).sum())
 
 print(f"  Descriptive cohort: {n_descriptive:,}")
 print(f"  Excluded (died/off CRRT <=24h): {n_excluded_short:,}")
