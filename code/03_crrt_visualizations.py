@@ -45,7 +45,9 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 print("Loading data …")
 crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
 index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
-eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
+cohort_df = load_intermediate(INTERMEDIATE_DIR / "cohort_df.parquet")
+# N:1 mapping — all hospitalization_ids per encounter_block (needed for stitched sites)
+eb_map = cohort_df[["hospitalization_id", "encounter_block"]].copy()
 
 # Load only needed columns from wide_df
 if HAS_CRRT_SETTINGS:

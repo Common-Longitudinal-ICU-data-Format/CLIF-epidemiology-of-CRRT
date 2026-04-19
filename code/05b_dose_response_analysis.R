@@ -26,8 +26,29 @@ cat(paste(rep("=", 80), collapse = ""), "\n\n")
 # 0. SETUP
 # ===================================================================
 
-## ---- A. Working directory ----
-if (basename(getwd()) == "code") setwd("..")
+## ---- A. Working directory (from config.json project_root) ----
+.find_config <- function() {
+  candidates <- c("../config/config.json", "config/config.json")
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- grep("^--file=", args, value = TRUE)
+  if (length(file_arg) > 0) {
+    script_dir <- dirname(sub("^--file=", "", file_arg))
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
+  }
+  if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+    candidates <- c(file.path(script_dir, "..", "config", "config.json"), candidates)
+  }
+  for (p in candidates) if (file.exists(p)) return(normalizePath(p))
+  stop("Cannot find config/config.json.")
+}
+.config_path <- .find_config()
+.config <- jsonlite::fromJSON(.config_path)
+if (!is.null(.config$project_root) && nchar(.config$project_root) > 0) {
+  setwd(.config$project_root)
+} else {
+  setwd(dirname(dirname(.config_path)))
+}
 cat("Working directory:", getwd(), "\n")
 
 ## ---- B. Load packages ----

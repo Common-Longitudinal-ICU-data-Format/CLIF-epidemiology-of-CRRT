@@ -35,7 +35,7 @@ import json  # noqa: E402
 with open(project_root / "config" / "config.json") as _f:
     config = json.load(_f)
 
-from pipeline_helpers import validate_config, load_intermediate  # noqa: E402
+from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
 config = validate_config(config)
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
@@ -112,12 +112,18 @@ def fmt_n_pct(count: int, total: int) -> str:
 # ===================================================================
 print("Step 1: Loading intermediate files …")
 outcomes_df = load_intermediate(INTERMEDIATE_DIR / "outcomes_df.parquet")
+cohort_df = load_intermediate(INTERMEDIATE_DIR / "cohort_df.parquet")
 index_crrt_df = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
 crrt_initiation = load_intermediate(INTERMEDIATE_DIR / "crrt_initiation.parquet")
 
-# 1:1 hospitalization_id <-> encounter_block
-eb_map = index_crrt_df[["hospitalization_id", "encounter_block"]].copy()
-print(f"  {len(outcomes_df)} encounters loaded")
+# N:1 mapping — all hospitalization_ids per encounter_block (needed for stitched sites)
+eb_map = cohort_df[["hospitalization_id", "encounter_block"]].copy()
+print(f"  {len(outcomes_df)} encounters loaded ({len(eb_map)} hospitalization_ids in eb_map)")
+
+# Pre-filter CLIF tables to cohort (prevents OOM during SOFA/ASE)
+cohort_hosp_ids = set(eb_map["hospitalization_id"].unique())
+cohort_patient_ids = set(outcomes_df["patient_id"].unique()) if "patient_id" in outcomes_df.columns else None
+TABLES_PATH = get_tables_path(config, cohort_hosp_ids, INTERMEDIATE_DIR, patient_ids=cohort_patient_ids)
 
 # Merge crrt_initiation_time early (needed for 90-day mortality cap)
 outcomes_df = outcomes_df.merge(
@@ -237,9 +243,13 @@ print("Step 3: Computing sepsis flags …")
 from clifpy.utils.ase import compute_ase  # noqa: E402
 
 hosp_ids = outcomes_df["hospitalization_id"].unique().tolist()
+# Use filtered config if pre-filtering was applied, otherwise original
+_ase_config_path = Path(TABLES_PATH) / "config.json"
+if not _ase_config_path.exists():
+    _ase_config_path = project_root / "config" / "config.json"
 sepsis_raw = compute_ase(
     hospitalization_ids=hosp_ids,
-    config_path=str(project_root / "config" / "config.json"),
+    config_path=str(_ase_config_path),
     apply_rit=True,
     include_lactate=True,
     verbose=True,
