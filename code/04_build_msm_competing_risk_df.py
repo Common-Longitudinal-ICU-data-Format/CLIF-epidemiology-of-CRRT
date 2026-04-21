@@ -2,14 +2,14 @@
 Build the MSM / competing-risk analysis dataframe (59 columns).
 
 Extends the archived 04_build_competing_risk_df.py with:
-  - Oxygenation index at t=0 and t=12 (P/F or S/F)
+  - P/F or S/F ratio at t=0 and t=12 (labeled pf_sf_ratio; PaO2/FiO2 if available, else SpO2/FiO2)
   - Norepinephrine equivalent (NEE) at t=0 and t=12
   - IMV status at t=0 and t=12
   - 19 CCI binary components (from clifpy.calculate_cci + ICD-10 cancer split)
   - 30-day censoring (columns named time_to_event_90d / censored_at_90d
     to match R script expectations)
   - Sensitivity analysis columns for 24h/48h MSM: CRRT dose (0-24h, 24-48h),
-    labs/SOFA/oxygenation/NEE/IMV at t=24, and 48h eligibility flag
+    labs/SOFA/pf_sf_ratio/NEE/IMV at t=24, and 48h eligibility flag
   - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
 Usage: uv run python code/04_build_msm_competing_risk_df.py
@@ -444,9 +444,9 @@ print(f"  SOFA at 24h: {n_sofa_24}/{len(result)} encounters")
 gc.collect()
 
 # ===================================================================
-# STEP 7: Oxygenation index, NEE, IMV status at t=0 and t=12
+# STEP 7: P/F or S/F ratio, NEE, IMV status at t=0 and t=12
 # ===================================================================
-print("Step 7: Oxygenation index, NEE, IMV status …")
+print("Step 7: P/F or S/F ratio, NEE, IMV status …")
 
 # Columns needed from wide_df
 oxy_nee_cols = [
@@ -499,7 +499,10 @@ if "resp_fio2_set" in extra_df.columns:
     n_fio2_after = extra_df["resp_fio2_set"].notna().sum()
     print(f"  FiO2 forward-filled: {n_fio2_after - n_fio2_before} additional rows")
 
-# --- Oxygenation index: P/F if PaO2 available, else S/F = SpO2 / (FiO2/100) ---
+# --- P/F or S/F ratio: PaO2/FiO2 if PaO2 available, else SpO2/FiO2 ---
+# NOTE: named pf_sf_ratio (NOT the true "Oxygenation Index", which is
+# FiO2 × MeanAirwayPressure × 100 / PaO2 — a different quantity requiring
+# mean airway pressure from respiratory_support).
 if "resp_fio2_set" in extra_df.columns:
     fio2_frac = extra_df["resp_fio2_set"].copy()
     # If FiO2 > 1, assume it's in %, convert to fraction
@@ -522,7 +525,21 @@ else:
     sf_ratio = pd.Series(np.nan, index=extra_df.index)
 
 # Prefer P/F, fallback to S/F
-extra_df["oxygenation_index"] = np.where(pf_ratio.notna(), pf_ratio, sf_ratio)
+extra_df["pf_sf_ratio"] = np.where(pf_ratio.notna(), pf_ratio, sf_ratio)
+
+# Plausibility cap: S/F at SpO2=100, FiO2=0.21 (room air) ≈ 476; P/F rarely
+# exceeds 500 in ICU. Values above imply bad FiO2 or PaO2 encoding; set to NaN.
+try:
+    with open("../config/outlier_config.json") as _oc_f:
+        _oc = json.load(_oc_f)
+    _lo, _hi = _oc.get("pf_sf_ratio", [0, 500])
+except Exception:
+    _lo, _hi = 0, 500
+_pf_sf = extra_df["pf_sf_ratio"]
+_n_oob = int(((_pf_sf < _lo) | (_pf_sf > _hi)).sum())
+if _n_oob > 0:
+    extra_df.loc[(_pf_sf < _lo) | (_pf_sf > _hi), "pf_sf_ratio"] = np.nan
+    print(f"  pf_sf_ratio: {_n_oob} values outside [{_lo}, {_hi}] set to NaN")
 
 # --- IMV status: 1 if device_category contains 'imv' (case-insensitive) ---
 if "resp_device_category" in extra_df.columns:
@@ -553,7 +570,7 @@ def extract_last_in_window(df, col, h_low, h_high):
     )
 
 for var, col in [
-    ("oxygenation_index", "oxygenation_index"),
+    ("pf_sf_ratio", "pf_sf_ratio"),
     ("norepinephrine_equivalent", "med_cont_nee"),
     ("imv_status", "imv_status"),
 ]:
@@ -583,7 +600,7 @@ for var, col in [
 # --- 7b. Extract t=24 values (sensitivity) ---
 print("\n  Extracting t=24 values (sensitivity) …")
 for var, col in [
-    ("oxygenation_index", "oxygenation_index"),
+    ("pf_sf_ratio", "pf_sf_ratio"),
     ("norepinephrine_equivalent", "med_cont_nee"),
     ("imv_status", "imv_status"),
 ]:
@@ -659,34 +676,34 @@ if "med_cont_nee" in extra_df.columns:
     n_nee_24_miss = result["norepinephrine_equivalent_24"].isna().sum()
     print(f"    NEE_24 missing after cascade: {n_nee_24_miss}")
 
-# --- 7b. Oxygenation index recovery: widen window to [-24h, +3h] ---
-print("\n  Oxygenation index imputation …")
-if "oxygenation_index" in extra_df.columns:
-    n_miss_before = result["oxygenation_index_0"].isna().sum()
+# --- 7b. P/F or S/F ratio recovery: widen window to [-24h, +3h] ---
+print("\n  P/F or S/F ratio imputation …")
+if "pf_sf_ratio" in extra_df.columns:
+    n_miss_before = result["pf_sf_ratio_0"].isna().sum()
 
     if n_miss_before > 0:
-        t0_wide = extract_last_in_window(extra_df, "oxygenation_index", -24, 3)
-        t0_wide = t0_wide.rename(columns={"oxygenation_index": "oxy_0_wide"})
+        t0_wide = extract_last_in_window(extra_df, "pf_sf_ratio", -24, 3)
+        t0_wide = t0_wide.rename(columns={"pf_sf_ratio": "oxy_0_wide"})
         result = result.merge(t0_wide, on="encounter_block", how="left")
-        result["oxygenation_index_0"] = result["oxygenation_index_0"].fillna(
+        result["pf_sf_ratio_0"] = result["pf_sf_ratio_0"].fillna(
             result["oxy_0_wide"]
         )
         result.drop(columns=["oxy_0_wide"], inplace=True)
 
         # Cascade to _12
-        result["oxygenation_index_12"] = result["oxygenation_index_12"].fillna(
-            result["oxygenation_index_0"]
+        result["pf_sf_ratio_12"] = result["pf_sf_ratio_12"].fillna(
+            result["pf_sf_ratio_0"]
         )
 
-    n_miss_after = result["oxygenation_index_0"].isna().sum()
-    print(f"    oxygenation_index_0 missing: {n_miss_before} → {n_miss_after}")
+    n_miss_after = result["pf_sf_ratio_0"].isna().sum()
+    print(f"    pf_sf_ratio_0 missing: {n_miss_before} → {n_miss_after}")
 
-    # Cascade oxygenation imputation to _24 (sensitivity)
-    result["oxygenation_index_24"] = result["oxygenation_index_24"].fillna(
-        result["oxygenation_index_0"]
+    # Cascade pf_sf_ratio imputation to _24 (sensitivity)
+    result["pf_sf_ratio_24"] = result["pf_sf_ratio_24"].fillna(
+        result["pf_sf_ratio_0"]
     )
-    n_oxy_24_miss = result["oxygenation_index_24"].isna().sum()
-    print(f"    oxygenation_index_24 missing after cascade: {n_oxy_24_miss}")
+    n_oxy_24_miss = result["pf_sf_ratio_24"].isna().sum()
+    print(f"    pf_sf_ratio_24 missing after cascade: {n_oxy_24_miss}")
 
 # --- 7c. Lactate: impute normal value (1.0 mmol/L) for missing ---
 print("\n  Lactate imputation …")
@@ -940,10 +957,10 @@ final_cols = [
     "time_to_event_30d",
     "outcome",
     "censored_at_90d",
-    "oxygenation_index_0",
+    "pf_sf_ratio_0",
     "norepinephrine_equivalent_0",
     "imv_status_0",
-    "oxygenation_index_12",
+    "pf_sf_ratio_12",
     "norepinephrine_equivalent_12",
     "imv_status_12",
     "cci_myocardial_infarction",
@@ -970,7 +987,7 @@ final_cols = [
     "bicarbonate_24",
     "potassium_24",
     "sofa_total_24",
-    "oxygenation_index_24",
+    "pf_sf_ratio_24",
     "norepinephrine_equivalent_24",
     "imv_status_24",
     "eligible_48h_sensitivity",

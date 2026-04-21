@@ -176,7 +176,7 @@ required_vars <- c(
   # SOFA (kept in data for descriptive use; NOT used in models)
   "sofa_total_0",
   # New covariates at t=0
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   # CCI components (baseline only)
   cci_vars
 )
@@ -277,7 +277,7 @@ if (nrow(df_complete) < 50) {
 model_covariates <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   cci_vars
 )
 
@@ -346,12 +346,12 @@ sample_chars <- data.frame(
   crrt_dose_q25 = quantile(df_complete$crrt_dose_median_3h, 0.25, na.rm = TRUE),
   crrt_dose_q75 = quantile(df_complete$crrt_dose_median_3h, 0.75, na.rm = TRUE),
 
-  # Oxygenation Index (time t=0)
-  oxygenation_index_mean   = mean(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_sd     = sd(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_median = median(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_q25    = quantile(df_complete$oxygenation_index_0, 0.25, na.rm = TRUE),
-  oxygenation_index_q75    = quantile(df_complete$oxygenation_index_0, 0.75, na.rm = TRUE),
+  # P/F or S/F ratio (time t=0)
+  pf_sf_ratio_mean   = mean(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_sd     = sd(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_median = median(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_q25    = quantile(df_complete$pf_sf_ratio_0, 0.25, na.rm = TRUE),
+  pf_sf_ratio_q75    = quantile(df_complete$pf_sf_ratio_0, 0.75, na.rm = TRUE),
 
   # Norepinephrine Equivalent (time t=0)
   norepi_eq_mean   = mean(df_complete$norepinephrine_equivalent_0, na.rm = TRUE),
@@ -560,7 +560,7 @@ vars_table1 <- c(
   "race_category",
   "sofa_total_0",
   "creatinine_0",
-  "oxygenation_index_0",
+  "pf_sf_ratio_0",
   "norepinephrine_equivalent_0",
   "imv_status_0",
   "lactate_0",
@@ -582,7 +582,7 @@ table1_type <- list(
   race_category               ~ "categorical",
   sofa_total_0                ~ "continuous",
   creatinine_0                ~ "continuous",
-  oxygenation_index_0         ~ "continuous",
+  pf_sf_ratio_0         ~ "continuous",
   norepinephrine_equivalent_0 ~ "continuous",
   imv_status_0                ~ "dichotomous",
   lactate_0                   ~ "continuous",
@@ -606,7 +606,7 @@ table1_label <- list(
   race_category                ~ "Race",
   sofa_total_0                 ~ "SOFA Score",
   creatinine_0                 ~ "Creatinine at CRRT Start (mg/dL)",
-  oxygenation_index_0          ~ "Oxygenation Index (P/F or S/F)",
+  pf_sf_ratio_0          ~ "P/F or S/F Ratio",
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
   imv_status_0                 ~ "On IMV (%)",
   lactate_0                    ~ "Lactate at CRRT Start (mmol/L)",
@@ -734,7 +734,7 @@ pretty_names_loveplot <- c(
   lactate_0                     = "Lactate",
   bicarbonate_0                 = "Bicarbonate",
   potassium_0                   = "Potassium",
-  oxygenation_index_0           = "Oxygenation Index",
+  pf_sf_ratio_0           = "P/F or S/F Ratio",
   norepinephrine_equivalent_0   = "NE Equivalent",
   imv_status_0                  = "IMV Status",
 

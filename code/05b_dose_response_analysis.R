@@ -105,7 +105,7 @@ df$race_category <- forcats::fct_collapse(
 model_covariates_full <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   cci_vars
 )
 
@@ -496,7 +496,7 @@ pretty_names <- c(
   lactate_0                     = "Lactate",
   bicarbonate_0                 = "Bicarbonate",
   potassium_0                   = "Potassium",
-  oxygenation_index_0           = "Oxygenation Index",
+  pf_sf_ratio_0           = "P/F or S/F Ratio",
   norepinephrine_equivalent_0   = "NE Equivalent",
   imv_status_0                  = "IMV Status",
   cci_labels
@@ -741,7 +741,7 @@ if (!file.exists(tbl_path)) {
   cat("  Added-back group: ", round(mort_excluded * 100, 1), "%\n\n")
 
   # Fit linear dose Cox model on full cohort with available covariates
-  # (oxygenation_index and NEE not available in tableone_analysis_df)
+  # (pf_sf_ratio and NEE not available in tableone_analysis_df)
   df_sens <- df_full %>% filter(!is.na(crrt_dose))
 
   # Race collapse
@@ -764,7 +764,7 @@ if (!file.exists(tbl_path)) {
   ]
 
   cat("Sensitivity model covariates:", paste(sens_covariates, collapse = ", "), "\n")
-  cat("(Note: oxygenation index, NEE, IMV status, and CCI not available ",
+  cat("(Note: P/F or S/F ratio, NEE, IMV status, and CCI not available ",
       "for the full cohort in tableone_analysis_df)\n\n")
 
   sens_fml <- as.formula(
