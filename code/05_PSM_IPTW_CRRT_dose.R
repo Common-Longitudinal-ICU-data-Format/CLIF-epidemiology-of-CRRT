@@ -170,13 +170,13 @@ required_vars <- c(
   "time_to_event_30d", "outcome",
   "age_at_admission", "sex_category", "race_category", "ethnicity_category",
   "crrt_mode_category", "weight_kg",
-  "crrt_dose_ml_kg_hr_0",
+  "crrt_dose_median_3h",
   # Labs at t=0
   "lactate_0", "bicarbonate_0", "potassium_0",
   # SOFA (kept in data for descriptive use; NOT used in models)
   "sofa_total_0",
   # New covariates at t=0
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   # CCI components (baseline only)
   cci_vars
 )
@@ -223,7 +223,7 @@ if (n_incomplete > 0) {
   vars_with_na <- names(miss_counts[miss_counts > 0])
   predictor_vars <- c("age_at_admission", "sex_category", "lactate_0",
                        "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
-                       "imv_status_0", "crrt_dose_ml_kg_hr_0")
+                       "imv_status_0", "crrt_dose_median_3h")
   mice_vars <- unique(c(vars_with_na, intersect(predictor_vars, model_vars)))
   mice_vars <- mice_vars[mice_vars %in% names(df)]
 
@@ -277,7 +277,7 @@ if (nrow(df_complete) < 50) {
 model_covariates <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   cci_vars
 )
 
@@ -304,7 +304,7 @@ cat("\n")
 # Complete-case variable list: all model covariates + outcome/time variables
 # Used by all drop_na() calls to ensure data is complete for every formula variable
 complete_case_vars <- c(model_covariates, "sofa_total_0",
-                        "crrt_dose_ml_kg_hr_0", "time_to_event_30d", "outcome")
+                        "crrt_dose_median_3h", "time_to_event_30d", "outcome")
 
 ## ---- C. CRRT Dose Cutoff ----
 # =================================== #
@@ -340,18 +340,18 @@ sample_chars <- data.frame(
   sofa_q75 = quantile(df_complete$sofa_total_0, 0.75, na.rm = TRUE),
 
   # CRRT dose (modality independent, time t=0)
-  crrt_dose_mean = mean(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_sd = sd(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_median = median(df_complete$crrt_dose_ml_kg_hr_0, na.rm = TRUE),
-  crrt_dose_q25 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.25, na.rm = TRUE),
-  crrt_dose_q75 = quantile(df_complete$crrt_dose_ml_kg_hr_0, 0.75, na.rm = TRUE),
+  crrt_dose_mean = mean(df_complete$crrt_dose_median_3h, na.rm = TRUE),
+  crrt_dose_sd = sd(df_complete$crrt_dose_median_3h, na.rm = TRUE),
+  crrt_dose_median = median(df_complete$crrt_dose_median_3h, na.rm = TRUE),
+  crrt_dose_q25 = quantile(df_complete$crrt_dose_median_3h, 0.25, na.rm = TRUE),
+  crrt_dose_q75 = quantile(df_complete$crrt_dose_median_3h, 0.75, na.rm = TRUE),
 
-  # Oxygenation Index (time t=0)
-  oxygenation_index_mean   = mean(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_sd     = sd(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_median = median(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_q25    = quantile(df_complete$oxygenation_index_0, 0.25, na.rm = TRUE),
-  oxygenation_index_q75    = quantile(df_complete$oxygenation_index_0, 0.75, na.rm = TRUE),
+  # P/F or S/F ratio (time t=0)
+  pf_sf_ratio_mean   = mean(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_sd     = sd(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_median = median(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_q25    = quantile(df_complete$pf_sf_ratio_0, 0.25, na.rm = TRUE),
+  pf_sf_ratio_q75    = quantile(df_complete$pf_sf_ratio_0, 0.75, na.rm = TRUE),
 
   # Norepinephrine Equivalent (time t=0)
   norepi_eq_mean   = mean(df_complete$norepinephrine_equivalent_0, na.rm = TRUE),
@@ -418,13 +418,13 @@ write.csv(sample_chars,
 cat("Sample characteristics saved.\n\n")
 
 ## ---- E. Histogram CRRT dose ----
-crrt_dose_hist <- ggplot(df_complete, aes(x = crrt_dose_ml_kg_hr_0)) +
+crrt_dose_hist <- ggplot(df_complete, aes(x = crrt_dose_median_3h)) +
   geom_histogram(binwidth = 5, color = "black", fill = "skyblue") +
   geom_vline(xintercept = dose_cutoff, linetype = "dashed", linewidth = 1) +
       # Line at cutoff
   labs(
-    title = paste0("Distribution of Initial CRRT Dose (Cutoff = 
-                   ", dose_cutoff, " mL/kg/hr)"),
+    title = paste0("Distribution of CRRT Dose — median first 3h (Cutoff = ",
+                   dose_cutoff, " mL/kg/hr)"),
     x = "CRRT Dose (mL/kg/hr)",
     y = "Count"
   ) +
@@ -441,7 +441,7 @@ cat("Defining treatment groups using cutoff =", dose_cutoff, "mL/kg/hr\n")
 
 df_tte_bin <- df_complete %>%
   mutate(
-    crrt_high = ifelse(crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L),
+    crrt_high = ifelse(crrt_dose_median_3h >= dose_cutoff, 1L, 0L),
     crrt_high = factor(
       crrt_high,
       levels = c(0,1),
@@ -560,7 +560,7 @@ vars_table1 <- c(
   "race_category",
   "sofa_total_0",
   "creatinine_0",
-  "oxygenation_index_0",
+  "pf_sf_ratio_0",
   "norepinephrine_equivalent_0",
   "imv_status_0",
   "lactate_0",
@@ -569,7 +569,7 @@ vars_table1 <- c(
   "crrt_mode_category",
   "crrt_duration_days",
   "imv_duration_days",
-  "crrt_dose_ml_kg_hr_0",
+  "crrt_dose_median_3h",
   cci_vars,
   "outcome_3cat"
 )
@@ -582,7 +582,7 @@ table1_type <- list(
   race_category               ~ "categorical",
   sofa_total_0                ~ "continuous",
   creatinine_0                ~ "continuous",
-  oxygenation_index_0         ~ "continuous",
+  pf_sf_ratio_0         ~ "continuous",
   norepinephrine_equivalent_0 ~ "continuous",
   imv_status_0                ~ "dichotomous",
   lactate_0                   ~ "continuous",
@@ -591,7 +591,7 @@ table1_type <- list(
   crrt_mode_category          ~ "categorical",
   crrt_duration_days          ~ "continuous",
   imv_duration_days           ~ "continuous",
-  crrt_dose_ml_kg_hr_0        ~ "continuous"
+  crrt_dose_median_3h        ~ "continuous"
 )
 for (v in cci_vars) {
   table1_type[[length(table1_type) + 1]] <- as.formula(
@@ -606,7 +606,7 @@ table1_label <- list(
   race_category                ~ "Race",
   sofa_total_0                 ~ "SOFA Score",
   creatinine_0                 ~ "Creatinine at CRRT Start (mg/dL)",
-  oxygenation_index_0          ~ "Oxygenation Index (P/F or S/F)",
+  pf_sf_ratio_0          ~ "P/F or S/F Ratio",
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
   imv_status_0                 ~ "On IMV (%)",
   lactate_0                    ~ "Lactate at CRRT Start (mmol/L)",
@@ -615,7 +615,7 @@ table1_label <- list(
   crrt_mode_category           ~ "CRRT Modality",
   crrt_duration_days           ~ "Duration of CRRT (Days)",
   imv_duration_days            ~ "Duration of IMV (Days)",
-  crrt_dose_ml_kg_hr_0         ~ "Initial CRRT Dose (mL/kg/hr)",
+  crrt_dose_median_3h          ~ "CRRT Dose, median first 3h (mL/kg/hr)",
   outcome_3cat                 ~ "30-day Outcome"
 )
 for (v in cci_vars) {
@@ -734,7 +734,7 @@ pretty_names_loveplot <- c(
   lactate_0                     = "Lactate",
   bicarbonate_0                 = "Bicarbonate",
   potassium_0                   = "Potassium",
-  oxygenation_index_0           = "Oxygenation Index",
+  pf_sf_ratio_0           = "P/F or S/F Ratio",
   norepinephrine_equivalent_0   = "NE Equivalent",
   imv_status_0                  = "IMV Status",
 
@@ -758,11 +758,11 @@ plot_loveplot_psm <- love.plot(
   threshold = c(m = .25, v = 1.25)
 )
 
-print(plot_loveplot_psm)
+grid::grid.draw(plot_loveplot_psm)
 
 png(file.path(output_dir, paste0(SITE_NAME, "_psm_loveplot.png")),
     width = 8, height = 7, units = "in", res = 300)
-print(plot_loveplot_psm)
+grid::grid.draw(plot_loveplot_psm)
 dev.off()
 
 cat("Saved Love plot for PSM as PNG\n")
@@ -971,7 +971,7 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
   for (m in seq_len(N_IMP)) {
     d_imp <- imp_list[[m]]
     # Apply same data prep as df_tte_bin
-    d_imp$crrt_high <- ifelse(d_imp$crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L)
+    d_imp$crrt_high <- ifelse(d_imp$crrt_dose_median_3h >= dose_cutoff, 1L, 0L)
     d_imp$crrt_high <- factor(d_imp$crrt_high, levels = c(0, 1),
                               labels = c(paste0("<", dose_cutoff),
                                          paste0(">=", dose_cutoff)))
@@ -1497,7 +1497,7 @@ cat("\nPooling IPTW Cox models across", N_IMP, "MICE imputations...\n")
 # Reuse same SL weights (fitted on imputation 1) — standard pragmatic approach
 imp_sl_list <- lapply(seq_len(N_IMP), function(m) {
   d <- imp_list[[m]]
-  d$crrt_high <- ifelse(d$crrt_dose_ml_kg_hr_0 >= dose_cutoff, 1L, 0L)
+  d$crrt_high <- ifelse(d$crrt_dose_median_3h >= dose_cutoff, 1L, 0L)
   d$crrt_high <- factor(d$crrt_high, levels = c(0, 1),
                         labels = c(paste0("<", dose_cutoff),
                                    paste0(">=", dose_cutoff)))

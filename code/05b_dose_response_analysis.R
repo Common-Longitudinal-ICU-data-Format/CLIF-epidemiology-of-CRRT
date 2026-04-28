@@ -105,12 +105,12 @@ df$race_category <- forcats::fct_collapse(
 model_covariates_full <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   cci_vars
 )
 
 required_vars <- c(
-  "time_to_event_30d", "outcome", "crrt_dose_ml_kg_hr_0",
+  "time_to_event_30d", "outcome", "crrt_dose_median_3h",
   model_covariates_full
 )
 miss_counts <- colSums(is.na(df[, required_vars]))
@@ -121,7 +121,7 @@ if (any(miss_counts > 0)) {
   predictor_vars <- c("age_at_admission", "sex_category", "lactate_0",
                        "bicarbonate_0", "potassium_0",
                        "norepinephrine_equivalent_0",
-                       "imv_status_0", "crrt_dose_ml_kg_hr_0")
+                       "imv_status_0", "crrt_dose_median_3h")
   mice_vars <- unique(c(vars_with_na, intersect(predictor_vars, names(df))))
   imp <- mice(df[, mice_vars], m = 5, method = "pmm", seed = 42,
               maxit = 10, printFlag = FALSE)
@@ -140,14 +140,53 @@ cat("Model covariates (", length(model_covariates), "):",
     "...\n\n")
 
 ## ---- J. Constants ----
-DOSE_VAR   <- "crrt_dose_ml_kg_hr_0"
+DOSE_VAR   <- "crrt_dose_median_3h"
 DOSE_CUTOFF <- 30
 dose_vals  <- df[[DOSE_VAR]]
 overall_mort <- mean(df$outcome == 2)
 
-cat("Dose range:", round(min(dose_vals), 1), "-",
+cat("Dose range (raw):", round(min(dose_vals), 1), "-",
     round(max(dose_vals), 1), "mL/kg/hr\n")
-cat("Median dose:", round(median(dose_vals), 1), "mL/kg/hr\n")
+cat("Median dose (raw):", round(median(dose_vals), 1), "mL/kg/hr\n")
+
+## ---- J2. Winsorize dose at 1st/99th percentile ----
+## Cole & Hernán (2008, AJE) — caps extreme exposure values to stabilize
+## density-based weights (GPS / CBPS). Applies to all 05b analyses; script 05
+## uses the raw dichotomized exposure and is left unchanged.
+WINS_LOW_PCT  <- 0.01
+WINS_HIGH_PCT <- 0.99
+wins_lo <- as.numeric(quantile(dose_vals, WINS_LOW_PCT,  na.rm = TRUE))
+wins_hi <- as.numeric(quantile(dose_vals, WINS_HIGH_PCT, na.rm = TRUE))
+n_wins_lo <- sum(dose_vals < wins_lo, na.rm = TRUE)
+n_wins_hi <- sum(dose_vals > wins_hi, na.rm = TRUE)
+
+cat(sprintf("Winsorizing %s at [%.2f, %.2f] (%g%%/%g%% pct)\n",
+            DOSE_VAR, wins_lo, wins_hi,
+            WINS_LOW_PCT * 100, WINS_HIGH_PCT * 100))
+cat(sprintf("  %d values capped low, %d values capped high (%d / %d total)\n",
+            n_wins_lo, n_wins_hi, n_wins_lo + n_wins_hi, length(dose_vals)))
+
+df[[DOSE_VAR]] <- pmin(pmax(df[[DOSE_VAR]], wins_lo), wins_hi)
+dose_vals <- df[[DOSE_VAR]]
+
+wins_audit <- data.frame(
+  site               = SITE_NAME,
+  dose_var           = DOSE_VAR,
+  pct_low            = WINS_LOW_PCT,
+  pct_high           = WINS_HIGH_PCT,
+  threshold_low      = wins_lo,
+  threshold_high     = wins_hi,
+  n_winsorized_low   = n_wins_lo,
+  n_winsorized_high  = n_wins_hi,
+  n_total            = length(dose_vals)
+)
+write.csv(wins_audit,
+          file.path(output_dir, paste0(SITE_NAME, "_winsorization_audit.csv")),
+          row.names = FALSE)
+cat("Saved winsorization audit CSV\n")
+
+cat("Dose range (post-winsorization):", round(min(dose_vals), 1), "-",
+    round(max(dose_vals), 1), "mL/kg/hr\n")
 cat("Overall 30-day mortality:", round(overall_mort * 100, 1), "%\n\n")
 
 
@@ -204,7 +243,7 @@ p_decile <- ggplot(decile_summary, aes(x = dose_median, y = mortality_rate)) +
   labs(
     title = "30-Day Mortality by CRRT Dose Decile",
     subtitle = "Unadjusted mortality rates with 95% CI",
-    x = "Initial CRRT Dose (mL/kg/hr)",
+    x = "CRRT Dose — median first 3h (mL/kg/hr)",
     y = "30-Day Mortality Rate"
   ) +
   theme_bw(base_size = 12) +
@@ -332,14 +371,14 @@ write.csv(anova_out,
 # Generate predictions
 pred_df <- fit_spline_cox(df, DOSE_VAR, model_covariates,
                           spline_df = 4, dose_grid = dose_grid)
-names(pred_df)[1] <- "crrt_dose_ml_kg_hr_0"
+names(pred_df)[1] <- "crrt_dose_median_3h"
 
 write.csv(pred_df,
           file.path(output_dir, paste0(SITE_NAME, "_dose_response_rcs.csv")),
           row.names = FALSE)
 
 # Plot
-p_rcs <- ggplot(pred_df, aes(x = crrt_dose_ml_kg_hr_0)) +
+p_rcs <- ggplot(pred_df, aes(x = crrt_dose_median_3h)) +
   geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper),
               fill = "steelblue", alpha = 0.2) +
   geom_line(aes(y = hr), color = "steelblue", linewidth = 1) +
@@ -355,7 +394,7 @@ p_rcs <- ggplot(pred_df, aes(x = crrt_dose_ml_kg_hr_0)) +
     title = "Adjusted Hazard Ratio for 30-Day Mortality",
     subtitle = paste0("Covariate-adjusted Cox model with natural spline (nonlinearity p=",
                       format.pval(nonlin_p, digits = 2), ")"),
-    x = "Initial CRRT Dose (mL/kg/hr)",
+    x = "CRRT Dose — median first 3h (mL/kg/hr)",
     y = "Hazard Ratio (log scale)"
   ) +
   theme_bw(base_size = 12) +
@@ -457,7 +496,7 @@ pretty_names <- c(
   lactate_0                     = "Lactate",
   bicarbonate_0                 = "Bicarbonate",
   potassium_0                   = "Potassium",
-  oxygenation_index_0           = "Oxygenation Index",
+  pf_sf_ratio_0           = "P/F or S/F Ratio",
   norepinephrine_equivalent_0   = "NE Equivalent",
   imv_status_0                  = "IMV Status",
   cci_labels
@@ -546,7 +585,7 @@ df$gps_weights <- W$weights
 gps_pred_df <- fit_spline_cox(df, DOSE_VAR, covariates = model_covariates,
                               spline_df = 3, dose_grid = dose_grid,
                               weights = df$gps_weights)
-names(gps_pred_df)[1] <- "crrt_dose_ml_kg_hr_0"
+names(gps_pred_df)[1] <- "crrt_dose_median_3h"
 cat("Doubly-robust GPS model fit complete.\n")
 
 write.csv(gps_pred_df,
@@ -554,7 +593,7 @@ write.csv(gps_pred_df,
           row.names = FALSE)
 
 # GPS dose-response plot
-p_gps <- ggplot(gps_pred_df, aes(x = crrt_dose_ml_kg_hr_0)) +
+p_gps <- ggplot(gps_pred_df, aes(x = crrt_dose_median_3h)) +
   geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper),
               fill = "forestgreen", alpha = 0.2) +
   geom_line(aes(y = hr), color = "forestgreen", linewidth = 1) +
@@ -569,7 +608,7 @@ p_gps <- ggplot(gps_pred_df, aes(x = crrt_dose_ml_kg_hr_0)) +
   labs(
     title = "Doubly-Robust Hazard Ratio for 30-Day Mortality",
     subtitle = "CBPS-weighted and covariate-adjusted Cox model",
-    x = "Initial CRRT Dose (mL/kg/hr)",
+    x = "CRRT Dose — median first 3h (mL/kg/hr)",
     y = "Hazard Ratio (log scale)"
   ) +
   theme_bw(base_size = 12) +
@@ -613,7 +652,7 @@ library(patchwork)
 p_combined <- p_A / p_B / p_C +
   plot_annotation(
     title = paste0("Dose-Response Analysis \u2014 ", SITE_NAME),
-    subtitle = "Initial CRRT dose vs 30-day mortality across three analytic approaches",
+    subtitle = "CRRT dose (median first 3h) vs 30-day mortality across three analytic approaches",
     theme = theme(
       plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
       plot.subtitle = element_text(size = 10, color = "grey40", hjust = 0.5)
@@ -702,7 +741,7 @@ if (!file.exists(tbl_path)) {
   cat("  Added-back group: ", round(mort_excluded * 100, 1), "%\n\n")
 
   # Fit linear dose Cox model on full cohort with available covariates
-  # (oxygenation_index and NEE not available in tableone_analysis_df)
+  # (pf_sf_ratio and NEE not available in tableone_analysis_df)
   df_sens <- df_full %>% filter(!is.na(crrt_dose))
 
   # Race collapse
@@ -725,7 +764,7 @@ if (!file.exists(tbl_path)) {
   ]
 
   cat("Sensitivity model covariates:", paste(sens_covariates, collapse = ", "), "\n")
-  cat("(Note: oxygenation index, NEE, IMV status, and CCI not available ",
+  cat("(Note: P/F or S/F ratio, NEE, IMV status, and CCI not available ",
       "for the full cohort in tableone_analysis_df)\n\n")
 
   sens_fml <- as.formula(
@@ -745,7 +784,7 @@ if (!file.exists(tbl_path)) {
               dose_coef["Pr(>|z|)"]))
 
   # Compare to primary analysis
-  primary_dose_coef <- summary(lin_fit)$coefficients["crrt_dose_ml_kg_hr_0", ]
+  primary_dose_coef <- summary(lin_fit)$coefficients["crrt_dose_median_3h", ]
   cat(sprintf("  Primary analysis HR: %.4f (95%% CI: %.4f - %.4f), p = %.3f\n\n",
               exp(primary_dose_coef["coef"]),
               exp(primary_dose_coef["coef"] - 1.96 * primary_dose_coef["se(coef)"]),
