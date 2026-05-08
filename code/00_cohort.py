@@ -1188,10 +1188,10 @@ labs_df = clif.labs.df.copy()
 
 
 # ============================================================================
-# Get Most Recent Labs Within -12 hours to +3 hours of CRRT initiation
+# Get Most Recent Labs Within -24 hours to +3 hours of CRRT initiation
 # ============================================================================
 print("\n" + "=" * 80)
-print("Processing Labs - Most Recent Within -12 hours to +3 hours of CRRT initiation")
+print("Processing Labs - Most Recent Within -24 hours to +3 hours of CRRT initiation")
 print("=" * 80)
 
 
@@ -1219,8 +1219,8 @@ print(f"   Unique encounter blocks after merging: {n_unique_encounter_blocks_aft
 # In[37]:
 
 
-# Filter labs to window: -12 hours to +3 hours of CRRT initiation
-time_lower = labs_with_crrt_time['crrt_initiation_time'] -  pd.Timedelta(hours=24)
+# Filter labs to window: -24 hours to +3 hours of CRRT initiation
+time_lower = labs_with_crrt_time['crrt_initiation_time'] - pd.Timedelta(hours=24)
 time_upper = labs_with_crrt_time['crrt_initiation_time'] + pd.Timedelta(hours=3)
 
 labs_in_window = labs_with_crrt_time[
