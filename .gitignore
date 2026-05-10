@@ -63,12 +63,8 @@ all_site_data/
 all_site_msm_data/
 output/multi_site/
 code/07_combine_causal_results.py
-code/08_severity_analysis.py
+code/08_manuscript_artifacts.py
 code/archive/output/
 code/archive/
 grant/
-code/06_ihd_after_crrt.py
-shan/
 terminology-tool/
-08_combine_causal_results.py
-debug_labs.py
