@@ -368,6 +368,91 @@ write.csv(anova_out,
                     paste0(SITE_NAME, "_dose_response_rcs_anova.csv")),
           row.names = FALSE)
 
+## ---- Cox PH and discrimination diagnostics ----
+# cox.zph tests the proportional-hazards assumption per term + global. For
+# the spline model, ns() basis functions are aggregated into a single dose
+# term row (joint PH test for the dose effect). C-statistic measures
+# discrimination.
+zph_lin <- cox.zph(lin_fit)
+zph_ns <- cox.zph(ns_fit)
+
+dose_term_lin <- DOSE_VAR
+dose_term_ns <- paste0("ns(", DOSE_VAR, ", df = 4)")
+
+get_dose_ph_p <- function(zph, term_name) {
+  if (term_name %in% rownames(zph$table)) {
+    return(zph$table[term_name, "p"])
+  }
+  NA_real_
+}
+
+dose_resp_diag <- data.frame(
+  site_name = SITE_NAME,
+  model = c("Linear dose Cox", "Spline dose Cox (ns df=4)"),
+  n = nrow(df),
+  n_events = sum(df$outcome == 2),
+  c_statistic = c(summary(lin_fit)$concordance["C"],
+                  summary(ns_fit)$concordance["C"]),
+  c_se = c(summary(lin_fit)$concordance["se(C)"],
+           summary(ns_fit)$concordance["se(C)"]),
+  global_ph_p = c(zph_lin$table["GLOBAL", "p"],
+                  zph_ns$table["GLOBAL", "p"]),
+  dose_ph_p = c(get_dose_ph_p(zph_lin, dose_term_lin),
+                get_dose_ph_p(zph_ns, dose_term_ns)),
+  stringsAsFactors = FALSE
+)
+write.csv(
+  dose_resp_diag,
+  file.path(output_dir,
+            paste0(SITE_NAME, "_dose_response_cox_diagnostics.csv")),
+  row.names = FALSE
+)
+
+# Long-format per-covariate PH p-values (excludes GLOBAL row, kept in
+# summary CSV above). For the spline model, the ns(dose, df=4) basis
+# functions are aggregated into a single dose term by cox.zph (joint
+# 4-df test); for the linear model, dose is a single 1-df row.
+extract_zph_per_covariate <- function(zph, model_label) {
+  tab <- as.data.frame(zph$table)
+  tab$term <- rownames(tab)
+  tab <- tab[tab$term != "GLOBAL", ]
+  data.frame(
+    site_name = SITE_NAME,
+    model = model_label,
+    term = tab$term,
+    chi_sq = tab[, "chisq"],
+    df = tab[, "df"],
+    p_value = tab[, "p"],
+    stringsAsFactors = FALSE
+  )
+}
+per_cov_dose <- rbind(
+  extract_zph_per_covariate(zph_lin, "Linear dose Cox"),
+  extract_zph_per_covariate(zph_ns, "Spline dose Cox (ns df=4)")
+)
+write.csv(
+  per_cov_dose,
+  file.path(output_dir,
+            paste0(SITE_NAME, "_dose_response_cox_diagnostics_per_covariate.csv")),
+  row.names = FALSE
+)
+
+cat("\nDose-response Cox diagnostics:\n")
+for (.i in seq_len(nrow(dose_resp_diag))) {
+  .r <- dose_resp_diag[.i, ]
+  cat(sprintf(
+    "  %s: C=%.3f (SE %.3f), global PH p=%.3f, dose PH p=%.3f %s\n",
+    .r$model, .r$c_statistic, .r$c_se,
+    .r$global_ph_p, .r$dose_ph_p,
+    ifelse(.r$global_ph_p < 0.05, "[FAIL]", "[pass]")
+  ))
+}
+cat("Saved dose-response Cox diagnostics to ",
+    SITE_NAME, "_dose_response_cox_diagnostics.csv\n", sep = "")
+cat("Saved per-covariate PH p-values to ",
+    SITE_NAME, "_dose_response_cox_diagnostics_per_covariate.csv (",
+    nrow(per_cov_dose), " rows)\n\n", sep = "")
+
 # Generate predictions
 pred_df <- fit_spline_cox(df, DOSE_VAR, model_covariates,
                           spline_df = 4, dose_grid = dose_grid)

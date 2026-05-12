@@ -1489,6 +1489,93 @@ write.csv(
 )
 cat("Saved full IPTW Cause-Specific Cox results.\n")
 
+#### ---- II-a. IPTW Cox PH + discrimination diagnostics ----
+# cox.zph tests proportional-hazards assumption per term + global. Harrell's
+# C-statistic measures discrimination. Computed on the IPTW-weighted cs-Cox
+# fits; not run on Fine-Gray (cmprsk::crr doesn't expose Schoenfeld
+# residuals natively — we rely on csHR/SHR concordance + cs-Cox PH passing
+# as the FG PH check, per Austin, Lee, & Fine 2017).
+
+zph_death_iptw <- cox.zph(fit_cs_death)
+zph_disch_iptw <- cox.zph(fit_cs_disch)
+
+# cox.zph collapses 2-level factors back to base variable names
+get_trt_ph_p <- function(zph) {
+  trt_levels <- levels(df_tte_sl$crrt_high)
+  candidates <- c("crrt_high",
+                  paste0("crrt_high", trt_levels[trt_levels != ref_label]))
+  hit <- intersect(candidates, rownames(zph$table))
+  if (length(hit) == 0) return(NA_real_)
+  zph$table[hit[1], "p"]
+}
+
+iptw_diag <- data.frame(
+  site_name = SITE_NAME,
+  model = c("IPTW cs-Cox Death", "IPTW cs-Cox Discharge"),
+  n = nrow(df_tte_sl),
+  n_events = c(sum(df_tte_sl$outcome == 2),
+               sum(df_tte_sl$outcome == 1)),
+  c_statistic = c(summary(fit_cs_death)$concordance["C"],
+                  summary(fit_cs_disch)$concordance["C"]),
+  c_se = c(summary(fit_cs_death)$concordance["se(C)"],
+           summary(fit_cs_disch)$concordance["se(C)"]),
+  global_ph_p = c(zph_death_iptw$table["GLOBAL", "p"],
+                  zph_disch_iptw$table["GLOBAL", "p"]),
+  trt_ph_p = c(get_trt_ph_p(zph_death_iptw),
+               get_trt_ph_p(zph_disch_iptw)),
+  stringsAsFactors = FALSE
+)
+write.csv(
+  iptw_diag,
+  file.path(output_dir,
+            paste0(SITE_NAME, "_iptw_cox_diagnostics.csv")),
+  row.names = FALSE
+)
+
+# Long-format per-covariate PH p-values (excludes GLOBAL row, which lives
+# in the summary CSV above). Powers the consortium-wide investigation of
+# which specific covariates have time-varying effects when global PH fails.
+extract_zph_per_covariate <- function(zph, model_label) {
+  tab <- as.data.frame(zph$table)
+  tab$term <- rownames(tab)
+  tab <- tab[tab$term != "GLOBAL", ]
+  data.frame(
+    site_name = SITE_NAME,
+    model = model_label,
+    term = tab$term,
+    chi_sq = tab[, "chisq"],
+    df = tab[, "df"],
+    p_value = tab[, "p"],
+    stringsAsFactors = FALSE
+  )
+}
+per_cov_iptw <- rbind(
+  extract_zph_per_covariate(zph_death_iptw, "IPTW cs-Cox Death"),
+  extract_zph_per_covariate(zph_disch_iptw, "IPTW cs-Cox Discharge")
+)
+write.csv(
+  per_cov_iptw,
+  file.path(output_dir,
+            paste0(SITE_NAME, "_iptw_cox_diagnostics_per_covariate.csv")),
+  row.names = FALSE
+)
+
+cat("\n  IPTW Cox diagnostics:\n")
+for (.i in seq_len(nrow(iptw_diag))) {
+  .r <- iptw_diag[.i, ]
+  cat(sprintf(
+    "    %s: C=%.3f (SE %.3f), global PH p=%.3f, trt PH p=%.3f %s\n",
+    .r$model, .r$c_statistic, .r$c_se,
+    .r$global_ph_p, .r$trt_ph_p,
+    ifelse(.r$global_ph_p < 0.05, "[FAIL]", "[pass]")
+  ))
+}
+cat("  Saved IPTW Cox diagnostics to ",
+    SITE_NAME, "_iptw_cox_diagnostics.csv\n", sep = "")
+cat("  Saved per-covariate PH p-values to ",
+    SITE_NAME, "_iptw_cox_diagnostics_per_covariate.csv (",
+    nrow(per_cov_iptw), " rows)\n\n", sep = "")
+
 ### ---- II-b. Rubin's Rules Pooled IPTW Cox Models (across 5 imputations) ----
 
 cat("\nPooling IPTW Cox models across", N_IMP, "MICE imputations...\n")
