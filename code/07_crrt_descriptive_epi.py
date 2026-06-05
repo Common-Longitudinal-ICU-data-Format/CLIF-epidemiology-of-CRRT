@@ -40,6 +40,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from pipeline_helpers import validate_config, safe_load_clif_table
 
@@ -59,6 +62,10 @@ YEAR_END = config.get("admission_year_end", None)
 INTER = Path("../output/intermediate")
 OUT = Path("../output/final/crrt_epi")
 OUT.mkdir(parents=True, exist_ok=True)
+GRAPHS = OUT / "graphs"
+GRAPHS.mkdir(parents=True, exist_ok=True)
+
+BLUE, ORANGE, GREEN = "#1e417c", "#fb801b", "#4CAF50"  # ASN palette + KDIGO-band green
 
 # Pure vasopressors (exclude inotropes dobutamine/milrinone/isoproterenol) for the
 # "on vasopressors" denominator stratum.
@@ -256,6 +263,70 @@ def build_practice_quality() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ── Part C: per-site figures (output/final/crrt_epi/graphs/) ────────────────
+def build_figures(inc_df: pd.DataFrame) -> None:
+    idx = pd.read_parquet(INTER / "index_crrt_df.parquet")
+    t1 = pd.read_parquet(INTER / "tableone_analysis_df.parquet")
+
+    # (1) CRRT incidence by population — horizontal bars (co-indications highlighted)
+    d = inc_df.copy()
+    d["label"] = d["stratum"].str.replace("ICU subtype: ", "", regex=False)
+    main = {"Overall (adult ICU)", "On invasive ventilation", "On vasopressors"}
+    d = d.sort_values("incidence_pct")
+    colors = [ORANGE if s in main else BLUE for s in d["stratum"]]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(d["label"], d["incidence_pct"], color=colors)
+    for y, (v, n, N) in enumerate(zip(d["incidence_pct"], d["n_crrt"], d["n_denominator"])):
+        ax.text(v + max(d["incidence_pct"]) * 0.01, y, f"{v:.1f}% ({int(n):,}/{int(N):,})",
+                va="center", fontsize=8)
+    ax.set_xlabel("CRRT incidence (%)")
+    ax.set_title(f"CRRT incidence by ICU population — {SITE_NAME}")
+    ax.margins(x=0.18)
+    fig.tight_layout()
+    fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_incidence.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    if not HAS_CRRT_SETTINGS:
+        return
+
+    # (2) Delivered-dose distribution with very-low / KDIGO bands
+    dose = pd.to_numeric(t1["crrt_dose_ml_kg_hr"], errors="coerce").dropna()
+    dose = dose[dose.between(0, 80)]
+    if len(dose):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(dose, bins=40, color=BLUE, alpha=0.85)
+        ax.axvspan(10, 15, color=ORANGE, alpha=0.30, label="Very low (10–15)")
+        ax.axvspan(20, 25, color=GREEN, alpha=0.30, label="KDIGO (20–25)")
+        ax.axvline(dose.median(), color="black", linestyle="--", linewidth=1.2,
+                   label=f"Median {dose.median():.1f}")
+        ax.set_xlabel("Delivered dose (mL/kg/hr)")
+        ax.set_ylabel("Encounters")
+        ax.set_title(f"CRRT delivered-dose distribution — {SITE_NAME}")
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # (3) Net ultrafiltration rate with Murugan band
+    w = idx[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
+    m = t1[["encounter_block", "ultrafiltration_out"]].merge(w, on="encounter_block", how="left")
+    uf = pd.to_numeric(m["ultrafiltration_out"], errors="coerce") / pd.to_numeric(m["weight_kg"], errors="coerce")
+    uf = uf[uf.between(0, 6)].dropna()
+    if len(uf):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(uf, bins=40, color=BLUE, alpha=0.85)
+        ax.axvspan(1.0, 1.75, color=GREEN, alpha=0.30, label="Murugan 1.0–1.75")
+        ax.axvline(uf.median(), color="black", linestyle="--", linewidth=1.2,
+                   label=f"Median {uf.median():.2f}")
+        ax.set_xlabel("Net ultrafiltration rate (mL/kg/hr)")
+        ax.set_ylabel("Encounters")
+        ax.set_title(f"Net ultrafiltration-rate distribution — {SITE_NAME}")
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_distribution.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 print("\n[A] CRRT incidence / utilization ...")
 inc = build_incidence()
@@ -268,5 +339,9 @@ pq = build_practice_quality()
 pq_path = OUT / f"{SITE_NAME}_crrt_practice_quality.csv"
 pq.to_csv(pq_path, index=False)
 print(f"  wrote {pq_path}  ({len(pq)} metric rows)")
+
+print("\n[C] Figures ...")
+build_figures(inc)
+print(f"  wrote figures to {GRAPHS}")
 
 print(f"\n=== 07 complete in {time.time() - t_start:.1f}s ===")

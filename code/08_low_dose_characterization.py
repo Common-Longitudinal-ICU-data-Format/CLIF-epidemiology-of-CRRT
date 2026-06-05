@@ -32,6 +32,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from pipeline_helpers import validate_config
 
@@ -47,6 +50,10 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 INTER = Path("../output/intermediate")
 OUT = Path("../output/final/low_dose")
 OUT.mkdir(parents=True, exist_ok=True)
+GRAPHS = OUT / "graphs"
+GRAPHS.mkdir(parents=True, exist_ok=True)
+
+BLUE, ORANGE = "#1e417c", "#fb801b"  # ASN palette; orange highlights the very-low band
 
 LOW_LO, LOW_HI = 10.0, 15.0  # very-low-dose band (mL/kg/hr), inclusive
 
@@ -78,6 +85,24 @@ counts = pd.DataFrame(count_rows)
 counts.to_csv(OUT / f"{SITE_NAME}_low_dose_counts.csv", index=False)
 n_low = int(((dose >= LOW_LO) & (dose <= LOW_HI)).sum())
 print(f"  very-low-dose (10-15 mL/kg/hr) subcohort: n={n_low}  of {n_dose} dosed encounters")
+
+# Dose-band tally bar chart (very-low band highlighted)
+_plot = counts[counts["band"] != "Total with dose"]
+fig, ax = plt.subplots(figsize=(8, 5))
+bar_colors = [ORANGE if b == "10-15 (very low)" else BLUE for b in _plot["band"]]
+bars = ax.bar(_plot["band"], _plot["n"], color=bar_colors)
+for rect, n, pct in zip(bars, _plot["n"], _plot["pct_of_dosed"]):
+    ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(),
+            f"{int(n)}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=8)
+ax.set_xlabel("Delivered dose band (mL/kg/hr)")
+ax.set_ylabel("Encounters")
+ax.set_title(f"CRRT dose-band distribution — {SITE_NAME}\n(very-low 10–15 RCT target highlighted)")
+ax.margins(y=0.12)
+plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
+fig.tight_layout()
+fig.savefig(GRAPHS / f"{SITE_NAME}_dose_band_distribution.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"  wrote dose-band figure to {GRAPHS}")
 
 # ── Very-low vs Rest comparison ─────────────────────────────────────────────
 grp = pd.Series(np.where((dose >= LOW_LO) & (dose <= LOW_HI), "Very low (10-15)",
