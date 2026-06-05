@@ -37,6 +37,8 @@ PYTHON_STEPS=(
     "01_create_wide_df.py"
     "02_construct_crrt_tableone.py"
     "03_crrt_visualizations.py"
+    "07_crrt_descriptive_epi.py"
+    "08_low_dose_characterization.py"
     "04_build_msm_competing_risk_df.py"
 )
 
