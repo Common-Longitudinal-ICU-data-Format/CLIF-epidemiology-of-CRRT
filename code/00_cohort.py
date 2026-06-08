@@ -85,6 +85,7 @@ print(f"   Has CRRT settings: {has_crrt_settings}")
 import os
 # Create output directories if they do not exist
 os.makedirs("../output/final/crrt_epi/graphs", exist_ok=True)
+os.makedirs("../output/final/diagnostics/graphs", exist_ok=True)  # internal QC / data-completeness outputs
 os.makedirs("../output/intermediate", exist_ok=True)
 
 
@@ -448,8 +449,8 @@ for col in crrt_miss_cols:
     print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
 miss_report = pd.DataFrame(miss_data)
 Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
-miss_report.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_column_missingness.csv', index=False)
-print(f"\n✓ Saved to: output/final/crrt_epi/crrt_column_missingness.csv")
+miss_report.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_column_missingness.csv', index=False)
+print(f"\n✓ Saved to: output/final/diagnostics/{SITE_NAME}_crrt_column_missingness.csv")
 print("=" * 80)
 
 # In[16]:
@@ -620,10 +621,10 @@ if has_crrt_settings:
 
     # Save figure
     Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    plt.savefig(f'../output/final/crrt_epi/graphs/{SITE_NAME}_crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'../output/final/diagnostics/graphs/{SITE_NAME}_crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-    print("\n✓ Grid histograms saved to: output/final/crrt_parameter_histograms_grid.png")
+    print("\n✓ Grid histograms saved to: output/final/diagnostics/graphs/")
     print("=" * 80)
 
     # ============================================================================
@@ -677,8 +678,8 @@ if has_crrt_settings:
     print(summary_df[display_cols].to_string(index=False))
 
     # Save detailed summary
-    summary_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_settings_distribution_by_mode.csv', index=False)
-    print(f"\n✓ Detailed summary saved to: output/final/crrt_epi/crrt_settings_distribution_by_mode.csv")
+    summary_df.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_settings_distribution_by_mode.csv', index=False)
+    print(f"\n✓ Detailed summary saved to: output/final/diagnostics/{SITE_NAME}_crrt_settings_distribution_by_mode.csv")
 
     # Also create a simplified summary for quick reference
     simple_summary = []
@@ -707,8 +708,8 @@ if has_crrt_settings:
     print(simple_summary_df.to_string(index=False))
 
     # Save simple summary
-    simple_summary_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_crrt_settings_summary_simple.csv', index=False)
-    print(f"\n✓ Simple summary saved to: output/final/crrt_epi/crrt_settings_summary_simple.csv")
+    simple_summary_df.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_settings_summary_simple.csv', index=False)
+    print(f"\n✓ Simple summary saved to: output/final/diagnostics/{SITE_NAME}_crrt_settings_summary_simple.csv")
     print("=" * 80)
 
 
@@ -2193,7 +2194,7 @@ if has_crrt_settings:
     # Save figure
     plt.tight_layout()
     Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"../output/final/crrt_epi/graphs/{SITE_NAME}_dose_comparison.png")
+    fig.savefig(f"../output/final/diagnostics/graphs/{SITE_NAME}_dose_comparison.png")
     plt.close(fig)
 
 
@@ -2268,7 +2269,7 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    output_path = f'../output/final/crrt_epi/graphs/{SITE_NAME}_crrt_dose_comparison_by_mode.png'
+    output_path = f'../output/final/diagnostics/graphs/{SITE_NAME}_crrt_dose_comparison_by_mode.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"\n✓ Saved mode-specific comparison to: {output_path}")

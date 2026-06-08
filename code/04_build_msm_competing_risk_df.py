@@ -1013,12 +1013,10 @@ diag_missing.to_csv(diag_path, index=False)
 print(f"\nSaved patient-level missingness: {diag_path}")
 print(f"  Patients with any missing covariate: {(diag_missing['total_missing'] > 0).sum()}/{len(diag_missing)}")
 
-# --- Aggregate missingness summary (safe to share) ---
-FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
-GRAPHS_DIR = FINAL_DIR / "graphs"
-GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
+# --- Aggregate missingness summary (safe to share) — internal QC, lives under diagnostics/ ---
+DIAG_DIR = project_root / "output" / "final" / "diagnostics"
+DIAG_GRAPHS = DIAG_DIR / "graphs"
+DIAG_GRAPHS.mkdir(parents=True, exist_ok=True)
 
 n_total = len(result)
 agg_rows = []
@@ -1033,7 +1031,7 @@ for col in covariate_cols:
     })
 agg_df = pd.DataFrame(agg_rows).sort_values("pct_missing", ascending=False)
 agg_df["site_id"] = SITE
-agg_csv_path = FINAL_DIR / f"{SITE}_missingness_summary.csv"
+agg_csv_path = DIAG_DIR / f"{SITE}_missingness_summary.csv"
 agg_df.to_csv(agg_csv_path, index=False)
 print(f"Saved aggregate missingness: {agg_csv_path}")
 
@@ -1055,7 +1053,7 @@ if len(agg_any) > 0:
                 f"{pct}% (n={n})", va="center", fontsize=9)
     ax.set_xlim(0, agg_any["pct_missing"].max() * 1.4)
     plt.tight_layout()
-    heatmap_path = GRAPHS_DIR / f"{SITE}_missingness_heatmap.png"
+    heatmap_path = DIAG_GRAPHS / f"{SITE}_missingness_heatmap.png"
     fig.savefig(heatmap_path, dpi=150)
     plt.close(fig)
     print(f"Saved missingness heatmap: {heatmap_path}")
