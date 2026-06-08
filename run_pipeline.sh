@@ -67,12 +67,10 @@ else
     R_STEPS=(
         "05_PSM_IPTW_CRRT_dose.R"
         "05b_dose_response_analysis.R"
-        "06_time_varying_MSM.R"
-        "06b_time_varying_MSM_sensitivity.R"
     )
 fi
 
-echo "=== Descriptive + MSM data prep (Python) ==="
+echo "=== Descriptive + causal data prep (Python) ==="
 echo ""
 for step in "${PYTHON_STEPS[@]}"; do
     name=$(basename "$step" .py)
@@ -136,8 +134,6 @@ if [ ${#R_FAILED[@]} -gt 0 ]; then
     echo "  Required R scripts and their outputs:"
     echo "    05_PSM_IPTW_CRRT_dose.R        -> output/final/psm_iptw/"
     echo "    05b_dose_response_analysis.R    -> output/final/psm_iptw/ (dose-response)"
-    echo "    06_time_varying_MSM.R           -> output/final/time_varying/ (primary 12h)"
-    echo "    06b_time_varying_MSM_sensitivity.R -> output/final/time_varying_sensitivity/ (24h)"
     echo ""
     echo "  Check the log for error details: $LOG_FILE"
 fi

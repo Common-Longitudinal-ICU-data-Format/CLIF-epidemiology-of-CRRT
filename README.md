@@ -186,15 +186,7 @@ Also generates a target trial emulation specification table and a 24h exclusion 
 
 **Outputs:** `output/final/psm_iptw/` — dose-response plots, combined 3-panel figure, GPS balance diagnostics, target trial CSV, dose decile CSV
 
-#### Step 06: Time-Varying MSM (`06_time_varying_MSM.R`)
-Time-varying marginal structural model for CRRT dose using 12h intervals. Models dose trajectories as treatment strategies with inverse-probability-of-treatment weighting.
-
-**Outputs:** `output/final/msm/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics, Table 1/S1 CSVs, CIF data CSV
-
-#### Step 06b: MSM Sensitivity (`06b_time_varying_MSM_sensitivity.R`)
-Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >=48h, CRRT >=48h, has dialysate in 0-48h window).
-
-**Outputs:** `output/final/msm/time_varying_sensitivity/` — same structure as primary MSM
+> **Archived:** the time-varying marginal structural models (`06_time_varying_MSM.R` / `06b_time_varying_MSM_sensitivity.R`) and the NCT06021288 trial-emulation script (`05c_low_dose_emulation.R`) were cut from the manuscript and moved to `archive/code/`. They are recoverable via the `msm-v1` / `low-dose-emulation-v1` git tags but are no longer part of the pipeline.
 
 ## Output Structure
 
