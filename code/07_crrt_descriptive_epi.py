@@ -93,6 +93,7 @@ def build_incidence() -> pd.DataFrame:
         data_directory=TABLES_PATH,
         filetype=config["file_type"],
         timezone=config["timezone"],
+        output_directory="../output",  # else clifpy logs to <cwd>/output (= code/output)
     )
 
     # Core tables, full population

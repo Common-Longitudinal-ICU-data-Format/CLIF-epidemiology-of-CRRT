@@ -215,7 +215,8 @@ from clifpy.clif_orchestrator import ClifOrchestrator
 clif = ClifOrchestrator(
     data_directory=config['tables_path'],
     filetype=config['file_type'],
-    timezone=config['timezone']
+    timezone=config['timezone'],
+    output_directory="../output"  # else clifpy logs to <cwd>/output (= code/output)
 )
 
 
