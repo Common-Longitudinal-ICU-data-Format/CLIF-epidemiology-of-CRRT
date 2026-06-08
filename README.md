@@ -149,10 +149,10 @@ Generates Table 1 with demographics, SOFA scores, labs, vasopressors, respirator
 - `output/final/crrt_epi/{site}_table1_crrt.html`
 - `output/final/crrt_epi/{site}_table1_crrt_long.csv`
 
-#### Step 03: Visualizations (`03_crrt_visualizations.py`)
-Generates clinical trajectory figures for the first 7 days post-CRRT: dose over time, lab distributions, MAP, respiratory support, and patient state (stacked area plot).
+#### Step 03: CRRT Epidemiology (`03_crrt_epidemiology.py`)
+Comprehensive per-site descriptive epidemiology (consolidates the former descriptive script with the legacy visualizations): (A) CRRT incidence/utilization by ICU population, (B) practice variation + Tier-A quality, (C) distribution figures (incidence, delivered dose, net-UF Murugan groups, mortality-vs-UF), and (D) 30-day longitudinal trajectories with 3-day insets (delivered dose, labs, vasopressor/NEE, patient state). MAP and respiratory (FiO2/IMV) trajectories were cut.
 
-**Outputs:** `output/final/crrt_epi/graphs/{site}_*.png` (figures) + `{site}_*.csv` (aggregate data)
+**Outputs:** `output/final/crrt_epi/{site}_crrt_incidence.csv`, `{site}_crrt_practice_quality.csv`, and `output/final/crrt_epi/graphs/{site}_*.png` (+ aggregate `*.csv`)
 
 ### Causal Inference (Steps 04-06b)
 

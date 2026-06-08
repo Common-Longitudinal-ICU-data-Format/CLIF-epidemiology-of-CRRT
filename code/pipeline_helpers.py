@@ -36,7 +36,7 @@ _PRODUCERS = {
 
 _PIPELINE_ORDER = (
     "00_cohort.py -> 01_create_wide_df.py -> 02_construct_crrt_tableone.py "
-    "-> 03_crrt_visualizations.py -> 04_build_msm_competing_risk_df.py"
+    "-> 03_crrt_epidemiology.py -> 04_build_msm_competing_risk_df.py"
 )
 
 _VALID_FILE_TYPES = {"parquet", "csv", "fst"}

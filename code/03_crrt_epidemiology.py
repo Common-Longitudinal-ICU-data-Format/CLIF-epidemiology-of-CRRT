@@ -1,13 +1,14 @@
 """
-07_crrt_descriptive_epi.py — CRRT descriptive epidemiology + practice variation.
+03_crrt_epidemiology.py — comprehensive CRRT descriptive epidemiology.
 
-Per-site descriptive companion to the dose causal analysis (04-06b). Produces the
-"epidemiology of CRRT across the consortium" worked example for the reframed,
-Rojas-style manuscript (value of CLIF to ICU nephrologists). Emits AGGREGATE
-per-site CSVs only — no patient-level data leaves the site. Multi-site pooling
-and rendering happen in 09 (dashboard) / 10 (manuscript).
+Per-site descriptive epidemiology for the Rojas-style manuscript (value of CLIF
+to ICU nephrologists). Consolidates the former 07 (incidence + practice/quality
++ distribution figures) with the reworked longitudinal trajectories from the
+former 03_crrt_visualizations.py. Emits AGGREGATE per-site CSVs/figures only —
+no patient-level data leaves the site. Multi-site pooling and rendering happen
+in 09 (dashboard) / 10 (manuscript).
 
-Two independent products:
+Products:
 
   A. CRRT INCIDENCE / UTILIZATION (hospitalization level)
      Denominator = adult ICU hospitalizations (age>=18, admission-year filter,
@@ -23,13 +24,21 @@ Two independent products:
      blood flow, time-to-initiation, acid-base correction, duration, mortality.
         -> output/final/crrt_epi/{SITE}_crrt_practice_quality.csv  (long format)
 
+  C. DISTRIBUTION FIGURES (analytic cohort): incidence by context / ICU subtype,
+     delivered-dose distribution, net-UF distribution (Murugan groups), and crude
+     30-day mortality vs net UF.
+
+  D. LONGITUDINAL TRAJECTORIES over 30 days (3-day inset): delivered dose, lab
+     trajectories, vasopressor (NEE), and patient state (On IMV / Off IMV /
+     Discharged / Dead). MAP and respiratory (FiO2/IMV) trajectories were cut.
+
 Quality-metric scope is Tier A (computable from data the pipeline already loads).
 Anticoagulation, delivered:prescribed ratio, downtime, and filter life are NOT in
 CLIF and are out of scope. RRT-dependence-at-discharge / renal recovery are
 deferred (need discharge-time RRT/creatinine not in the analytic frame).
 
 Run standalone (from repo root):
-    uv run python code/07_crrt_descriptive_epi.py
+    uv run python code/03_crrt_epidemiology.py
 """
 from __future__ import annotations
 
@@ -82,7 +91,7 @@ VASO_CATEGORIES = [
 ]
 
 t_start = time.time()
-print(f"=== 07 CRRT descriptive epidemiology — {SITE_NAME} ===")
+print(f"=== 03 CRRT epidemiology — {SITE_NAME} ===")
 
 
 # ── Part A: adult-ICU denominator (hospitalization level) ───────────────────
@@ -415,6 +424,260 @@ def build_figures(inc_df: pd.DataFrame) -> None:
             plt.close(fig)
 
 
+# ── Part D: longitudinal trajectories over the CRRT course ──────────────────
+# Reworked from the legacy 03_crrt_visualizations.py. Each trajectory is shown
+# over 30 days (720 h) with a 3-day (72 h) inset zoom, since most change is
+# early. MAP and respiratory (FiO2/IMV) trajectories were cut. Shared ASN palette.
+import pyarrow.parquet as _pq
+
+MAX_HOURS_TRAJ = 720   # 30 days
+INSET_HOURS = 72       # 3-day zoom
+BIN_H = 12             # 12-hour bins for labs / vasopressor
+GREY = "#555555"
+
+
+def _crrt_dose_per_row(df: pd.DataFrame) -> np.ndarray:
+    """Mode-specific total CRRT flow / weight -> dose (mL/kg/hr). Mirrors the
+    formula in 00_cohort.py (kept the single shared definition for trajectories)."""
+    mode = df["crrt_mode_category"]
+    dia = pd.to_numeric(df.get("crrt_dialysate_flow_rate"), errors="coerce")
+    pre = pd.to_numeric(df.get("crrt_pre_filter_replacement_fluid_rate"), errors="coerce")
+    post = pd.to_numeric(df.get("crrt_post_filter_replacement_fluid_rate"), errors="coerce")
+    total = np.select(
+        [mode == "cvvhd", mode == "cvvh", mode == "cvvhdf"],
+        [dia, pre.fillna(0) + post.fillna(0), dia.fillna(0) + pre.fillna(0) + post.fillna(0)],
+        default=np.nan,
+    )
+    wt = pd.to_numeric(df["weight_kg"], errors="coerce")
+    return np.where((wt > 0) & (total > 0), total / wt, np.nan)
+
+
+def _load_traj_wide() -> pd.DataFrame:
+    """wide_df (needed columns only) joined to encounter_block + crrt_initiation
+    time + weight, with hours_from_crrt computed."""
+    crrt_init = pd.read_parquet(INTER / "crrt_initiation.parquet")
+    idx = pd.read_parquet(INTER / "index_crrt_df.parquet")
+    cohort = pd.read_parquet(INTER / "cohort_df.parquet",
+                             columns=["hospitalization_id", "encounter_block"])
+    crrt_cols = (["crrt_dialysate_flow_rate", "crrt_pre_filter_replacement_fluid_rate",
+                  "crrt_post_filter_replacement_fluid_rate", "crrt_mode_category"]
+                 if HAS_CRRT_SETTINGS else [])
+    lab_cols = ["lab_lactate", "lab_ph_arterial", "lab_bicarbonate", "lab_potassium", "lab_phosphate"]
+    other = ["med_cont_nee", "resp_device_category"]  # resp_device_category drives patient-state IMV
+    avail = {f.name for f in _pq.read_schema(INTER / "wide_df.parquet")}
+    need = ["hospitalization_id", "event_dttm"] + [c for c in crrt_cols + lab_cols + other if c in avail]
+    w = pd.read_parquet(INTER / "wide_df.parquet", columns=need)
+    w = w.merge(cohort, on="hospitalization_id", how="inner")
+    w = w.merge(crrt_init[["encounter_block", "crrt_initiation_time"]], on="encounter_block", how="inner")
+    w = w.merge(idx[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block"),
+                on="encounter_block", how="left")
+    w["hours_from_crrt"] = (w["event_dttm"] - w["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+    return w
+
+
+def _median_iqr_by_bin(df: pd.DataFrame, col: str, bin_h: int = BIN_H,
+                       max_h: int = MAX_HOURS_TRAJ) -> pd.DataFrame:
+    d = df[(df["hours_from_crrt"] >= 0) & (df["hours_from_crrt"] <= max_h)].copy()
+    d["_v"] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna(subset=["_v"])
+    if d.empty:
+        return pd.DataFrame(columns=["hour", "median", "q25", "q75", "n", "site"])
+    d["hour"] = (d["hours_from_crrt"] // bin_h).astype(int) * bin_h + bin_h / 2.0
+    g = (d.groupby("hour")["_v"]
+         .agg(median="median", q25=lambda x: x.quantile(0.25),
+              q75=lambda x: x.quantile(0.75), n="count")
+         .reset_index())
+    g["site"] = SITE_NAME
+    return g
+
+
+def _draw_traj(ax, g, color, band=None, hline=None):
+    if band is not None:
+        ax.axhspan(band[0], band[1], color=GREEN, alpha=0.18)
+    if hline is not None:
+        ax.axhline(hline, color=GREY, ls="--", lw=0.8, alpha=0.6)
+    ax.plot(g["hour"], g["median"], color=color, lw=1.6, marker="o", ms=2.5, zorder=3)
+    ax.fill_between(g["hour"], g["q25"], g["q75"], color=color, alpha=0.18, zorder=2)
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _traj_axis(ax, g, ylabel, color, band=None, hline=None):
+    """Draw a 30-day trajectory on ax with a 3-day inset."""
+    _draw_traj(ax, g, color, band=band, hline=hline)
+    ax.set_xlim(0, MAX_HOURS_TRAJ)
+    ax.set_xlabel("Hours from CRRT initiation")
+    ax.set_ylabel(ylabel)
+    ins = g[g["hour"] <= INSET_HOURS]
+    if len(ins) >= 2:
+        axins = ax.inset_axes([0.55, 0.58, 0.42, 0.38])
+        _draw_traj(axins, ins, color, band=band, hline=hline)
+        axins.set_xlim(0, INSET_HOURS)
+        axins.set_title("First 3 days", fontsize=8)
+        axins.tick_params(labelsize=7)
+
+
+def build_trajectories(w: pd.DataFrame) -> None:
+    # (D1) CRRT delivered dose over time
+    if HAS_CRRT_SETTINGS and "crrt_mode_category" in w.columns:
+        dr = w[(w["hours_from_crrt"] >= 0) & (w["crrt_mode_category"].notna())].copy()
+        dr["dose"] = _crrt_dose_per_row(dr)
+        g = _median_iqr_by_bin(dr, "dose", bin_h=6)
+        if not g.empty:
+            g.to_csv(GRAPHS / f"{SITE_NAME}_crrt_dose_hourly.csv", index=False)
+            fig, ax = plt.subplots(figsize=(10, 5))
+            _traj_axis(ax, g, "CRRT dose (mL/kg/hr)", BLUE, band=(20, 30))
+            ax.set_title(f"CRRT delivered dose over 30 days (KDIGO 20–30 band) — {SITE_NAME}")
+            fig.tight_layout()
+            fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_dose_over_time.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+    # (D2) Lab trajectories (5-panel grid; each panel 30 d + 3 d inset)
+    lab_info = [
+        ("lab_lactate", "Lactate (mmol/L)"),
+        ("lab_ph_arterial", "Arterial pH"),
+        ("lab_bicarbonate", "Bicarbonate (mEq/L)"),
+        ("lab_potassium", "Potassium (mEq/L)"),
+        ("lab_phosphate", "Phosphate (mg/dL)"),
+    ]
+    present = [(c, lbl) for c, lbl in lab_info if c in w.columns]
+    if present:
+        all_lab = []
+        fig, axes = plt.subplots(3, 2, figsize=(14, 13))
+        axes = axes.flatten()
+        for i, (col, lbl) in enumerate(present):
+            g = _median_iqr_by_bin(w, col)
+            if g.empty:
+                axes[i].set_visible(False)
+                continue
+            all_lab.append(g.assign(lab=col))
+            _traj_axis(axes[i], g, lbl, GREEN)
+            axes[i].set_title(lbl)
+        for j in range(len(present), len(axes)):
+            axes[j].set_visible(False)
+        if all_lab:
+            pd.concat(all_lab, ignore_index=True).to_csv(
+                GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.csv", index=False)
+        fig.suptitle(f"Lab trajectories over 30 days post-CRRT — {SITE_NAME}", fontsize=14, y=1.0)
+        fig.tight_layout()
+        fig.savefig(GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # (D3) Vasopressor (norepinephrine-equivalent) trajectory
+    if "med_cont_nee" in w.columns:
+        g = _median_iqr_by_bin(w, "med_cont_nee")
+        if not g.empty:
+            g.to_csv(GRAPHS / f"{SITE_NAME}_nee_over_crrt.csv", index=False)
+            fig, ax = plt.subplots(figsize=(10, 5))
+            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE)
+            ax.set_title(f"Vasopressor (norepinephrine-equivalent) over 30 days — {SITE_NAME}")
+            fig.tight_layout()
+            fig.savefig(GRAPHS / f"{SITE_NAME}_nee_over_crrt.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+
+def build_patient_course(w: pd.DataFrame) -> None:
+    """(D4) Patient state over the CRRT course (On IMV / Off IMV / Discharged
+    alive / Dead) as a stacked area over 30 days, + a time-to-event CSV. Ported
+    from legacy 03; the outcome-trajectory companion to the practice/quality
+    duration & mortality summaries (Part B)."""
+    import matplotlib.colors as mcolors
+    MAXH = MAX_HOURS_TRAJ
+    crrt_init = pd.read_parquet(INTER / "crrt_initiation.parquet")
+    oc = pd.read_parquet(INTER / "outcomes_df.parquet")
+    cols = ["encounter_block", "in_hosp_death", "died", "death_dttm", "last_vital_dttm"]
+    if "discharge_dttm" in oc.columns:
+        cols.append("discharge_dttm")
+    ot = oc[cols].merge(crrt_init[["encounter_block", "crrt_initiation_time"]],
+                        on="encounter_block", how="inner")
+    ot["hours_to_death"] = np.where(
+        ot["died"] == 1,
+        (ot["death_dttm"].fillna(ot["last_vital_dttm"]) - ot["crrt_initiation_time"]).dt.total_seconds() / 3600,
+        np.nan)
+    disc_col = "discharge_dttm" if "discharge_dttm" in ot.columns else "last_vital_dttm"
+    ot["hours_to_discharge"] = np.where(
+        ot["died"] == 0,
+        (ot[disc_col] - ot["crrt_initiation_time"]).dt.total_seconds() / 3600,
+        np.nan)
+
+    # Hourly IMV status (last value per encounter per hour)
+    if "resp_device_category" in w.columns:
+        rr = w[w["resp_device_category"].notna()
+               & (w["hours_from_crrt"] >= 0) & (w["hours_from_crrt"] <= MAXH)].copy()
+        rr["hour"] = rr["hours_from_crrt"].astype(int)
+        rr["is_imv"] = (rr["resp_device_category"].astype("string").str.lower() == "imv").astype(int)
+        hourly_imv = (rr.sort_values(["encounter_block", "hours_from_crrt"])
+                      .groupby(["encounter_block", "hour"])["is_imv"].last())
+    else:
+        hourly_imv = pd.Series(dtype=int)
+
+    all_patients = crrt_init["encounter_block"].unique()
+    n_pat = len(all_patients)
+    dead_ebs = ot.loc[ot["hours_to_death"].notna(), ["encounter_block", "hours_to_death"]]
+    disc_ebs = ot.loc[ot["hours_to_discharge"].notna(), ["encounter_block", "hours_to_discharge"]]
+
+    rows = []
+    for h in range(0, MAXH + 1):
+        dead_by = set(dead_ebs.loc[dead_ebs["hours_to_death"] <= h, "encounter_block"])
+        disc_by = set(disc_ebs.loc[disc_ebs["hours_to_discharge"] <= h, "encounter_block"])
+        imv_at = (hourly_imv.xs(h, level="hour") if (len(hourly_imv) and h in hourly_imv.index.get_level_values("hour"))
+                  else pd.Series(dtype=int))
+        n_dead = n_disc = n_imv = n_off = 0
+        for eb in all_patients:
+            if eb in dead_by:
+                n_dead += 1
+            elif eb in disc_by:
+                n_disc += 1
+            elif eb in imv_at.index:
+                if imv_at.loc[eb] == 1:
+                    n_imv += 1
+                else:
+                    n_off += 1
+            else:
+                n_off += 1
+        rows.append({"hour": h, "n_total": n_pat, "n_dead": n_dead,
+                     "n_discharged": n_disc, "n_imv": n_imv, "n_off_imv": n_off})
+    sdf = pd.DataFrame(rows)
+    for k in ["imv", "off_imv", "discharged", "dead"]:
+        sdf[f"prop_{k}"] = sdf[f"n_{k}"] / sdf["n_total"] * 100
+    sdf["site"] = SITE_NAME
+    sdf.to_csv(GRAPHS / f"{SITE_NAME}_patient_state_over_crrt.csv", index=False)
+
+    colors = {
+        "On IMV": mcolors.to_rgba(ORANGE, 0.75),
+        "Off IMV": mcolors.to_rgba("#9ecae1", 0.85),
+        "Discharged alive": mcolors.to_rgba(GREEN, 0.60),
+        "Dead": mcolors.to_rgba("#9e9e9e", 0.75),
+    }
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.stackplot(sdf["hour"], sdf["prop_imv"], sdf["prop_off_imv"],
+                 sdf["prop_discharged"], sdf["prop_dead"],
+                 labels=list(colors), colors=list(colors.values()))
+    ax.set_xlim(0, MAXH); ax.set_ylim(0, 100)
+    ax.set_xlabel("Hours from CRRT initiation"); ax.set_ylabel("Proportion of patients (%)")
+    ax.set_title(f"Patient state over 30 days post-CRRT — {SITE_NAME}")
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=9)
+    fig.tight_layout()
+    fig.savefig(GRAPHS / f"{SITE_NAME}_patient_state_over_crrt.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Time-to-event medians (companion to Part B duration & mortality)
+    ttd = ot.loc[ot["hours_to_death"].notna() & (ot["hours_to_death"] > 0), "hours_to_death"]
+    ttc = ot.loc[ot["hours_to_discharge"].notna() & (ot["hours_to_discharge"] > 0), "hours_to_discharge"]
+
+    def _tte(name, s, unit="hours"):
+        return {"metric": name, "n": int(s.count()),
+                "median": round(s.median(), 1) if len(s) else np.nan,
+                "q25": round(s.quantile(0.25), 1) if len(s) else np.nan,
+                "q75": round(s.quantile(0.75), 1) if len(s) else np.nan,
+                "unit": unit, "site": SITE_NAME}
+    pd.DataFrame([
+        _tte("Time to death from CRRT", ttd),
+        _tte("Time to discharge alive from CRRT", ttc),
+        _tte("Time to death (days)", ttd / 24, "days"),
+        _tte("Time to discharge alive (days)", ttc / 24, "days"),
+    ]).to_csv(GRAPHS / f"{SITE_NAME}_crrt_course_time_to_event.csv", index=False)
+
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 print("\n[A] CRRT incidence / utilization ...")
 inc = build_incidence()
@@ -428,8 +691,14 @@ pq_path = OUT / f"{SITE_NAME}_crrt_practice_quality.csv"
 pq.to_csv(pq_path, index=False)
 print(f"  wrote {pq_path}  ({len(pq)} metric rows)")
 
-print("\n[C] Figures ...")
+print("\n[C] Distribution figures ...")
 build_figures(inc)
 print(f"  wrote figures to {GRAPHS}")
 
-print(f"\n=== 07 complete in {time.time() - t_start:.1f}s ===")
+print("\n[D] Longitudinal trajectories (30 d, 3 d inset) ...")
+_traj_w = _load_traj_wide()
+build_trajectories(_traj_w)
+build_patient_course(_traj_w)
+print(f"  wrote trajectory figures to {GRAPHS}")
+
+print(f"\n=== 03 CRRT epidemiology complete in {time.time() - t_start:.1f}s ===")
