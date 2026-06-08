@@ -36,6 +36,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Shared manuscript visual language (matches 07/09/10): Arial sans-serif + size.
+matplotlib.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": 13,
+})
+
 from pipeline_helpers import validate_config
 
 warnings.filterwarnings("ignore")

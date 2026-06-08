@@ -44,6 +44,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Shared manuscript visual language (matches 09/10): Arial sans-serif + size.
+matplotlib.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": 13,
+})
+
 from pipeline_helpers import validate_config, safe_load_clif_table
 
 warnings.filterwarnings("ignore")
@@ -264,41 +271,71 @@ def build_practice_quality() -> pd.DataFrame:
 
 
 # ── Part C: per-site figures (output/final/crrt_epi/graphs/) ────────────────
+def _pretty_icu(stratum: str) -> str:
+    """ICU subtype stratum label -> human-readable (medical_icu -> Medical ICU)."""
+    s = stratum.replace("ICU subtype: ", "").replace("_", " ").strip().title()
+    return s.replace("Icu", "ICU")
+
+
+def _barh_incidence(d: pd.DataFrame, title: str, fname: str, prettify: bool) -> None:
+    """Horizontal incidence bars with %, n/N labels. One homogeneous color per
+    figure (color no longer encodes a grouping the reader cannot infer)."""
+    if d.empty:
+        return
+    d = d.sort_values("incidence_pct")
+    labels = [_pretty_icu(s) for s in d["stratum"]] if prettify else list(d["stratum"])
+    xmax = float(d["incidence_pct"].max()) if len(d) else 1.0
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(labels, d["incidence_pct"], color=BLUE)
+    for y, (v, n, N) in enumerate(zip(d["incidence_pct"], d["n_crrt"], d["n_denominator"])):
+        ax.text(v + xmax * 0.01, y, f"{v:.1f}% ({int(n):,}/{int(N):,})",
+                va="center", fontsize=9)
+    ax.set_xlabel("CRRT incidence (%)")
+    ax.set_title(title)
+    ax.margins(x=0.18)
+    fig.tight_layout()
+    fig.savefig(GRAPHS / fname, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def build_figures(inc_df: pd.DataFrame) -> None:
     idx = pd.read_parquet(INTER / "index_crrt_df.parquet")
     t1 = pd.read_parquet(INTER / "tableone_analysis_df.parquet")
 
-    # (1) CRRT incidence by population — horizontal bars (co-indications highlighted)
-    d = inc_df.copy()
-    d["label"] = d["stratum"].str.replace("ICU subtype: ", "", regex=False)
-    main = {"Overall (adult ICU)", "On invasive ventilation", "On vasopressors"}
-    d = d.sort_values("incidence_pct")
-    colors = [ORANGE if s in main else BLUE for s in d["stratum"]]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.barh(d["label"], d["incidence_pct"], color=colors)
-    for y, (v, n, N) in enumerate(zip(d["incidence_pct"], d["n_crrt"], d["n_denominator"])):
-        ax.text(v + max(d["incidence_pct"]) * 0.01, y, f"{v:.1f}% ({int(n):,}/{int(N):,})",
-                va="center", fontsize=8)
-    ax.set_xlabel("CRRT incidence (%)")
-    ax.set_title(f"CRRT incidence by ICU population — {SITE_NAME}")
-    ax.margins(x=0.18)
-    fig.tight_layout()
-    fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_incidence.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    # (1) CRRT incidence — split into two figures so a single homogeneous color
+    #     suffices in each (the prior single figure used orange/navy to encode a
+    #     grouping the reader could not infer):
+    #       (1a) by clinical context: overall + co-indications (IMV, vasopressors)
+    #       (1b) by ICU subtype: one bar per location_type (labels prettified)
+    context = {"Overall (adult ICU)", "On invasive ventilation", "On vasopressors"}
+    ctx = inc_df[inc_df["stratum"].isin(context)].copy()
+    _barh_incidence(ctx, f"CRRT incidence by clinical context — {SITE_NAME}",
+                    f"{SITE_NAME}_crrt_incidence_by_context.png", prettify=False)
+    sub = inc_df[inc_df["stratum"].str.startswith("ICU subtype: ")].copy()
+    _barh_incidence(sub, f"CRRT incidence by ICU subtype — {SITE_NAME}",
+                    f"{SITE_NAME}_crrt_incidence_by_icu_subtype.png", prettify=True)
 
     if not HAS_CRRT_SETTINGS:
         return
 
-    # (2) Delivered-dose distribution with very-low / KDIGO bands
-    dose = pd.to_numeric(t1["crrt_dose_ml_kg_hr"], errors="coerce").dropna()
-    dose = dose[dose.between(0, 80)]
-    if len(dose):
+    # (2) Delivered-dose distribution. KDIGO band liberalized to 20-30 mL/kg/hr to
+    #     account for the delivered-vs-prescribed dose gap (a prescribed 20-25
+    #     target commonly delivers ~25-30). Median computed on the FULL vector;
+    #     the [0, 80] clip governs display only (decouple statistic from display).
+    dose_all = pd.to_numeric(t1["crrt_dose_ml_kg_hr"], errors="coerce").dropna()
+    if len(dose_all):
+        med = dose_all.median()
+        pct_vlow = 100 * dose_all.between(10, 15).sum() / len(dose_all)
+        pct_kdigo = 100 * dose_all.between(20, 30).sum() / len(dose_all)
+        dose_disp = dose_all[dose_all.between(0, 80)]
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.hist(dose, bins=40, color=BLUE, alpha=0.85)
-        ax.axvspan(10, 15, color=ORANGE, alpha=0.30, label="Very low (10–15)")
-        ax.axvspan(20, 25, color=GREEN, alpha=0.30, label="KDIGO (20–25)")
-        ax.axvline(dose.median(), color="black", linestyle="--", linewidth=1.2,
-                   label=f"Median {dose.median():.1f}")
+        ax.hist(dose_disp, bins=40, color=BLUE, alpha=0.85)
+        ax.axvspan(10, 15, color=ORANGE, alpha=0.30,
+                   label=f"Very low (10–15): {pct_vlow:.1f}%")
+        ax.axvspan(20, 30, color=GREEN, alpha=0.30,
+                   label=f"KDIGO (20–30): {pct_kdigo:.1f}%")
+        ax.axvline(med, color="black", linestyle="--", linewidth=1.2,
+                   label=f"Median {med:.1f}")
         ax.set_xlabel("Delivered dose (mL/kg/hr)")
         ax.set_ylabel("Encounters")
         ax.set_title(f"CRRT delivered-dose distribution — {SITE_NAME}")
@@ -307,24 +344,74 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-    # (3) Net ultrafiltration rate with Murugan band
+    # Per-encounter net UF rate (mL/kg/hr), shared by figures (3) and (4).
     w = idx[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
-    m = t1[["encounter_block", "ultrafiltration_out"]].merge(w, on="encounter_block", how="left")
-    uf = pd.to_numeric(m["ultrafiltration_out"], errors="coerce") / pd.to_numeric(m["weight_kg"], errors="coerce")
-    uf = uf[uf.between(0, 6)].dropna()
+    m = t1[["encounter_block", "ultrafiltration_out", "death_30d"]].merge(
+        w, on="encounter_block", how="left")
+    uf_rate = (pd.to_numeric(m["ultrafiltration_out"], errors="coerce")
+               / pd.to_numeric(m["weight_kg"], errors="coerce"))
+
+    # (3) Net ultrafiltration-rate distribution with the three Murugan 2019 groups
+    #     (low <1.01, middle 1.01-1.75, high >1.75) and the % of patients in each.
+    uf = uf_rate[uf_rate.between(0, 6)].dropna()
     if len(uf):
+        n = len(uf)
+        pct_low = 100 * (uf < 1.01).sum() / n
+        pct_mid = 100 * uf.between(1.01, 1.75).sum() / n
+        pct_high = 100 * (uf > 1.75).sum() / n
+        pct_zero = 100 * (uf == 0).sum() / n
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.hist(uf, bins=40, color=BLUE, alpha=0.85)
-        ax.axvspan(1.0, 1.75, color=GREEN, alpha=0.30, label="Murugan 1.0–1.75")
+        ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.30, label="Middle (1.01–1.75)")
+        ax.axvline(1.01, color="#555555", linestyle=":", linewidth=1.0)
+        ax.axvline(1.75, color="#555555", linestyle=":", linewidth=1.0)
         ax.axvline(uf.median(), color="black", linestyle="--", linewidth=1.2,
                    label=f"Median {uf.median():.2f}")
         ax.set_xlabel("Net ultrafiltration rate (mL/kg/hr)")
         ax.set_ylabel("Encounters")
         ax.set_title(f"Net ultrafiltration-rate distribution — {SITE_NAME}")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=9, loc="center right")
+        txt = (f"Murugan 2019 groups\n"
+               f"Low (<1.01): {pct_low:.1f}%\n"
+               f"   of which UF=0: {pct_zero:.1f}%\n"
+               f"Middle (1.01–1.75): {pct_mid:.1f}%\n"
+               f"High (>1.75): {pct_high:.1f}%")
+        ax.text(0.97, 0.97, txt, transform=ax.transAxes, ha="right", va="top",
+                fontsize=9, bbox=dict(boxstyle="round", facecolor="white",
+                                      alpha=0.85, edgecolor="#cccccc"))
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_distribution.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+
+    # (4) Crude 30-day mortality vs net UF rate (Murugan 2019 Fig e2 style; binned,
+    #     marker size ∝ n). Descriptive only — shows the nonlinear (J-shaped)
+    #     association; deliberately NOT the Gray time-varying-coefficient survival
+    #     model used in that paper (beyond scope here).
+    mm = pd.DataFrame({"uf": uf_rate,
+                       "death": pd.to_numeric(m["death_30d"], errors="coerce")})
+    mm = mm[mm["uf"].between(0, 4)].dropna()
+    if len(mm) >= 50:
+        edges = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 4.0]
+        mm["bin"] = pd.cut(mm["uf"], bins=edges, include_lowest=True)
+        g = mm.groupby("bin", observed=True)["death"].agg(["mean", "size"])
+        g = g[g["size"] >= 15]
+        if len(g) >= 3:
+            x = [iv.mid for iv in g.index]
+            y = (g["mean"] * 100).to_numpy()
+            smax = float(g["size"].max())
+            sizes = (30 + 200 * g["size"] / smax).to_numpy()
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan middle (1.01–1.75)")
+            ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
+            ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
+                       label="Crude 30-day mortality (marker size scaled to n)")
+            ax.set_xlabel("Net ultrafiltration rate (mL/kg/hr)")
+            ax.set_ylabel("Crude 30-day mortality (%)")
+            ax.set_title(f"30-day mortality vs net ultrafiltration rate — {SITE_NAME}")
+            ax.legend(fontsize=9)
+            fig.tight_layout()
+            fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────
