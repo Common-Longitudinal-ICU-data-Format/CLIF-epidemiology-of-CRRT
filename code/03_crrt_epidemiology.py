@@ -34,8 +34,11 @@ Products:
      respiratory (FiO2/IMV) trajectories were cut.
 
 NOTE (t=0 / limitation): t=0 is each encounter's CRRT initiation time. ~2% of
-encounters have a recorded death at or before t=0 (death_dttm <= crrt start),
-so they appear "Dead" at day 0 in the patient-state figure.
+encounters have a recorded death at or before t=0 (death_dttm <= crrt start) --
+a death/CRRT-start timestamp ordering artifact -- so they appear "Dead" at day 0
+in BOTH state-over-time figures (patient-state and CRRT-state), which therefore
+start near 98% rather than 100%. Left as-is to show the data faithfully; flag in
+the manuscript Limitations.
 
 Quality-metric scope is Tier A (computable from data the pipeline already loads).
 Anticoagulation, delivered:prescribed ratio, downtime, and filter life are NOT in
