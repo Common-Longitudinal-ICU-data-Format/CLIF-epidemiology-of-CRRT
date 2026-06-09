@@ -307,7 +307,8 @@ def _barh_incidence(d: pd.DataFrame, title: str, fname: str, prettify: bool) -> 
                 va="center", fontsize=9)
     ax.set_xlabel("CRRT incidence (%)")
     ax.set_title(title)
-    ax.margins(x=0.18)
+    # Headroom so the "% (n/N)" labels never collide with the right spine.
+    ax.set_xlim(0, xmax * 1.42)
     fig.tight_layout()
     fig.savefig(GRAPHS / fname, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -333,10 +334,9 @@ def build_figures(inc_df: pd.DataFrame) -> None:
     if not HAS_CRRT_SETTINGS:
         return
 
-    # (2) Delivered-dose distribution. KDIGO band liberalized to 20-30 mL/kg/hr to
-    #     account for the delivered-vs-prescribed dose gap (a prescribed 20-25
-    #     target commonly delivers ~25-30). Median computed on the FULL vector;
-    #     the [0, 80] clip governs display only (decouple statistic from display).
+    # (2) Initial CRRT dose distribution (initial dose = median of the first 3 h).
+    #     The 20-30 band spans prescribed targets achieving KDIGO 20-25 delivered.
+    #     Median computed on the FULL vector; the [0, 80] clip governs display only.
     dose_all = pd.to_numeric(t1["crrt_dose_ml_kg_hr"], errors="coerce").dropna()
     if len(dose_all):
         med = dose_all.median()
@@ -344,16 +344,17 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         pct_kdigo = 100 * dose_all.between(20, 30).sum() / len(dose_all)
         dose_disp = dose_all[dose_all.between(0, 80)]
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.hist(dose_disp, bins=40, color=BLUE, alpha=0.85)
+        ax.hist(dose_disp, bins=40, color=BLUE, alpha=0.85,
+                edgecolor="black", linewidth=0.5)
         ax.axvspan(10, 15, color=ORANGE, alpha=0.30,
-                   label=f"Very low (10–15): {pct_vlow:.1f}%")
+                   label=f"Very Low (10–15 mL/kg/hr): {pct_vlow:.1f}%")
         ax.axvspan(20, 30, color=GREEN, alpha=0.30,
-                   label=f"KDIGO (20–30): {pct_kdigo:.1f}%")
+                   label=f"KDIGO Recommendation (20–30 mL/kg/hr): {pct_kdigo:.1f}%")
         ax.axvline(med, color="black", linestyle="--", linewidth=1.2,
-                   label=f"Median {med:.1f}")
-        ax.set_xlabel("CRRT Dose (mL/kg/hr)")
+                   label=f"Median {med:.1f} mL/kg/hr")
+        ax.set_xlabel("Initial CRRT Dose (mL/kg/hr)")
         ax.set_ylabel("Encounters")
-        ax.set_title(f"CRRT Dose Distribution: {SITE_NAME}")
+        ax.set_title(f"Initial CRRT Dose Distribution (Median First 3 h): {SITE_NAME}")
         ax.legend(fontsize=9)
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
@@ -366,8 +367,9 @@ def build_figures(inc_df: pd.DataFrame) -> None:
     uf_rate = (pd.to_numeric(m["ultrafiltration_out"], errors="coerce")
                / pd.to_numeric(m["weight_kg"], errors="coerce"))
 
-    # (3) Net ultrafiltration-rate distribution with the three Murugan 2019 groups
-    #     (low <1.01, middle 1.01-1.75, high >1.75) and the % of patients in each.
+    # (3) Net ultrafiltration rate distribution with the three Murugan 2019 groups
+    #     (low <1.01, middle 1.01-1.75, high >1.75). All percentages are of the
+    #     total analytic cohort (incl. the UF=0 subset, which sits within Low).
     uf = uf_rate[uf_rate.between(0, 6)].dropna()
     if len(uf):
         n = len(uf)
@@ -376,21 +378,21 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         pct_high = 100 * (uf > 1.75).sum() / n
         pct_zero = 100 * (uf == 0).sum() / n
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.hist(uf, bins=40, color=BLUE, alpha=0.85)
+        ax.hist(uf, bins=40, color=BLUE, alpha=0.85, edgecolor="black", linewidth=0.5)
         ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.30, label="Middle (1.01–1.75)")
         ax.axvline(1.01, color="#555555", linestyle=":", linewidth=1.0)
         ax.axvline(1.75, color="#555555", linestyle=":", linewidth=1.0)
         ax.axvline(uf.median(), color="black", linestyle="--", linewidth=1.2,
-                   label=f"Median {uf.median():.2f}")
+                   label=f"Median {uf.median():.2f} mL/kg/hr")
         ax.set_xlabel("Net Ultrafiltration Rate (mL/kg/hr)")
         ax.set_ylabel("Encounters")
-        ax.set_title(f"Net Ultrafiltration-Rate Distribution: {SITE_NAME}")
+        ax.set_title(f"Net Ultrafiltration Rate Distribution: {SITE_NAME}")
         ax.legend(fontsize=9, loc="center right")
-        txt = (f"Murugan 2019 groups\n"
+        txt = (f"Murugan 2019 groups (% of all encounters)\n"
                f"Low (<1.01): {pct_low:.1f}%\n"
-               f"   of which UF=0: {pct_zero:.1f}%\n"
                f"Middle (1.01–1.75): {pct_mid:.1f}%\n"
-               f"High (>1.75): {pct_high:.1f}%")
+               f"High (>1.75): {pct_high:.1f}%\n"
+               f"Zero net UF: {pct_zero:.1f}%")
         ax.text(0.97, 0.97, txt, transform=ax.transAxes, ha="right", va="top",
                 fontsize=9, bbox=dict(boxstyle="round", facecolor="white",
                                       alpha=0.85, edgecolor="#cccccc"))
@@ -517,36 +519,63 @@ def _crrt_census(w: pd.DataFrame) -> pd.DataFrame | None:
 
 
 def _add_census(ax, census, ylabel=True):
-    """Overlay the % alive-and-on-CRRT census on a secondary (0-100%) axis."""
+    """Overlay the % alive-and-on-CRRT census on a secondary (0-100%) axis.
+    Returns the line handle (for a combined legend)."""
     if census is None or census.empty:
-        return
+        return None
     ax2 = ax.twinx()
-    ax2.plot(census["day"], census["pct"], color=GREY, ls="--", lw=1.3, alpha=0.85)
+    (ln,) = ax2.plot(census["day"], census["pct"], color=GREY, ls="--", lw=1.4, alpha=0.85)
     ax2.set_ylim(0, 100)
     ax2.tick_params(axis="y", labelcolor=GREY, labelsize=8)
-    if ylabel:
-        ax2.set_ylabel("% of cohort alive & on CRRT", color=GREY, fontsize=9)
-    else:
+    ax2.set_ylabel("% of Cohort Alive and on CRRT" if ylabel else "", color=GREY, fontsize=9)
+    if not ylabel:
         ax2.set_yticklabels([])
+    return ln
 
 
-def _draw_traj(ax, g, color, band=None):
+def _at_risk_row(ax, census, days=(0, 5, 10, 15, 20, 25, 30)):
+    """KM-style number-at-risk row beneath the x-axis: N (and %) alive & on CRRT."""
+    if census is None or census.empty:
+        return
+    idx = census.set_index("day")
+    tr = ax.get_xaxis_transform()  # x in data (days), y in axes fraction
+    ax.text(0.0, -0.155, "Alive and on CRRT, N (%):", transform=ax.transAxes,
+            ha="left", va="top", fontsize=8, color=GREY, fontweight="bold")
+    for d in days:
+        if d in idx.index:
+            t = f"{int(idx.loc[d, 'n'])}\n({idx.loc[d, 'pct']:.0f}%)"
+        else:
+            t = "0\n(0%)"
+        ax.text(d, -0.215, t, transform=tr, ha="center", va="top", fontsize=7.5, color=GREY)
+
+
+def _draw_traj(ax, g, color, band=None, band_label=None, line_label=None):
     if band is not None:
-        ax.axhspan(band[0], band[1], color=GREEN, alpha=0.18)
+        ax.axhspan(band[0], band[1], color=GREEN, alpha=0.18, label=band_label)
     x = g["hour"] / 24.0  # hours -> days
-    ax.plot(x, g["median"], color=color, lw=1.8, zorder=3)
+    ax.plot(x, g["median"], color=color, lw=1.8, zorder=3, label=line_label)
     ax.fill_between(x, g["q25"], g["q75"], color=color, alpha=0.18, zorder=2)
     ax.grid(axis="y", alpha=0.25)
 
 
-def _traj_axis(ax, g, ylabel, color, band=None, census=None, census_ylabel=True):
-    """Draw a 30-day trajectory (x in days) on ax, with an optional census line."""
-    _draw_traj(ax, g, color, band=band)
+def _traj_axis(ax, g, ylabel, color, band=None, band_label=None, line_label=None,
+               census=None, census_ylabel=True, legend=False, atrisk=False):
+    """Draw a 30-day trajectory (x in days) on ax, with optional census line,
+    combined legend (incl. the grey census line), and number-at-risk row."""
+    _draw_traj(ax, g, color, band=band, band_label=band_label, line_label=line_label)
     ax.set_xlim(0, MAX_DAYS_TRAJ)
     ax.set_xlabel("Days from CRRT Initiation")
     ax.set_ylabel(ylabel)
-    if census is not None:
-        _add_census(ax, census, ylabel=census_ylabel)
+    cens = _add_census(ax, census, ylabel=census_ylabel) if census is not None else None
+    if legend:
+        h, lab = ax.get_legend_handles_labels()
+        if cens is not None:
+            h.append(cens)
+            lab.append("Alive and on CRRT (%, Right Axis)")
+        if h:
+            ax.legend(h, lab, fontsize=8, loc="upper right", framealpha=0.9)
+    if atrisk:
+        _at_risk_row(ax, census)
 
 
 def build_trajectories(w: pd.DataFrame) -> None:
@@ -561,10 +590,12 @@ def build_trajectories(w: pd.DataFrame) -> None:
         g = _median_iqr_by_bin(dr, "dose", bin_h=6)
         if not g.empty:
             g.to_csv(GRAPHS / f"{SITE_NAME}_crrt_dose_hourly.csv", index=False)
-            fig, ax = plt.subplots(figsize=(11, 5))
-            _traj_axis(ax, g, "CRRT Dose (mL/kg/hr)", BLUE, band=(20, 30), census=census)
-            ax.set_title(f"CRRT Dose Over 30 Days (KDIGO 20–30 Band): {SITE_NAME}")
-            fig.tight_layout()
+            fig, ax = plt.subplots(figsize=(11, 5.5))
+            _traj_axis(ax, g, "CRRT Dose (mL/kg/hr)", BLUE, band=(20, 30),
+                       band_label="KDIGO Recommendation (20–30)", line_label="Median CRRT Dose",
+                       census=census, legend=True, atrisk=True)
+            ax.set_title(f"CRRT Dose Over 30 Days: {SITE_NAME}")
+            fig.tight_layout(rect=[0, 0.08, 1, 1])
             fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_dose_over_time.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
@@ -589,13 +620,27 @@ def build_trajectories(w: pd.DataFrame) -> None:
             all_lab.append(g.assign(lab=col))
             _traj_axis(axes[i], g, lbl, GREEN, census=census, census_ylabel=False)
             axes[i].set_title(lbl)
-        for j in range(len(present), len(axes)):
+        # 6th panel = census reference (legend for the dashed grey line), with at-risk row
+        axc = axes[5]
+        if census is not None and not census.empty:
+            axc.plot(census["day"], census["pct"], color=GREY, ls="--", lw=1.8)
+            axc.set_xlim(0, MAX_DAYS_TRAJ)
+            axc.set_ylim(0, 100)
+            axc.set_xlabel("Days from CRRT Initiation")
+            axc.set_ylabel("% of Cohort")
+            axc.set_title("Alive and on CRRT (%)")
+            axc.grid(axis="y", alpha=0.25)
+            _at_risk_row(axc, census)
+        else:
+            axc.set_visible(False)
+        for j in range(len(present), 5):  # hide any gap panels (keep slot 5 = census)
             axes[j].set_visible(False)
         if all_lab:
             pd.concat(all_lab, ignore_index=True).to_csv(
                 GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.csv", index=False)
         fig.suptitle(f"Lab Trajectories Over 30 Days Post-CRRT: {SITE_NAME}\n"
-                     "(dashed grey: % of cohort alive and on CRRT)", fontsize=13, y=1.0)
+                     "(Dashed Grey: % of Cohort Alive and on CRRT; See Bottom-Right Panel)",
+                     fontsize=13, y=1.0)
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -605,10 +650,11 @@ def build_trajectories(w: pd.DataFrame) -> None:
         g = _median_iqr_by_bin(w, "med_cont_nee")
         if not g.empty:
             g.to_csv(GRAPHS / f"{SITE_NAME}_nee_over_crrt.csv", index=False)
-            fig, ax = plt.subplots(figsize=(11, 5))
-            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE, census=census)
+            fig, ax = plt.subplots(figsize=(11, 5.5))
+            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE, line_label="Median NEE",
+                       census=census, legend=True, atrisk=True)
             ax.set_title(f"Vasopressor (Norepinephrine-Equivalent) Over 30 Days: {SITE_NAME}")
-            fig.tight_layout()
+            fig.tight_layout(rect=[0, 0.08, 1, 1])
             fig.savefig(GRAPHS / f"{SITE_NAME}_nee_over_crrt.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 

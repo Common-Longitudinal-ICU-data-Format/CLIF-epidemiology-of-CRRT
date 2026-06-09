@@ -112,9 +112,9 @@ bars = ax.bar(fig_labels, fig_n, color=BLUE)
 for rect, n, pct in zip(bars, fig_n, fig_pct):
     ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(),
             f"{n}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=8)
-ax.set_xlabel("CRRT Dose Band (mL/kg/hr)")
+ax.set_xlabel("Initial CRRT Dose Band (mL/kg/hr)")
 ax.set_ylabel("Encounters")
-ax.set_title(f"CRRT Dose-Band Distribution: {SITE_NAME}")
+ax.set_title(f"Initial CRRT Dose-Band Distribution (Median First 3 h): {SITE_NAME}")
 ax.margins(y=0.12)
 fig.tight_layout()
 fig.savefig(GRAPHS / f"{SITE_NAME}_dose_band_distribution.png", dpi=150, bbox_inches="tight")
