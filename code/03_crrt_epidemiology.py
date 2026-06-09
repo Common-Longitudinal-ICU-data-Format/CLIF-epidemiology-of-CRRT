@@ -25,12 +25,17 @@ Products:
         -> output/final/crrt_epi/{SITE}_crrt_practice_quality.csv  (long format)
 
   C. DISTRIBUTION FIGURES (analytic cohort): incidence by context / ICU subtype,
-     delivered-dose distribution, net-UF distribution (Murugan groups), and crude
+     CRRT dose distribution, net-UF distribution (Murugan groups), and crude
      30-day mortality vs net UF.
 
-  D. LONGITUDINAL TRAJECTORIES over 30 days (3-day inset): delivered dose, lab
-     trajectories, vasopressor (NEE), and patient state (On IMV / Off IMV /
-     Discharged / Dead). MAP and respiratory (FiO2/IMV) trajectories were cut.
+  D. LONGITUDINAL TRAJECTORIES over 30 days (x-axis in days), each carrying a
+     "% alive and on CRRT" census line: CRRT dose, lab trajectories, vasopressor
+     (NEE), and patient state (On IMV / Off IMV / Discharged / Dead). MAP and
+     respiratory (FiO2/IMV) trajectories were cut.
+
+NOTE (t=0 / limitation): t=0 is each encounter's CRRT initiation time. ~2% of
+encounters have a recorded death at or before t=0 (death_dttm <= crrt start),
+so they appear "Dead" at day 0 in the patient-state figure.
 
 Quality-metric scope is Tier A (computable from data the pipeline already loads).
 Anticoagulation, delivered:prescribed ratio, downtime, and filter life are NOT in
@@ -213,10 +218,10 @@ def build_practice_quality() -> pd.DataFrame:
     _long(rows, "Analytic cohort size", "n", n_cohort)
 
     if HAS_CRRT_SETTINGS:
-        # Delivered dose (median-first-3h) + KDIGO bands
+        # CRRT dose (median-first-3h; prescribed machine dose) + KDIGO bands
         dose = pd.to_numeric(coh["crrt_dose_ml_kg_hr"], errors="coerce")
         med, q1, q3, n = _q(dose)
-        _long(rows, "Delivered dose (mL/kg/hr)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n)
+        _long(rows, "CRRT dose (mL/kg/hr)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n)
         d = dose.dropna()
         bands = {
             "<15 (very low)": (d < 15),
@@ -319,10 +324,10 @@ def build_figures(inc_df: pd.DataFrame) -> None:
     #       (1b) by ICU subtype: one bar per location_type (labels prettified)
     context = {"Overall (adult ICU)", "On invasive ventilation", "On vasopressors"}
     ctx = inc_df[inc_df["stratum"].isin(context)].copy()
-    _barh_incidence(ctx, f"CRRT incidence by clinical context — {SITE_NAME}",
+    _barh_incidence(ctx, f"CRRT Incidence by Clinical Context: {SITE_NAME}",
                     f"{SITE_NAME}_crrt_incidence_by_context.png", prettify=False)
     sub = inc_df[inc_df["stratum"].str.startswith("ICU subtype: ")].copy()
-    _barh_incidence(sub, f"CRRT incidence by ICU subtype — {SITE_NAME}",
+    _barh_incidence(sub, f"CRRT Incidence by ICU Subtype: {SITE_NAME}",
                     f"{SITE_NAME}_crrt_incidence_by_icu_subtype.png", prettify=True)
 
     if not HAS_CRRT_SETTINGS:
@@ -346,9 +351,9 @@ def build_figures(inc_df: pd.DataFrame) -> None:
                    label=f"KDIGO (20–30): {pct_kdigo:.1f}%")
         ax.axvline(med, color="black", linestyle="--", linewidth=1.2,
                    label=f"Median {med:.1f}")
-        ax.set_xlabel("Delivered dose (mL/kg/hr)")
+        ax.set_xlabel("CRRT Dose (mL/kg/hr)")
         ax.set_ylabel("Encounters")
-        ax.set_title(f"CRRT delivered-dose distribution — {SITE_NAME}")
+        ax.set_title(f"CRRT Dose Distribution: {SITE_NAME}")
         ax.legend(fontsize=9)
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
@@ -377,9 +382,9 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         ax.axvline(1.75, color="#555555", linestyle=":", linewidth=1.0)
         ax.axvline(uf.median(), color="black", linestyle="--", linewidth=1.2,
                    label=f"Median {uf.median():.2f}")
-        ax.set_xlabel("Net ultrafiltration rate (mL/kg/hr)")
+        ax.set_xlabel("Net Ultrafiltration Rate (mL/kg/hr)")
         ax.set_ylabel("Encounters")
-        ax.set_title(f"Net ultrafiltration-rate distribution — {SITE_NAME}")
+        ax.set_title(f"Net Ultrafiltration-Rate Distribution: {SITE_NAME}")
         ax.legend(fontsize=9, loc="center right")
         txt = (f"Murugan 2019 groups\n"
                f"Low (<1.01): {pct_low:.1f}%\n"
@@ -415,9 +420,9 @@ def build_figures(inc_df: pd.DataFrame) -> None:
             ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
             ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
                        label="Crude 30-day mortality (marker size scaled to n)")
-            ax.set_xlabel("Net ultrafiltration rate (mL/kg/hr)")
-            ax.set_ylabel("Crude 30-day mortality (%)")
-            ax.set_title(f"30-day mortality vs net ultrafiltration rate — {SITE_NAME}")
+            ax.set_xlabel("Net Ultrafiltration Rate (mL/kg/hr)")
+            ax.set_ylabel("Crude 30-Day Mortality (%)")
+            ax.set_title(f"Crude 30-Day Mortality vs Net Ultrafiltration Rate: {SITE_NAME}")
             ax.legend(fontsize=9)
             fig.tight_layout()
             fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")
@@ -491,47 +496,79 @@ def _median_iqr_by_bin(df: pd.DataFrame, col: str, bin_h: int = BIN_H,
     return g
 
 
-def _draw_traj(ax, g, color, band=None, hline=None):
+MAX_DAYS_TRAJ = MAX_HOURS_TRAJ / 24.0  # 30 days (x-axis is in days)
+
+
+def _crrt_census(w: pd.DataFrame) -> pd.DataFrame | None:
+    """Per integer day, the proportion of the baseline cohort with a CRRT record
+    that day (i.e., still alive and on CRRT). Denominator = distinct encounter
+    blocks in the cohort. Used as a number-at-risk style context line."""
+    if "crrt_mode_category" not in w.columns:
+        return None
+    n_base = w["encounter_block"].nunique()
+    c = w[(w["hours_from_crrt"] >= 0) & (w["hours_from_crrt"] <= MAX_HOURS_TRAJ)
+          & w["crrt_mode_category"].notna()].copy()
+    if c.empty or not n_base:
+        return None
+    c["day"] = (c["hours_from_crrt"] // 24).astype(int)
+    per = c.groupby("day")["encounter_block"].nunique().reset_index(name="n")
+    per["pct"] = per["n"] / n_base * 100.0
+    return per
+
+
+def _add_census(ax, census, ylabel=True):
+    """Overlay the % alive-and-on-CRRT census on a secondary (0-100%) axis."""
+    if census is None or census.empty:
+        return
+    ax2 = ax.twinx()
+    ax2.plot(census["day"], census["pct"], color=GREY, ls="--", lw=1.3, alpha=0.85)
+    ax2.set_ylim(0, 100)
+    ax2.tick_params(axis="y", labelcolor=GREY, labelsize=8)
+    if ylabel:
+        ax2.set_ylabel("% of cohort alive & on CRRT", color=GREY, fontsize=9)
+    else:
+        ax2.set_yticklabels([])
+
+
+def _draw_traj(ax, g, color, band=None):
     if band is not None:
         ax.axhspan(band[0], band[1], color=GREEN, alpha=0.18)
-    if hline is not None:
-        ax.axhline(hline, color=GREY, ls="--", lw=0.8, alpha=0.6)
-    ax.plot(g["hour"], g["median"], color=color, lw=1.6, marker="o", ms=2.5, zorder=3)
-    ax.fill_between(g["hour"], g["q25"], g["q75"], color=color, alpha=0.18, zorder=2)
+    x = g["hour"] / 24.0  # hours -> days
+    ax.plot(x, g["median"], color=color, lw=1.8, zorder=3)
+    ax.fill_between(x, g["q25"], g["q75"], color=color, alpha=0.18, zorder=2)
     ax.grid(axis="y", alpha=0.25)
 
 
-def _traj_axis(ax, g, ylabel, color, band=None, hline=None):
-    """Draw a 30-day trajectory on ax with a 3-day inset."""
-    _draw_traj(ax, g, color, band=band, hline=hline)
-    ax.set_xlim(0, MAX_HOURS_TRAJ)
-    ax.set_xlabel("Hours from CRRT initiation")
+def _traj_axis(ax, g, ylabel, color, band=None, census=None, census_ylabel=True):
+    """Draw a 30-day trajectory (x in days) on ax, with an optional census line."""
+    _draw_traj(ax, g, color, band=band)
+    ax.set_xlim(0, MAX_DAYS_TRAJ)
+    ax.set_xlabel("Days from CRRT Initiation")
     ax.set_ylabel(ylabel)
-    ins = g[g["hour"] <= INSET_HOURS]
-    if len(ins) >= 2:
-        axins = ax.inset_axes([0.55, 0.58, 0.42, 0.38])
-        _draw_traj(axins, ins, color, band=band, hline=hline)
-        axins.set_xlim(0, INSET_HOURS)
-        axins.set_title("First 3 days", fontsize=8)
-        axins.tick_params(labelsize=7)
+    if census is not None:
+        _add_census(ax, census, ylabel=census_ylabel)
 
 
 def build_trajectories(w: pd.DataFrame) -> None:
-    # (D1) CRRT delivered dose over time
+    # Number-at-risk style context line shared across the "over time" figures:
+    # proportion of the cohort still alive and on CRRT each day.
+    census = _crrt_census(w)
+
+    # (D1) CRRT dose over time
     if HAS_CRRT_SETTINGS and "crrt_mode_category" in w.columns:
         dr = w[(w["hours_from_crrt"] >= 0) & (w["crrt_mode_category"].notna())].copy()
         dr["dose"] = _crrt_dose_per_row(dr)
         g = _median_iqr_by_bin(dr, "dose", bin_h=6)
         if not g.empty:
             g.to_csv(GRAPHS / f"{SITE_NAME}_crrt_dose_hourly.csv", index=False)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            _traj_axis(ax, g, "CRRT dose (mL/kg/hr)", BLUE, band=(20, 30))
-            ax.set_title(f"CRRT delivered dose over 30 days (KDIGO 20–30 band) — {SITE_NAME}")
+            fig, ax = plt.subplots(figsize=(11, 5))
+            _traj_axis(ax, g, "CRRT Dose (mL/kg/hr)", BLUE, band=(20, 30), census=census)
+            ax.set_title(f"CRRT Dose Over 30 Days (KDIGO 20–30 Band): {SITE_NAME}")
             fig.tight_layout()
             fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_dose_over_time.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-    # (D2) Lab trajectories (5-panel grid; each panel 30 d + 3 d inset)
+    # (D2) Lab trajectories (5-panel grid)
     lab_info = [
         ("lab_lactate", "Lactate (mmol/L)"),
         ("lab_ph_arterial", "Arterial pH"),
@@ -550,14 +587,15 @@ def build_trajectories(w: pd.DataFrame) -> None:
                 axes[i].set_visible(False)
                 continue
             all_lab.append(g.assign(lab=col))
-            _traj_axis(axes[i], g, lbl, GREEN)
+            _traj_axis(axes[i], g, lbl, GREEN, census=census, census_ylabel=False)
             axes[i].set_title(lbl)
         for j in range(len(present), len(axes)):
             axes[j].set_visible(False)
         if all_lab:
             pd.concat(all_lab, ignore_index=True).to_csv(
                 GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.csv", index=False)
-        fig.suptitle(f"Lab trajectories over 30 days post-CRRT — {SITE_NAME}", fontsize=14, y=1.0)
+        fig.suptitle(f"Lab Trajectories Over 30 Days Post-CRRT: {SITE_NAME}\n"
+                     "(dashed grey: % of cohort alive and on CRRT)", fontsize=13, y=1.0)
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_lab_distributions_over_crrt.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -567,9 +605,9 @@ def build_trajectories(w: pd.DataFrame) -> None:
         g = _median_iqr_by_bin(w, "med_cont_nee")
         if not g.empty:
             g.to_csv(GRAPHS / f"{SITE_NAME}_nee_over_crrt.csv", index=False)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE)
-            ax.set_title(f"Vasopressor (norepinephrine-equivalent) over 30 days — {SITE_NAME}")
+            fig, ax = plt.subplots(figsize=(11, 5))
+            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE, census=census)
+            ax.set_title(f"Vasopressor (Norepinephrine-Equivalent) Over 30 Days: {SITE_NAME}")
             fig.tight_layout()
             fig.savefig(GRAPHS / f"{SITE_NAME}_nee_over_crrt.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -649,12 +687,12 @@ def build_patient_course(w: pd.DataFrame) -> None:
         "Dead": mcolors.to_rgba("#9e9e9e", 0.75),
     }
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.stackplot(sdf["hour"], sdf["prop_imv"], sdf["prop_off_imv"],
+    ax.stackplot(sdf["hour"] / 24.0, sdf["prop_imv"], sdf["prop_off_imv"],
                  sdf["prop_discharged"], sdf["prop_dead"],
                  labels=list(colors), colors=list(colors.values()))
-    ax.set_xlim(0, MAXH); ax.set_ylim(0, 100)
-    ax.set_xlabel("Hours from CRRT initiation"); ax.set_ylabel("Proportion of patients (%)")
-    ax.set_title(f"Patient state over 30 days post-CRRT — {SITE_NAME}")
+    ax.set_xlim(0, MAXH / 24.0); ax.set_ylim(0, 100)
+    ax.set_xlabel("Days from CRRT Initiation"); ax.set_ylabel("Proportion of Patients (%)")
+    ax.set_title(f"Patient State Over 30 Days Post-CRRT: {SITE_NAME}")
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=9)
     fig.tight_layout()
     fig.savefig(GRAPHS / f"{SITE_NAME}_patient_state_over_crrt.png", dpi=150, bbox_inches="tight")

@@ -1,7 +1,7 @@
 """
 08_low_dose_characterization.py — very-low-dose CRRT subcohort (descriptive).
 
-Characterizes the very-low-dose CRRT subcohort (delivered dose 10-15 mL/kg/hr,
+Characterizes the very-low-dose CRRT subcohort (dose 10-15 mL/kg/hr,
 the range targeted by upcoming low-dose RCTs, e.g. NCT06021288) across the
 consortium, to inform trial feasibility and external validity. This is the
 DESCRIPTIVE companion to the causal emulation in 05c_low_dose_emulation.R — it
@@ -93,19 +93,29 @@ counts.to_csv(OUT / f"{SITE_NAME}_low_dose_counts.csv", index=False)
 n_low = int(((dose >= LOW_LO) & (dose <= LOW_HI)).sum())
 print(f"  very-low-dose (10-15 mL/kg/hr) subcohort: n={n_low}  of {n_dose} dosed encounters")
 
-# Dose-band tally bar chart (very-low band highlighted)
-_plot = counts[counts["band"] != "Total with dose"]
-fig, ax = plt.subplots(figsize=(8, 5))
-bar_colors = [ORANGE if b == "10-15 (very low)" else BLUE for b in _plot["band"]]
-bars = ax.bar(_plot["band"], _plot["n"], color=bar_colors)
-for rect, n, pct in zip(bars, _plot["n"], _plot["pct_of_dosed"]):
+# Dose-band distribution figure — informative clinical bands (single colour).
+# (Separate from the RCT-feasibility counts CSV above, which anchors on 10-15.)
+fig_bands = [
+    ("<15", dose < 15),
+    ("15-20", (dose >= 15) & (dose < 20)),
+    ("20-25", (dose >= 20) & (dose < 25)),
+    ("25-30", (dose >= 25) & (dose < 30)),
+    ("30-35", (dose >= 30) & (dose < 35)),
+    ("35-40", (dose >= 35) & (dose < 40)),
+    (">40", dose >= 40),
+]
+fig_labels = [b for b, _ in fig_bands]
+fig_n = [int(m.sum()) for _, m in fig_bands]
+fig_pct = [round(100 * n / n_dose, 1) if n_dose else 0.0 for n in fig_n]
+fig, ax = plt.subplots(figsize=(9, 5))
+bars = ax.bar(fig_labels, fig_n, color=BLUE)
+for rect, n, pct in zip(bars, fig_n, fig_pct):
     ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(),
-            f"{int(n)}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=8)
-ax.set_xlabel("Delivered dose band (mL/kg/hr)")
+            f"{n}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=8)
+ax.set_xlabel("CRRT Dose Band (mL/kg/hr)")
 ax.set_ylabel("Encounters")
-ax.set_title(f"CRRT dose-band distribution — {SITE_NAME}\n(very-low 10–15 RCT target highlighted)")
+ax.set_title(f"CRRT Dose-Band Distribution: {SITE_NAME}")
 ax.margins(y=0.12)
-plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
 fig.tight_layout()
 fig.savefig(GRAPHS / f"{SITE_NAME}_dose_band_distribution.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
@@ -193,7 +203,7 @@ def add_categorical(label: str, col: str, levels=None):
 
 
 # Confirm dose separation
-add_continuous("Delivered dose (mL/kg/hr)", "crrt_dose_ml_kg_hr")
+add_continuous("CRRT dose (mL/kg/hr)", "crrt_dose_ml_kg_hr")
 # Demographics
 add_continuous("Age (years)", "age_at_admission")
 add_categorical("Sex", "sex_category")
