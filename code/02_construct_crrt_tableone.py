@@ -519,11 +519,10 @@ print(f"  Analysis DataFrame: {analysis_df.shape}")
 # STEP 6: Table 1 - baseline characteristics by CRRT dose band
 # ===================================================================
 # Single project Table 1: full analytic CRRT cohort, stratified by initial
-# (median-first-3h) CRRT dose band - Very low (<15) / Low (15-<30) /
-# High (>=30 mL/kg/hr). Emitted in the gtsummary shape consumed by the
-# multi-site combine renderer (09) and the manuscript builder (10): col 0 =
-# __bold__ parent labels + indented categorical levels; strata columns carry
-# "N = X" in the header; final column = p-value across the three bands.
+# (median-first-3h) CRRT dose band - Very low (<15) / Low (15-30) /
+# High (>=30 mL/kg/hr). gtsummary shape consumed by the combine renderer (09)
+# and manuscript builder (10). p-value is across the three bands
+# (Kruskal-Wallis for continuous, chi-square for categorical).
 print("Step 6: Generating Table 1 (baseline by CRRT dose band) ...")
 from scipy import stats as _stats
 
@@ -533,15 +532,41 @@ if HAS_CRRT_SETTINGS and "ultrafiltration_out" in t1.columns:
     t1["net_uf_rate"] = (pd.to_numeric(t1["ultrafiltration_out"], errors="coerce")
                          / pd.to_numeric(t1["weight_kg"], errors="coerce"))
 
-BANDS = ["Very low (<15 mL/kg/hr)", "Low (15-<30 mL/kg/hr)", "High (>=30 mL/kg/hr)"]
+# Accurate baseline labs for Table 1: the value MEASURED nearest CRRT
+# initiation within [-12, +3] h. This avoids the unlimited-forward-fill
+# staleness in the analysis_df *_baseline columns (a point lab does not
+# persist the way an infusion rate does), which otherwise carried stale
+# pre-window values into the baseline (e.g. lactate median 3.3 vs ~4.6
+# measured nearest t=0). NOTE: the *_baseline columns consumed by 04/causal
+# still use the forward-filled values - addressing that is a separate,
+# causal-affecting decision.
+_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
+_lab_cols = [f"lab_{x}" for x in _LABS]
+_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
+_need = ["hospitalization_id", "event_dttm"] + [c for c in _lab_cols if c in _avail]
+_wd = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=_need)
+_wd = _wd.merge(eb_map, on="hospitalization_id", how="inner").merge(
+    crrt_initiation[["encounter_block", "crrt_initiation_time"]], on="encounter_block", how="inner")
+_wd["_h"] = (_wd["event_dttm"] - _wd["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+_wd = _wd[(_wd["_h"] >= -12) & (_wd["_h"] <= 3)].copy()
+_wd["_abs"] = _wd["_h"].abs()
+for x in _LABS:
+    c = f"lab_{x}"
+    if c in _wd.columns:
+        near = (_wd.dropna(subset=[c]).sort_values("_abs")
+                .groupby("encounter_block")[c].first())
+        t1[f"{x}_t1"] = t1["encounter_block"].map(near)
+del _wd
+
+BANDS = ["Very low (<15 mL/kg/hr)", "Low (15-30 mL/kg/hr)", "High (>=30 mL/kg/hr)"]
 _dose = pd.to_numeric(t1.get("crrt_dose_ml_kg_hr"), errors="coerce")
 t1["dose_band"] = pd.cut(_dose, bins=[float("-inf"), 15, 30, float("inf")],
                          right=False, labels=BANDS)
 
-# Derived display columns (computed once, before building strata frames)
+# Derived display columns (computed before building strata frames)
 t1["_female"] = t1["sex_category"].astype("string").str.lower().eq("female")
 t1["_imv"] = t1["device_category"].astype("string").str.lower().eq("imv") if "device_category" in t1.columns else False
-t1["_sepsis"] = (t1["sepsis_within_window"] == True)
+t1["_death30"] = (pd.to_numeric(t1["death_30d"], errors="coerce") == 1) if "death_30d" in t1.columns else False
 _r = t1["race_category"].astype("string").str.lower().fillna("unknown")
 t1["_race_grp"] = _r.map(lambda s: "Black" if "black" in s else ("White" if s == "white" else "Other"))
 
@@ -635,23 +660,25 @@ def _row_multi(label, col, level_order):
 _row_cont("Age at Admission (years)", "age_at_admission", 0)
 _row_binary("Female (%)", "_female")
 _row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
-# Severity
+# Severity and labs at CRRT initiation
 _row_cont("SOFA Score", "sofa_total", 0)
-_row_binary("Sepsis within 72h of CRRT (%)", "_sepsis")
-# Baseline labs (at CRRT initiation window)
-_row_cont("Creatinine at CRRT Start (mg/dL)", "creatinine_baseline", 2)
-_row_cont("Lactate at CRRT Start (mmol/L)", "lactate_baseline", 1)
-_row_cont("Bicarbonate at CRRT Start (mEq/L)", "bicarbonate_baseline", 1)
-_row_cont("Potassium at CRRT Start (mEq/L)", "potassium_baseline", 2)
-# Support
+_row_cont("Creatinine (mg/dL)", "creatinine_t1", 2)
+_row_cont("BUN (mg/dL)", "bun_t1", 0)
+_row_cont("Lactate (mmol/L)", "lactate_t1", 1)
+_row_cont("Bicarbonate (mEq/L)", "bicarbonate_t1", 1)
+_row_cont("Potassium (mEq/L)", "potassium_t1", 2)
+_row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
 _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
-_row_binary("On IMV at Baseline (%)", "_imv")
+_row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
+_row_cont("CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
 if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
     _row_cont("Net Ultrafiltration Rate (mL/kg/hr)", "net_uf_rate", 2)
+# Outcome
+_row_binary("30-Day Mortality (%)", "_death30")
 
 
 # ===================================================================
@@ -664,8 +691,6 @@ output_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt.csv"
 table1_df.to_csv(output_csv, index=False)
 print(f"  CSV: {output_csv}  ({len(table1_df)} rows; N {gn})")
 
-# Standalone HTML (rough per-site view; the dashboard re-renders the pooled
-# table via _render_gtsummary_table_html). Strip markdown for readability.
 _disp = table1_df.copy()
 _disp.columns = [_re.sub(r"\*+", "", c).strip() for c in _disp.columns]
 _disp[_disp.columns[0]] = _disp[_disp.columns[0]].apply(
@@ -680,8 +705,9 @@ with open(html_path, "w", encoding="utf-8") as _f:
         "table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
         "th{background:#1e417c;color:#fff}</style></head><body>"
         f"<h2>Table 1: Baseline Characteristics by CRRT Dose Band - {SITE_NAME}</h2>"
-        "<p><em>Continuous: median (Q1, Q3); categorical: n (%). p-value across the three dose bands "
-        "(Kruskal-Wallis / chi-square).</em></p>"
+        "<p><em>Continuous: median (Q1, Q3); categorical: n (%). Labs and severity "
+        "measured at or nearest CRRT initiation (-12 to +3 h); age at hospital admission. "
+        "p-value across the three dose bands (Kruskal-Wallis / chi-square).</em></p>"
         + _disp.to_html(index=False, escape=False) + "</body></html>")
 print(f"  HTML: {html_path}")
 print("Done!")
