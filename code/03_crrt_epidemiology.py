@@ -487,13 +487,20 @@ def _load_traj_wide() -> pd.DataFrame:
 
 def _median_iqr_by_bin(df: pd.DataFrame, col: str, bin_h: int = BIN_H,
                        max_h: int = MAX_HOURS_TRAJ) -> pd.DataFrame:
+    """Per-bin median [IQR] of `col`, aggregated PER PATIENT first: each encounter
+    contributes one value per time bin (the median of its measurements in that
+    bin), then we median across encounters. This avoids over-weighting
+    frequently-sampled (sicker) patients, and keeps the trajectory on the same
+    per-patient footing as Table 1. `n` is the number of contributing encounters."""
     d = df[(df["hours_from_crrt"] >= 0) & (df["hours_from_crrt"] <= max_h)].copy()
     d["_v"] = pd.to_numeric(d[col], errors="coerce")
     d = d.dropna(subset=["_v"])
     if d.empty:
         return pd.DataFrame(columns=["hour", "median", "q25", "q75", "n", "site"])
     d["hour"] = (d["hours_from_crrt"] // bin_h).astype(int) * bin_h + bin_h / 2.0
-    g = (d.groupby("hour")["_v"]
+    # one value per encounter per bin
+    per_pt = d.groupby(["encounter_block", "hour"], observed=True)["_v"].median().reset_index()
+    g = (per_pt.groupby("hour")["_v"]
          .agg(median="median", q25=lambda x: x.quantile(0.25),
               q75=lambda x: x.quantile(0.75), n="count")
          .reset_index())
