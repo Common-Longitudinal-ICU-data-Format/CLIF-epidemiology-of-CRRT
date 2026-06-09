@@ -305,7 +305,7 @@ def _barh_incidence(d: pd.DataFrame, title: str, fname: str, prettify: bool) -> 
     for y, (v, n, N) in enumerate(zip(d["incidence_pct"], d["n_crrt"], d["n_denominator"])):
         ax.text(v + xmax * 0.01, y, f"{v:.1f}% ({int(n):,}/{int(N):,})",
                 va="center", fontsize=9)
-    ax.set_xlabel("CRRT incidence (%)")
+    ax.set_xlabel("% of Hospitalizations Receiving CRRT at Any Point")
     ax.set_title(title)
     # Headroom so the "% (n/N)" labels never collide with the right spine.
     ax.set_xlim(0, xmax * 1.42)
@@ -651,8 +651,8 @@ def build_trajectories(w: pd.DataFrame) -> None:
         if not g.empty:
             g.to_csv(GRAPHS / f"{SITE_NAME}_nee_over_crrt.csv", index=False)
             fig, ax = plt.subplots(figsize=(11, 5.5))
-            _traj_axis(ax, g, "NEE (mcg/kg/min)", ORANGE, line_label="Median NEE",
-                       census=census, legend=True, atrisk=True)
+            _traj_axis(ax, g, "Norepinephrine Equivalents (NEE, mcg/kg/min)", ORANGE,
+                       line_label="Median NEE", census=census, legend=True, atrisk=True)
             ax.set_title(f"Vasopressor (Norepinephrine-Equivalent) Over 30 Days: {SITE_NAME}")
             fig.tight_layout(rect=[0, 0.08, 1, 1])
             fig.savefig(GRAPHS / f"{SITE_NAME}_nee_over_crrt.png", dpi=150, bbox_inches="tight")
@@ -762,6 +762,86 @@ def build_patient_course(w: pd.DataFrame) -> None:
     ]).to_csv(GRAPHS / f"{SITE_NAME}_crrt_course_time_to_event.csv", index=False)
 
 
+def build_crrt_state(w: pd.DataFrame) -> None:
+    """(D5) CRRT-state stacked area over 30 days: On CRRT / Off CRRT (alive) /
+    Discharged alive / Dead. "On CRRT" spans t=0 to each encounter's last CRRT
+    record; "Off CRRT" = alive and still hospitalized but no longer on CRRT
+    (either iHD or no renal replacement — indistinguishable in this CLIF version)."""
+    import matplotlib.colors as mcolors
+    MAXH = MAX_HOURS_TRAJ
+    crrt_init = pd.read_parquet(INTER / "crrt_initiation.parquet")
+    oc = pd.read_parquet(INTER / "outcomes_df.parquet")
+    cols = ["encounter_block", "died", "death_dttm", "last_vital_dttm"]
+    if "discharge_dttm" in oc.columns:
+        cols.append("discharge_dttm")
+    ot = oc[cols].merge(crrt_init[["encounter_block", "crrt_initiation_time"]],
+                        on="encounter_block", how="inner")
+    ot["hours_to_death"] = np.where(
+        ot["died"] == 1,
+        (ot["death_dttm"].fillna(ot["last_vital_dttm"]) - ot["crrt_initiation_time"]).dt.total_seconds() / 3600,
+        np.nan)
+    disc_col = "discharge_dttm" if "discharge_dttm" in ot.columns else "last_vital_dttm"
+    ot["hours_to_discharge"] = np.where(
+        ot["died"] == 0,
+        (ot[disc_col] - ot["crrt_initiation_time"]).dt.total_seconds() / 3600,
+        np.nan)
+
+    # Last CRRT-record hour per encounter (defines the on-CRRT span from t=0).
+    if "crrt_mode_category" in w.columns:
+        cr = w[(w["crrt_mode_category"].notna())
+               & (w["hours_from_crrt"] >= 0) & (w["hours_from_crrt"] <= MAXH)]
+        last_crrt_h = cr.groupby("encounter_block")["hours_from_crrt"].max()
+    else:
+        last_crrt_h = pd.Series(dtype=float)
+
+    all_patients = crrt_init["encounter_block"].unique()
+    n_pat = len(all_patients)
+    dead_ebs = ot.loc[ot["hours_to_death"].notna(), ["encounter_block", "hours_to_death"]]
+    disc_ebs = ot.loc[ot["hours_to_discharge"].notna(), ["encounter_block", "hours_to_discharge"]]
+
+    rows = []
+    for h in range(0, MAXH + 1):
+        dead_by = set(dead_ebs.loc[dead_ebs["hours_to_death"] <= h, "encounter_block"])
+        disc_by = set(disc_ebs.loc[disc_ebs["hours_to_discharge"] <= h, "encounter_block"])
+        n_dead = n_disc = n_on = n_off = 0
+        for eb in all_patients:
+            if eb in dead_by:
+                n_dead += 1
+            elif eb in disc_by:
+                n_disc += 1
+            elif eb in last_crrt_h.index and h <= last_crrt_h[eb]:
+                n_on += 1
+            else:
+                n_off += 1
+        rows.append({"hour": h, "n_total": n_pat, "n_on_crrt": n_on,
+                     "n_off_crrt": n_off, "n_discharged": n_disc, "n_dead": n_dead})
+    sdf = pd.DataFrame(rows)
+    for k in ["on_crrt", "off_crrt", "discharged", "dead"]:
+        sdf[f"prop_{k}"] = sdf[f"n_{k}"] / sdf["n_total"] * 100
+    sdf["site"] = SITE_NAME
+    sdf.to_csv(GRAPHS / f"{SITE_NAME}_crrt_state_over_crrt.csv", index=False)
+
+    colors = {
+        "On CRRT": mcolors.to_rgba(BLUE, 0.80),
+        "Off CRRT (alive; iHD or no RRT)": mcolors.to_rgba("#9ecae1", 0.85),
+        "Discharged alive": mcolors.to_rgba(GREEN, 0.60),
+        "Dead": mcolors.to_rgba("#9e9e9e", 0.75),
+    }
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.stackplot(sdf["hour"] / 24.0, sdf["prop_on_crrt"], sdf["prop_off_crrt"],
+                 sdf["prop_discharged"], sdf["prop_dead"],
+                 labels=list(colors), colors=list(colors.values()))
+    ax.set_xlim(0, MAXH / 24.0)
+    ax.set_ylim(0, 100)
+    ax.set_xlabel("Days from CRRT Initiation")
+    ax.set_ylabel("Proportion of Patients (%)")
+    ax.set_title(f"CRRT State Over 30 Days Post-CRRT: {SITE_NAME}")
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=9)
+    fig.tight_layout()
+    fig.savefig(GRAPHS / f"{SITE_NAME}_crrt_state_over_crrt.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 print("\n[A] CRRT incidence / utilization ...")
 inc = build_incidence()
@@ -783,6 +863,7 @@ print("\n[D] Longitudinal trajectories (30 d, 3 d inset) ...")
 _traj_w = _load_traj_wide()
 build_trajectories(_traj_w)
 build_patient_course(_traj_w)
+build_crrt_state(_traj_w)
 print(f"  wrote trajectory figures to {GRAPHS}")
 
 print(f"\n=== 03 CRRT epidemiology complete in {time.time() - t_start:.1f}s ===")
