@@ -32,16 +32,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-# Shared manuscript visual language (matches 07/09/10): Arial sans-serif + size.
-matplotlib.rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-    "font.size": 13,
-})
 
 from pipeline_helpers import validate_config
 
@@ -57,10 +47,6 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 INTER = Path("../output/intermediate")
 OUT = Path("../output/final/low_dose")
 OUT.mkdir(parents=True, exist_ok=True)
-GRAPHS = OUT / "graphs"
-GRAPHS.mkdir(parents=True, exist_ok=True)
-
-BLUE, ORANGE = "#1e417c", "#fb801b"  # ASN palette; orange highlights the very-low band
 
 LOW_LO, LOW_HI = 10.0, 15.0  # very-low-dose band (mL/kg/hr), inclusive
 
@@ -93,33 +79,11 @@ counts.to_csv(OUT / f"{SITE_NAME}_low_dose_counts.csv", index=False)
 n_low = int(((dose >= LOW_LO) & (dose <= LOW_HI)).sum())
 print(f"  very-low-dose (10-15 mL/kg/hr) subcohort: n={n_low}  of {n_dose} dosed encounters")
 
-# Dose-band distribution figure — informative clinical bands (single colour).
-# (Separate from the RCT-feasibility counts CSV above, which anchors on 10-15.)
-fig_bands = [
-    ("<15", dose < 15),
-    ("15-20", (dose >= 15) & (dose < 20)),
-    ("20-25", (dose >= 20) & (dose < 25)),
-    ("25-30", (dose >= 25) & (dose < 30)),
-    ("30-35", (dose >= 30) & (dose < 35)),
-    ("35-40", (dose >= 35) & (dose < 40)),
-    (">40", dose >= 40),
-]
-fig_labels = [b for b, _ in fig_bands]
-fig_n = [int(m.sum()) for _, m in fig_bands]
-fig_pct = [round(100 * n / n_dose, 1) if n_dose else 0.0 for n in fig_n]
-fig, ax = plt.subplots(figsize=(9, 5))
-bars = ax.bar(fig_labels, fig_n, color=BLUE)
-for rect, n, pct in zip(bars, fig_n, fig_pct):
-    ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(),
-            f"{n}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=8)
-ax.set_xlabel("Initial CRRT Dose Band (mL/kg/hr)")
-ax.set_ylabel("Encounters")
-ax.set_title(f"Initial CRRT Dose-Band Distribution (Median First 3 h): {SITE_NAME}")
-ax.margins(y=0.12)
-fig.tight_layout()
-fig.savefig(GRAPHS / f"{SITE_NAME}_dose_band_distribution.png", dpi=150, bbox_inches="tight")
-plt.close(fig)
-print(f"  wrote dose-band figure to {GRAPHS}")
+# NOTE: the dose-band distribution bar chart was retired — it duplicated the
+# continuous initial-dose histogram in 03 (which shows shape + the very-low /
+# KDIGO reference bands). Per-band proportions live in the practice-quality CSV
+# (03) and the descriptive table (10). The RCT-feasibility counts CSV above is
+# retained for the dashboard's very-low (10-15) lookup.
 
 # ── Very-low vs Rest comparison ─────────────────────────────────────────────
 grp = pd.Series(np.where((dose >= LOW_LO) & (dose <= LOW_HI), "Very low (10-15)",
