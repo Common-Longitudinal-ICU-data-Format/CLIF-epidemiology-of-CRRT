@@ -92,28 +92,67 @@ result["imv_duration_days"] = result["imv_duration_days"].fillna(0)
 print(f"  {len(result)} rows after merge")
 
 # ===================================================================
-# STEP 3: Baseline labs (t=0) from tableone_analysis_df
+# STEP 3: Baseline labs (t=0) = nearest MEASURED value in [-12, +3h]
 # ===================================================================
-print("Step 3: Baseline labs (t=0) from tableone …")
-baseline_lab_map = {
-    "creatinine_baseline": "creatinine_0",
-    "lactate_baseline": "lactate_0",
-    "bicarbonate_baseline": "bicarbonate_0",
-    "potassium_baseline": "potassium_0",
+# NOTE (2026-06-09): switched from tableone_analysis_df's forward-filled
+# *_baseline columns to a nearest-measured recompute from wide_df. The
+# *_baseline columns apply an UNLIMITED forward-fill to point labs
+# (02_construct_crrt_tableone.py:322) before taking the last value in
+# [-12,+3h], which carried arbitrarily old pre-window values into "baseline"
+# for patients with no in-window measurement. At UCMC this made ~20% of
+# baseline lactates stale (median carry-in 27h, max ~55 days) and was
+# differential by dose arm (low-dose 28.7% vs high-dose 13.7%). A point lab
+# does not persist the way an infusion rate does, so forward-fill is invalid
+# here. Nearest-measured leaves those patients NA, and 05's MICE (which runs
+# BEFORE drop_na) imputes them from the other covariates instead of a weeks-old
+# value. This also matches 02's Table-1 definition (02:543-558), so Table 1 and
+# the causal covariates now share one consistent baseline-lab definition.
+print("Step 3: Baseline labs (t=0) = nearest measured in [-12,+3h] …")
+_baseline_lab_map = {
+    "lab_creatinine": "creatinine_0",
+    "lab_lactate": "lactate_0",
+    "lab_bicarbonate": "bicarbonate_0",
+    "lab_potassium": "potassium_0",
 }
-baseline_cols = ["encounter_block"] + list(baseline_lab_map.keys())
-available_baseline = [c for c in baseline_cols if c in tableone_df.columns]
-baseline_labs = tableone_df[available_baseline].rename(columns=baseline_lab_map)
-result = result.merge(baseline_labs, on="encounter_block", how="left")
+_wide_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
+_lab_present = [c for c in _baseline_lab_map if c in _wide_avail]
+_blabs = load_intermediate(
+    INTERMEDIATE_DIR / "wide_df.parquet",
+    columns=["hospitalization_id", "event_dttm"] + _lab_present,
+)
+_blabs = _blabs.merge(eb_map, on="hospitalization_id", how="inner").merge(
+    crrt_initiation[["encounter_block", "crrt_initiation_time"]],
+    on="encounter_block", how="inner",
+)
+_blabs["_h"] = (
+    (_blabs["event_dttm"] - _blabs["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+)
+_blabs = _blabs[(_blabs["_h"] >= -12) & (_blabs["_h"] <= 3)].copy()
+_blabs["_abs"] = _blabs["_h"].abs()
+for _col, _new in _baseline_lab_map.items():
+    if _col in _lab_present:
+        # nearest non-null measurement to t=0 within the window (02:553-558)
+        _near = (
+            _blabs.dropna(subset=[_col]).sort_values("_abs")
+            .groupby("encounter_block")[_col].first()
+        )
+        result[_new] = result["encounter_block"].map(_near)
+    else:
+        result[_new] = np.nan
+del _blabs
+_n_lac = int(result["lactate_0"].notna().sum()) if "lactate_0" in result.columns else 0
+print(f"  nearest-measured baseline labs attached "
+      f"(lactate_0 measured in-window: {_n_lac}/{len(result)}; remainder -> MICE in 05)")
 
-# SOFA at t=0
+# SOFA at t=0 (from tableone — unchanged; sofa_total_0 is excluded from the
+# causal models, used only for descriptive sample_characteristics)
 result = result.merge(
     tableone_df[["encounter_block", "sofa_total"]].rename(
         columns={"sofa_total": "sofa_total_0"}
     ),
     on="encounter_block", how="left",
 )
-print(f"  Baseline labs + SOFA attached")
+print(f"  SOFA attached")
 
 # ===================================================================
 # STEP 4: CRRT dose — at initiation, 0-12h mean, 12-24h mean
@@ -705,18 +744,19 @@ if "pf_sf_ratio" in extra_df.columns:
     n_oxy_24_miss = result["pf_sf_ratio_24"].isna().sum()
     print(f"    pf_sf_ratio_24 missing after cascade: {n_oxy_24_miss}")
 
-# --- 7c. Lactate: impute normal value (1.0 mmol/L) for missing ---
-print("\n  Lactate imputation …")
-n_miss_before = result["lactate_0"].isna().sum()
-if n_miss_before > 0:
-    result["lactate_0"] = result["lactate_0"].fillna(1.0)
-    # Also cascade to lactate_12 if it was using baseline fallback
-    result["lactate_12"] = result["lactate_12"].fillna(result["lactate_0"])
-    # Also cascade to lactate_24 (sensitivity)
-    result["lactate_24"] = result["lactate_24"].fillna(result["lactate_0"])
-    print(f"    lactate_0 missing: {n_miss_before} → {result['lactate_0'].isna().sum()} (imputed normal=1.0)")
-else:
-    print(f"    lactate_0: no missing values")
+# --- 7c. Lactate: leave missing as NA for principled MICE imputation in 05 ---
+# Previously missing lactate_0 was hard-filled to a "normal" 1.0 mmol/L. That
+# deterministic fill is biased for a causal covariate — unmeasured lactate at
+# CRRT initiation is not "normal", and (with the nearest-measured baseline in
+# Step 3) the missingness is real and differential by dose arm. It also
+# pre-empted 05's MICE, which runs BEFORE drop_na and can impute lactate_0 from
+# the correlated covariates (SOFA, bicarbonate, NEE, …) via pmm with Rubin's
+# rules. We now leave lactate_0 missing so MICE handles it, consistent with
+# bicarbonate_0/potassium_0 (which were never normal-filled). See lessons.md
+# (2026-06-09 baseline-lab forward-fill entry).
+n_lac0_miss = int(result["lactate_0"].isna().sum())
+print(f"\n  Lactate: leaving {n_lac0_miss} missing lactate_0 as NA → MICE in 05 "
+      f"(previously hard-filled to normal=1.0)")
 
 del extra_df
 gc.collect()
