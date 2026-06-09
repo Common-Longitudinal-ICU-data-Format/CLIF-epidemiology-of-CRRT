@@ -663,10 +663,10 @@ def build_trajectories(w: pd.DataFrame) -> None:
 
 
 def build_patient_course(w: pd.DataFrame) -> None:
-    """(D4) Patient state over the CRRT course (On IMV / Off IMV / Discharged
-    alive / Dead) as a stacked area over 30 days, + a time-to-event CSV. Ported
-    from legacy 03; the outcome-trajectory companion to the practice/quality
-    duration & mortality summaries (Part B)."""
+    """(D4) Invasive mechanical ventilation (IMV) state over the CRRT course
+    (On IMV / Off IMV / Discharged alive / Dead) as a stacked area over 30 days,
+    + a time-to-event CSV. Ported from legacy 03; the outcome-trajectory
+    companion to the practice/quality duration & mortality summaries (Part B)."""
     import matplotlib.colors as mcolors
     MAXH = MAX_HOURS_TRAJ
     crrt_init = pd.read_parquet(INTER / "crrt_initiation.parquet")
@@ -727,7 +727,7 @@ def build_patient_course(w: pd.DataFrame) -> None:
     for k in ["imv", "off_imv", "discharged", "dead"]:
         sdf[f"prop_{k}"] = sdf[f"n_{k}"] / sdf["n_total"] * 100
     sdf["site"] = SITE_NAME
-    sdf.to_csv(GRAPHS / f"{SITE_NAME}_patient_state_over_crrt.csv", index=False)
+    sdf.to_csv(GRAPHS / f"{SITE_NAME}_imv_state_over_crrt.csv", index=False)
 
     colors = {
         "On IMV": mcolors.to_rgba(ORANGE, 0.75),
@@ -741,10 +741,10 @@ def build_patient_course(w: pd.DataFrame) -> None:
                  labels=list(colors), colors=list(colors.values()))
     ax.set_xlim(0, MAXH / 24.0); ax.set_ylim(0, 100)
     ax.set_xlabel("Days from CRRT Initiation"); ax.set_ylabel("Proportion of Patients (%)")
-    ax.set_title(f"Patient State Over 30 Days Post-CRRT: {SITE_NAME}")
+    ax.set_title(f"Invasive Mechanical Ventilation State Over 30 Days Post-CRRT: {SITE_NAME}")
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=9)
     fig.tight_layout()
-    fig.savefig(GRAPHS / f"{SITE_NAME}_patient_state_over_crrt.png", dpi=150, bbox_inches="tight")
+    fig.savefig(GRAPHS / f"{SITE_NAME}_imv_state_over_crrt.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     # Time-to-event medians (companion to Part B duration & mortality)
