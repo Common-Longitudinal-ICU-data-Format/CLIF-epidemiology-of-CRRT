@@ -516,338 +516,172 @@ print(f"  Analysis DataFrame: {analysis_df.shape}")
 
 
 # ===================================================================
-# STEP 6: Generate Table 1
+# STEP 6: Table 1 - baseline characteristics by CRRT dose band
 # ===================================================================
-print("Step 6: Generating Table 1 …")
+# Single project Table 1: full analytic CRRT cohort, stratified by initial
+# (median-first-3h) CRRT dose band - Very low (<15) / Low (15-<30) /
+# High (>=30 mL/kg/hr). Emitted in the gtsummary shape consumed by the
+# multi-site combine renderer (09) and the manuscript builder (10): col 0 =
+# __bold__ parent labels + indented categorical levels; strata columns carry
+# "N = X" in the header; final column = p-value across the three bands.
+print("Step 6: Generating Table 1 (baseline by CRRT dose band) ...")
+from scipy import stats as _stats
 
-# --- Encounter-level subgroups (for clinical measurements) ---
-enc_subgroups = {
-    "Baseline": analysis_df,
-    "At 72h - Survivors": analysis_df[analysis_df["alive_72h"]],
-    "At 72h - Non-survivors": analysis_df[analysis_df["dead_within_72h"]],
-    "At discharge - Survivors": analysis_df[analysis_df["in_hosp_death"] == 0],
-    "At discharge - Non-survivors": analysis_df[analysis_df["in_hosp_death"] == 1],
-}
+_wt = index_crrt_df[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
+t1 = analysis_df.merge(_wt, on="encounter_block", how="left")
+if HAS_CRRT_SETTINGS and "ultrafiltration_out" in t1.columns:
+    t1["net_uf_rate"] = (pd.to_numeric(t1["ultrafiltration_out"], errors="coerce")
+                         / pd.to_numeric(t1["weight_kg"], errors="coerce"))
 
-# --- Patient-level subgroups (for static demographics & death) ---
-# Deduplicate: one row per patient, keeping first CRRT encounter
-patient_df = analysis_df.sort_values("crrt_initiation_time").drop_duplicates(subset="patient_id", keep="first")
-pat_subgroups = {
-    "Baseline": patient_df,
-    "At 72h - Survivors": patient_df[patient_df["alive_72h"]],
-    "At 72h - Non-survivors": patient_df[patient_df["dead_within_72h"]],
-    "At discharge - Survivors": patient_df[patient_df["in_hosp_death"] == 0],
-    "At discharge - Non-survivors": patient_df[patient_df["in_hosp_death"] == 1],
-}
+BANDS = ["Very low (<15 mL/kg/hr)", "Low (15-<30 mL/kg/hr)", "High (>=30 mL/kg/hr)"]
+_dose = pd.to_numeric(t1.get("crrt_dose_ml_kg_hr"), errors="coerce")
+t1["dose_band"] = pd.cut(_dose, bins=[float("-inf"), 15, 30, float("inf")],
+                         right=False, labels=BANDS)
 
-SG_NAMES = list(enc_subgroups.keys())
+# Derived display columns (computed once, before building strata frames)
+t1["_female"] = t1["sex_category"].astype("string").str.lower().eq("female")
+t1["_imv"] = t1["device_category"].astype("string").str.lower().eq("imv") if "device_category" in t1.columns else False
+t1["_sepsis"] = (t1["sepsis_within_window"] == True)
+_r = t1["race_category"].astype("string").str.lower().fillna("unknown")
+t1["_race_grp"] = _r.map(lambda s: "Black" if "black" in s else ("White" if s == "white" else "Other"))
 
-# Build rows as 7-element lists matching template structure
-rows: list[list[str]] = []
-
-# Machine-readable long-format rows for multi-site aggregation
-long_rows: list[dict] = []
-
-# ── Header rows ──
-rows.append(["CRRT Population (excluding ESRD patients)"] + [""] * (len(SG_NAMES) + 1))
-rows.append(["", "", SITE_NAME] + [""] * (len(SG_NAMES) - 1))
-rows.append(["", ""] + SG_NAMES)
-
-
-# ── Helper: add categorical variable rows ──
-def add_categorical(var_name: str, levels: list, col_name: str | None = None,
-                    patient_level: bool = False):
-    """Add rows for a categorical variable. All string levels are lowercase."""
-    col = col_name or var_name
-    sgs = pat_subgroups if patient_level else enc_subgroups
-    for level in levels:
-        if level is None:
-            level_str = "None"
-        elif isinstance(level, bool):
-            level_str = str(level).upper()
-        else:
-            level_str = str(level)
-        row = [f"{var_name}, n (%)", level_str]
-        for sg_name, sg_df in sgs.items():
-            if col not in sg_df.columns:
-                row.append("—")
-                continue
-            count = int(sg_df[col].isna().sum()) if level is None else int((sg_df[col] == level).sum())
-            total = len(sg_df)
-            row.append(fmt_n_pct(count, total))
-            long_rows.append({
-                "variable": var_name, "level": level_str, "subgroup": sg_name,
-                "stat_type": "categorical", "n": count, "total": total,
-                "median": None, "q25": None, "q75": None,
-            })
-        rows.append(row)
+GROUPS = ["Overall"] + BANDS
+gframe = {"Overall": t1}
+for _b in BANDS:
+    gframe[_b] = t1[t1["dose_band"] == _b]
+gn = {g: len(gframe[g]) for g in GROUPS}
+GHDR = {g: f"**{g}**  N = {gn[g]:,}" for g in GROUPS}
+_dosed = t1[t1["dose_band"].isin(BANDS)]
+COL = "**Characteristic**"
+PCOL = "**p-value**"
+columns = [COL] + [GHDR[g] for g in GROUPS] + [PCOL]
 
 
-# ── Helper: add continuous variable row ──
-def add_continuous(label: str, col_name: str, col_map: dict | None = None,
-                   patient_level: bool = False):
-    """Add a row for a continuous variable.
-
-    col_map: optional dict {subgroup_name: column_name} to use a different
-    column for specific subgroups (e.g., window-specific means).
-    Falls back to col_name for any subgroup not in col_map.
-    """
-    sgs = pat_subgroups if patient_level else enc_subgroups
-    row = [label, ""]
-    for sg_name, sg_df in sgs.items():
-        col = col_map.get(sg_name, col_name) if col_map else col_name
-        if col in sg_df.columns:
-            valid = sg_df[col].dropna()
-            row.append(fmt_median_iqr(sg_df[col]))
-            long_rows.append({
-                "variable": label, "level": "", "subgroup": sg_name,
-                "stat_type": "continuous", "n": len(valid), "total": len(sg_df),
-                "median": float(valid.median()) if len(valid) > 0 else None,
-                "q25": float(valid.quantile(0.25)) if len(valid) > 0 else None,
-                "q75": float(valid.quantile(0.75)) if len(valid) > 0 else None,
-            })
-        else:
-            row.append("—")
-    rows.append(row)
+def _iqr(s, dec):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return "NA"
+    return f"{s.median():.{dec}f} ({s.quantile(0.25):.{dec}f}, {s.quantile(0.75):.{dec}f})"
 
 
-# ── Per-subgroup column mapping for windowed continuous variables ──
-WINDOW_SUFFIXES = {
-    "Baseline": "baseline",
-    "At 72h - Survivors": "post72h",
-    "At 72h - Non-survivors": "post72h",
-    "At discharge - Survivors": "post_crrt",
-    "At discharge - Non-survivors": "post_crrt",
-}
+def _npct(count, total):
+    return f"{int(count):,} ({100 * count / total:.0f}%)" if total else "NA"
 
 
-def _windowed_col_map(base: str) -> dict:
-    """Build {subgroup: column} mapping for a windowed variable."""
-    return {sg: f"{base}_{suffix}" for sg, suffix in WINDOW_SUFFIXES.items()}
+def _fmt_p(p):
+    if p is None or pd.isna(p):
+        return "NA"
+    if p < 0.001:
+        return "<0.001"
+    return f"{p:.3f}" if p < 0.01 else f"{p:.2f}"
 
 
-# ── Counts ──
-n_pat_row = ["n patients", ""]
-for sg_name, sg_df in pat_subgroups.items():
-    n_pat_row.append(str(len(sg_df)))
-    long_rows.append({
-        "variable": "n_patients", "level": "", "subgroup": sg_name,
-        "stat_type": "count", "n": len(sg_df), "total": len(sg_df),
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(n_pat_row)
+def _p_cont(col):
+    arrs = []
+    for _b in BANDS:
+        a = pd.to_numeric(gframe[_b][col], errors="coerce").dropna()
+        if len(a) >= 2:
+            arrs.append(a)
+    if len(arrs) < 2:
+        return None
+    try:
+        return _stats.kruskal(*arrs).pvalue
+    except Exception:
+        return None
 
-n_hosp_row = ["n hospitalizations ", ""]
-for sg_name, sg_df in enc_subgroups.items():
-    n_hosp_row.append(str(len(sg_df)))
-    long_rows.append({
-        "variable": "n_hospitalizations", "level": "", "subgroup": sg_name,
-        "stat_type": "count", "n": len(sg_df), "total": len(sg_df),
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(n_hosp_row)
 
-# ── Categorical variables (all levels lowercase to match data) ──
-# Patient-level: demographics & death
-add_categorical("sex_category", ["female", "male", None], patient_level=True)
-add_categorical("race_category", [
-    "american indian or alaska native", "asian", "black or african american",
-    "native hawaiian or other pacific islander", None, "other", "unknown", "white",
-], patient_level=True)
-add_categorical("ethnicity_category", ["hispanic", "non-hispanic", None, "unknown"], patient_level=True)
+def _p_cat(series):
+    ct = pd.crosstab(series, _dosed["dose_band"])
+    if ct.shape[0] < 2 or ct.shape[1] < 2:
+        return None
+    try:
+        return _stats.chi2_contingency(ct)[1]
+    except Exception:
+        return None
 
-# Encounter-level: clinical context at CRRT initiation
-add_categorical("location_category", [None, "icu", "procedural", "ward", "ed"])
-add_categorical("location_type", [
-    None, "general_icu", "medical_icu", "mixed_cardiothoracic_icu",
-    "mixed_neuro_icu", "surgical_icu",
-])
-add_categorical("device_category", [
-    None, "cpap", "face mask", "high flow nc", "imv", "nasal cannula",
-    "nippv", "other", "room air", "trach collar",
-])
-# Mortality within window — contextual per subgroup:
-#   Baseline / Discharge columns use in-hospital mortality
-#   72h columns use 72h mortality
-_wm_row_false = ["Mortality within window, n (%)", "FALSE"]
-_wm_row_true = ["Mortality within window, n (%)", "TRUE"]
-_wm_col_map = {
-    "Baseline": "in_hosp_death",
-    "At 72h - Survivors": "dead_within_72h",
-    "At 72h - Non-survivors": "dead_within_72h",
-    "At discharge - Survivors": "in_hosp_death",
-    "At discharge - Non-survivors": "in_hosp_death",
-}
-for sg_name, sg_df in pat_subgroups.items():
-    col = _wm_col_map[sg_name]
-    total = len(sg_df)
-    true_count = int(sg_df[col].sum())
-    false_count = total - true_count
-    _wm_row_false.append(fmt_n_pct(false_count, total))
-    _wm_row_true.append(fmt_n_pct(true_count, total))
-    long_rows.append({
-        "variable": "Mortality within window", "level": "FALSE", "subgroup": sg_name,
-        "stat_type": "categorical", "n": false_count, "total": total,
-        "median": None, "q25": None, "q75": None,
-    })
-    long_rows.append({
-        "variable": "Mortality within window", "level": "TRUE", "subgroup": sg_name,
-        "stat_type": "categorical", "n": true_count, "total": total,
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(_wm_row_false)
-rows.append(_wm_row_true)
 
-# Mortality overall — in-hospital mortality across all subgroups
-add_categorical("Mortality overall", [0, 1], col_name="in_hosp_death", patient_level=True)
-add_categorical("sepsis_within_window", [False, True])
+_rows = []
 
-# ── LOS ──
-add_continuous("hospital LOS (days), median [Q1,Q3]", "hosp_los_days")
-add_continuous("ICU LOS (days), median [Q1,Q3]", "icu_los_days")
 
-# ── Age (patient-level) ──
-add_continuous("age_at_admission, median [Q1,Q3]", "age_at_admission", patient_level=True)
+def _row_cont(label, col, dec):
+    if col not in t1.columns:
+        return
+    r = {COL: f"__{label}__", PCOL: _fmt_p(_p_cont(col))}
+    for g in GROUPS:
+        r[GHDR[g]] = _iqr(gframe[g][col], dec)
+    _rows.append(r)
 
-# ── Vasopressors (windowed per subgroup) ──
-for v in VASO_COLS:
-    add_continuous(f"{v}, median [Q1,Q3]", f"{v}_baseline", col_map=_windowed_col_map(v))
 
-# ── NEE (windowed per subgroup) ──
-for n in NEE_COLS:
-    add_continuous(f"NEE (mcg/kg/min), median [Q1,Q3]", f"{n}_baseline", col_map=_windowed_col_map(n))
+def _row_binary(label, boolcol):
+    r = {COL: f"__{label}__", PCOL: _fmt_p(_p_cat(_dosed[boolcol]))}
+    for g in GROUPS:
+        f = gframe[g]
+        r[GHDR[g]] = _npct(int(f[boolcol].sum()), len(f))
+    _rows.append(r)
 
-# ── Labs (windowed per subgroup) ──
-for lab in LAB_COLS:
-    add_continuous(f"{lab}, median [Q1,Q3]", f"{lab}_baseline", col_map=_windowed_col_map(lab))
 
-# ── Respiratory settings (windowed per subgroup) ──
-for r in RESP_SETTING_COLS:
-    add_continuous(f"{r}, median [Q1,Q3]", f"{r}_baseline", col_map=_windowed_col_map(r))
+def _row_multi(label, col, level_order):
+    _rows.append({COL: f"__{label}__", PCOL: _fmt_p(_p_cat(_dosed[col])),
+                  **{GHDR[g]: "" for g in GROUPS}})
+    for lv, disp in level_order:
+        r = {COL: disp, PCOL: ""}
+        for g in GROUPS:
+            f = gframe[g]
+            r[GHDR[g]] = _npct(int((f[col] == lv).sum()), len(f))
+        _rows.append(r)
 
-# ── SOFA scores (initiation for Baseline, 72h for 72h cols, post for discharge cols) ──
-for s in SOFA_COLS:
-    add_continuous(f"{s}, median [Q1,Q3]", s, col_map={
-        "At 72h - Survivors": f"{s}_72h",
-        "At 72h - Non-survivors": f"{s}_72h",
-        "At discharge - Survivors": f"{s}_post",
-        "At discharge - Non-survivors": f"{s}_post",
-    })
 
-# ── Duration of IMV and vasopressor support ──
-add_continuous("Duration of IMV (hours), median [Q1,Q3]", "imv_duration_hours")
-add_continuous("Duration of vasopressor support (hours), median [Q1,Q3]", "vaso_duration_hours")
-
-# ── CRRT details ──
-rows.append(["CRRT details", ""] + [""] * len(SG_NAMES))
-
-# Duration of CRRT
-add_continuous("Duration of CRRT (hours), median [Q1,Q3]", "duration_hours")
-
+# Demographics
+_row_cont("Age at Admission (years)", "age_at_admission", 0)
+_row_binary("Female (%)", "_female")
+_row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
+# Severity
+_row_cont("SOFA Score", "sofa_total", 0)
+_row_binary("Sepsis within 72h of CRRT (%)", "_sepsis")
+# Baseline labs (at CRRT initiation window)
+_row_cont("Creatinine at CRRT Start (mg/dL)", "creatinine_baseline", 2)
+_row_cont("Lactate at CRRT Start (mmol/L)", "lactate_baseline", 1)
+_row_cont("Bicarbonate at CRRT Start (mEq/L)", "bicarbonate_baseline", 1)
+_row_cont("Potassium at CRRT Start (mEq/L)", "potassium_baseline", 2)
+# Support
+_row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
+_row_binary("On IMV at Baseline (%)", "_imv")
+# CRRT practice descriptors
 if HAS_CRRT_SETTINGS:
-    # CRRT mode distribution
-    modes = sorted(analysis_df["last_crrt_mode"].dropna().unique())
-    add_categorical("last_crrt_mode", modes)
-
-
-    # ── Helper: add continuous row filtered by CRRT mode ──
-    def add_continuous_by_mode(label: str, col_name: str, mode_value: str):
-        """Add a row for a continuous variable, filtered to a specific CRRT mode."""
-        row = [label, ""]
-        for sg_name, sg_df in enc_subgroups.items():
-            mode_df = sg_df[sg_df["last_crrt_mode"] == mode_value]
-            if col_name in mode_df.columns and len(mode_df) > 0:
-                valid = mode_df[col_name].dropna()
-                row.append(fmt_median_iqr(mode_df[col_name]))
-                long_rows.append({
-                    "variable": label, "level": mode_value, "subgroup": sg_name,
-                    "stat_type": "continuous", "n": len(valid), "total": len(mode_df),
-                    "median": float(valid.median()) if len(valid) > 0 else None,
-                    "q25": float(valid.quantile(0.25)) if len(valid) > 0 else None,
-                    "q75": float(valid.quantile(0.75)) if len(valid) > 0 else None,
-                })
-            else:
-                row.append("—")
-        rows.append(row)
-
-
-    # Per-mode CRRT settings and dose
-    crrt_detail_cols = [
-        ("crrt_dose_ml_kg_hr", "crrt_dose_ml_kg_hr, median [Q1,Q3]"),
-        ("blood_flow_rate", "blood_flow_rate, median [Q1,Q3]"),
-        ("pre_filter_replacement_fluid_rate", "pre_filter_replacement_fluid_rate, median [Q1,Q3]"),
-        ("post_filter_replacement_fluid_rate", "post_filter_replacement_fluid_rate, median [Q1,Q3]"),
-        ("dialysate_flow_rate", "dialysate_flow_rate, median [Q1,Q3]"),
-        ("ultrafiltration_out", "ultrafiltration_out, median [Q1,Q3]"),
-    ]
-
-    for mode in modes:
-        rows.append([mode, ""] + [""] * len(SG_NAMES))
-        for col, label in crrt_detail_cols:
-            add_continuous_by_mode(label, col, mode)
-else:
-    rows.append(["CRRT settings not available at this site", ""] + [""] * len(SG_NAMES))
+    _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
+    if _modes:
+        _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
+    _row_cont("Net Ultrafiltration Rate (mL/kg/hr)", "net_uf_rate", 2)
 
 
 # ===================================================================
-# STEP 7: Write output
+# STEP 7: Write Table 1 (gtsummary-shaped CSV + standalone HTML)
 # ===================================================================
-print("Step 7: Writing output …")
-
-table1_df = pd.DataFrame(rows)
-
-# CSV (formatted, for display)
+import re as _re
+print("Step 7: Writing Table 1 ...")
+table1_df = pd.DataFrame(_rows, columns=columns)
 output_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt.csv"
-table1_df.to_csv(output_csv, index=False, header=False)
-print(f"  CSV: {output_csv}")
+table1_df.to_csv(output_csv, index=False)
+print(f"  CSV: {output_csv}  ({len(table1_df)} rows; N {gn})")
 
-# Long-format CSV (machine-readable, for multi-site aggregation)
-long_df = pd.DataFrame(long_rows)
-long_df["site"] = SITE_NAME
-output_long_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt_long.csv"
-long_df.to_csv(output_long_csv, index=False)
-print(f"  Long CSV: {output_long_csv}")
-
-# HTML
+# Standalone HTML (rough per-site view; the dashboard re-renders the pooled
+# table via _render_gtsummary_table_html). Strip markdown for readability.
+_disp = table1_df.copy()
+_disp.columns = [_re.sub(r"\*+", "", c).strip() for c in _disp.columns]
+_disp[_disp.columns[0]] = _disp[_disp.columns[0]].apply(
+    lambda v: _re.sub(r"^__(.+?)__$", r"<b>\1</b>",
+                      ("&nbsp;&nbsp;&nbsp;" + v if not str(v).startswith("__") else v)))
 html_path = FINAL_DIR / f"{SITE_NAME}_table1_crrt.html"
-# Use rows 3+ as the actual data table (skip the 3 header meta-rows)
-data_df = pd.DataFrame(rows[3:], columns=["Variable", "Level"] + SG_NAMES)
-
-html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Table 1 - CRRT Population</title>
-    <style>
-        body {{ font-family: 'Arial', sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1400px; margin: 0 auto; background: white; padding: 30px;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        h1 {{ color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }}
-        th {{ background: #4CAF50; color: white; padding: 12px; text-align: left;
-              border: 1px solid #ddd; }}
-        td {{ padding: 10px; border: 1px solid #ddd; vertical-align: top; }}
-        tr:nth-child(even) {{ background: #f9f9f9; }}
-        tr:hover {{ background: #f0f0f0; }}
-        .footer {{ margin-top: 20px; padding-top: 10px; border-top: 1px solid #ddd;
-                   font-size: 11px; color: #666; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Table 1: CRRT Population (excluding ESRD patients) — {SITE_NAME}</h1>
-        <p><em>Continuous variables: median [Q1, Q3] (n/N with data)</em></p>
-        <p><em>Categorical variables: n (%)</em></p>
-        {data_df.to_html(index=False, escape=False, classes='table')}
-        <div class="footer">
-            <p>Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-    </div>
-</body>
-</html>"""
-
-with open(html_path, "w", encoding="utf-8") as f:
-    f.write(html_content)
+with open(html_path, "w", encoding="utf-8") as _f:
+    _f.write(
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<title>Table 1 - CRRT cohort by dose band</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:20px}"
+        "table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
+        "th{background:#1e417c;color:#fff}</style></head><body>"
+        f"<h2>Table 1: Baseline Characteristics by CRRT Dose Band - {SITE_NAME}</h2>"
+        "<p><em>Continuous: median (Q1, Q3); categorical: n (%). p-value across the three dose bands "
+        "(Kruskal-Wallis / chi-square).</em></p>"
+        + _disp.to_html(index=False, escape=False) + "</body></html>")
 print(f"  HTML: {html_path}")
-
-print("\nDone!")
+print("Done!")

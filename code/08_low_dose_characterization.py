@@ -12,9 +12,8 @@ Emits AGGREGATE per-site CSVs only (no patient-level data). Pooling + rendering
 happen in 10 (manuscript). Three products, all keyed by site:
 
   {SITE}_low_dose_counts.csv   dose-band tally (the RCT-feasibility numbers)
-  {SITE}_low_dose_long.csv     long-format Very-low(10-15) vs Rest comparison,
-                               schema-compatible with table1_crrt_long.csv so 10
-                               can pool/render it the same way as Table 1
+  {SITE}_low_dose_long.csv     long-format Very-low(10-15) vs Rest comparison
+                               (gtsummary-shaped)
   {SITE}_low_dose_table.csv    standalone readable two-column table + p-values
 
 Requires has_crrt_settings=True (dose-defined subcohort). Skips gracefully otherwise.
