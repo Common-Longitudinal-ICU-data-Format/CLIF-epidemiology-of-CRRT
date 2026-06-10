@@ -952,6 +952,124 @@ def build_crrt_state(w: pd.DataFrame) -> None:
     plt.close(fig)
 
 
+# ── Part C2: CRRT dose by ACTUAL vs IDEAL body weight ───────────────────────
+# CRRT dose (mL/kg/hr) is normalized by ACTUAL weight, so a heavier-than-ideal
+# patient gets a lower "dose" purely from a larger denominator. Recompute on
+# IDEAL body weight (Devine, the same predicted-body-weight basis used for
+# ARDSnet tidal volume) and compare the distributions:
+#     dose_ibw = total_flow / IBW = dose_actual * (actual_weight / IBW).
+def _ibw_devine(height_cm: pd.Series, sex: pd.Series) -> pd.Series:
+    """Devine ideal body weight (kg) from height + sex: base (female 45.5,
+    male 50.0) + 2.3 kg per inch over 60. NaN outside plausible adult height
+    [130, 220] cm (the formula degenerates for very short stature)."""
+    h = pd.to_numeric(height_cm, errors="coerce")
+    h_in = (h / 2.54).to_numpy()
+    is_f = sex.astype("string").str.lower().eq("female").to_numpy()
+    ibw = np.where(is_f, 45.5, 50.0) + 2.3 * (h_in - 60.0)
+    return pd.Series(np.where(h.between(130, 220).to_numpy(), ibw, np.nan),
+                     index=height_cm.index)
+
+
+def build_dose_by_ibw() -> None:
+    if not HAS_CRRT_SETTINGS:
+        return
+    t1 = pd.read_parquet(INTER / "tableone_analysis_df.parquet",
+                         columns=["encounter_block", "crrt_dose_ml_kg_hr", "sex_category"])
+    idx = (pd.read_parquet(INTER / "index_crrt_df.parquet", columns=["encounter_block", "weight_kg"])
+           .drop_duplicates("encounter_block"))
+    cohort = pd.read_parquet(INTER / "cohort_df.parquet",
+                             columns=["hospitalization_id", "encounter_block"])
+    df = t1.merge(idx, on="encounter_block", how="left")
+
+    # Height from vitals (clifpy, filtered to cohort + height_cm).
+    from clifpy.clif_orchestrator import ClifOrchestrator
+    clif = ClifOrchestrator(data_directory=TABLES_PATH, filetype=config["file_type"],
+                            timezone=config["timezone"], output_directory="../output")
+    hosp_ids = cohort["hospitalization_id"].astype(str).unique().tolist()
+    safe_load_clif_table(clif, "vitals", tables_path=TABLES_PATH,
+                         columns=["hospitalization_id", "vital_category", "vital_value"],
+                         filters={"vital_category": ["height_cm"], "hospitalization_id": hosp_ids})
+    v = clif.vitals.df
+    if v is None or len(v) == 0:
+        print("  [E] no height_cm in vitals — skipping dose-by-IBW")
+        return
+    v = v.copy()
+    v["hospitalization_id"] = v["hospitalization_id"].astype(str)
+    v["h"] = pd.to_numeric(v["vital_value"], errors="coerce")
+    per_hosp = v.dropna(subset=["h"]).groupby("hospitalization_id")["h"].median()
+    cohort = cohort.copy()
+    cohort["hospitalization_id"] = cohort["hospitalization_id"].astype(str)
+    cohort["height_cm"] = cohort["hospitalization_id"].map(per_hosp)
+    per_eb_h = cohort.dropna(subset=["height_cm"]).groupby("encounter_block")["height_cm"].median()
+    df["height_cm"] = df["encounter_block"].map(per_eb_h)
+
+    df["ibw"] = _ibw_devine(df["height_cm"], df["sex_category"])
+    df["dose_actual"] = pd.to_numeric(df["crrt_dose_ml_kg_hr"], errors="coerce")
+    df["wt"] = pd.to_numeric(df["weight_kg"], errors="coerce")
+    df["dose_ibw"] = df["dose_actual"] * df["wt"] / df["ibw"]
+
+    paired = df[(df["ibw"] > 0)].dropna(subset=["dose_actual", "wt", "ibw", "dose_ibw"])
+    n = len(paired)
+    if n < 30:
+        print(f"  [E] only {n} paired dose+height encounters — skipping dose-by-IBW")
+        return
+    a, b = paired["dose_actual"], paired["dose_ibw"]
+    ratio = paired["wt"] / paired["ibw"]
+    lo2hi = int(((a < 30) & (b >= 30)).sum())   # reclassified low->high on IBW
+    hi2lo = int(((a >= 30) & (b < 30)).sum())
+    obese = int((paired["wt"] > paired["ibw"]).sum())
+
+    # Overlaid histograms (shared bins, display clipped to 80).
+    edges = np.arange(0, 82.5, 2.5)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.hist(a.clip(upper=80), bins=edges, alpha=0.55, color=BLUE, edgecolor="white",
+            label=f"Actual body weight (median {a.median():.1f})")
+    ax.hist(b.clip(upper=80), bins=edges, alpha=0.55, color=ORANGE, edgecolor="white",
+            label=f"Ideal body weight, Devine (median {b.median():.1f})")
+    ax.axvspan(20, 30, color=GREEN, alpha=0.18, label="KDIGO Recommendation (20–30)")
+    ax.axvline(30, color="black", ls="--", lw=1.0, label="High/Low cutoff (30)")
+    ax.set_xlabel("CRRT Dose (mL/kg/hr)")
+    ax.set_ylabel("Encounters")
+    ax.set_title(f"CRRT Dose: Actual vs Ideal Body Weight: {SITE_NAME}")
+    ax.legend(fontsize=8.5, loc="upper right")
+    ax.text(0.97, 0.55,
+            (f"Paired n = {n:,} ({100*n/len(df):.0f}% of cohort with height)\n"
+             f"Median actual/IBW weight ratio: {ratio.median():.2f}\n"
+             f"Heavier than ideal (weight > IBW): {100*obese/n:.0f}%\n"
+             f"Reclassified <30 → ≥30 on IBW: {lo2hi:,}\n"
+             f"Reclassified ≥30 → <30 on IBW: {hi2lo:,}"),
+            transform=ax.transAxes, ha="right", va="top", fontsize=8.5,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"))
+    fig.tight_layout()
+    fig.savefig(GRAPHS / f"{SITE_NAME}_dose_by_ibw.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Pooling exports: full IBW-dose distribution (same shapes/edges as actual)
+    # + an aggregate paired-comparison summary (counts + medians, poolable).
+    _export_distribution(
+        b, "initial_crrt_dose_ibw_ml_kg_hr",
+        hist_edges=np.arange(0, 102.5, 2.5),
+        bands=[("<15 (very low)", 0, 15), ("15-30 (low)", 15, 30),
+               (">=30 (high)", 30, None), ("10-15 (RCT very-low)", 10, 15),
+               ("20-30 (KDIGO band)", 20, 30)],
+        fname=f"{SITE_NAME}_dose_distribution_ibw.csv")
+    comp = [
+        ("n_paired", n), ("median_dose_actual", round(float(a.median()), 4)),
+        ("median_dose_ibw", round(float(b.median()), 4)),
+        ("median_weight_ibw_ratio", round(float(ratio.median()), 4)),
+        ("ratio_q25", round(float(ratio.quantile(.25)), 4)),
+        ("ratio_q75", round(float(ratio.quantile(.75)), 4)),
+        ("n_actual_ge30", int((a >= 30).sum())), ("n_ibw_ge30", int((b >= 30).sum())),
+        ("n_actual_lt15", int((a < 15).sum())), ("n_ibw_lt15", int((b < 15).sum())),
+        ("n_reclass_low_to_high_30", lo2hi), ("n_reclass_high_to_low_30", hi2lo),
+        ("n_weight_gt_ibw", obese),
+    ]
+    pd.DataFrame([{"site": SITE_NAME, "metric": k, "value": val} for k, val in comp]).to_csv(
+        GRAPHS / f"{SITE_NAME}_dose_ibw_comparison.csv", index=False)
+    print(f"  [E] dose-by-IBW: n={n:,}; median {a.median():.1f} (actual) -> "
+          f"{b.median():.1f} (IBW) mL/kg/hr; {lo2hi + hi2lo} reclassified across 30")
+
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 print("\n[A] CRRT incidence / utilization ...")
 inc = build_incidence()
@@ -968,6 +1086,9 @@ print(f"  wrote {pq_path}  ({len(pq)} metric rows)")
 print("\n[C] Distribution figures ...")
 build_figures(inc)
 print(f"  wrote figures to {GRAPHS}")
+
+print("\n[E] CRRT dose by actual vs ideal body weight ...")
+build_dose_by_ibw()
 
 print("\n[D] Longitudinal trajectories (30 d, 3 d inset) ...")
 _traj_w = _load_traj_wide()
