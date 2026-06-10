@@ -1015,8 +1015,12 @@ def build_dose_by_ibw() -> None:
         return
     a, b = paired["dose_actual"], paired["dose_ibw"]
     ratio = paired["wt"] / paired["ibw"]
-    lo2hi = int(((a < 30) & (b >= 30)).sum())   # reclassified low->high on IBW
-    hi2lo = int(((a >= 30) & (b < 30)).sum())
+    # KDIGO 20-30 band membership under each weight basis (matches the framing of
+    # the other dose-distribution epi figures), plus the directional movement.
+    in_a, in_b = a.between(20, 30), b.between(20, 30)
+    n_in_a, n_in_b = int(in_a.sum()), int(in_b.sum())
+    entered = int((~in_a & in_b).sum())   # into the 20-30 band on IBW
+    left = int((in_a & ~in_b).sum())      # out of the 20-30 band on IBW
     obese = int((paired["wt"] > paired["ibw"]).sum())
 
     # Overlaid histograms. DROP (do not clip) values beyond the view so the
@@ -1046,8 +1050,8 @@ def build_dose_by_ibw() -> None:
             (f"Paired n = {n:,} ({100*n/len(df):.0f}% of cohort with height)\n"
              f"Median actual/IBW weight ratio: {ratio.median():.2f}\n"
              f"Heavier than ideal (weight > IBW): {100*obese/n:.0f}%\n"
-             f"Reclassified <30 → ≥30 on IBW: {lo2hi:,}\n"
-             f"Reclassified ≥30 → <30 on IBW: {hi2lo:,}"),
+             f"In KDIGO 20–30 band: actual {100*n_in_a/n:.0f}% → IBW {100*n_in_b/n:.0f}%\n"
+             f"  (entered {entered:,}, left {left:,} on IBW)"),
             transform=ax.transAxes, ha="right", va="top", fontsize=8.5,
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"))
     fig.tight_layout()
@@ -1069,15 +1073,18 @@ def build_dose_by_ibw() -> None:
         ("median_weight_ibw_ratio", round(float(ratio.median()), 4)),
         ("ratio_q25", round(float(ratio.quantile(.25)), 4)),
         ("ratio_q75", round(float(ratio.quantile(.75)), 4)),
+        ("n_kdigo_20_30_actual", n_in_a), ("n_kdigo_20_30_ibw", n_in_b),
+        ("n_entered_kdigo_20_30_on_ibw", entered),
+        ("n_left_kdigo_20_30_on_ibw", left),
         ("n_actual_ge30", int((a >= 30).sum())), ("n_ibw_ge30", int((b >= 30).sum())),
         ("n_actual_lt15", int((a < 15).sum())), ("n_ibw_lt15", int((b < 15).sum())),
-        ("n_reclass_low_to_high_30", lo2hi), ("n_reclass_high_to_low_30", hi2lo),
         ("n_weight_gt_ibw", obese),
     ]
     pd.DataFrame([{"site": SITE_NAME, "metric": k, "value": val} for k, val in comp]).to_csv(
         GRAPHS / f"{SITE_NAME}_dose_ibw_comparison.csv", index=False)
     print(f"  [E] dose-by-IBW: n={n:,}; median {a.median():.1f} (actual) -> "
-          f"{b.median():.1f} (IBW) mL/kg/hr; {lo2hi + hi2lo} reclassified across 30")
+          f"{b.median():.1f} (IBW) mL/kg/hr; KDIGO 20-30 band {n_in_a} actual -> "
+          f"{n_in_b} IBW (entered {entered}, left {left})")
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────
