@@ -1019,18 +1019,28 @@ def build_dose_by_ibw() -> None:
     hi2lo = int(((a >= 30) & (b < 30)).sum())
     obese = int((paired["wt"] > paired["ibw"]).sum())
 
-    # Overlaid histograms (shared bins, display clipped to 80).
-    edges = np.arange(0, 82.5, 2.5)
+    # Overlaid histograms. DROP (do not clip) values beyond the view so the
+    # right tail is not piled into the edge bin; width-2 bins match the
+    # actual-weight dose_distribution.png. Range extends to 100 because the
+    # IBW-normalized distribution is shifted right. Medians (in the legend) are
+    # computed on the FULL vectors, so they are unaffected by the display range.
+    disp_max = 100
+    disp_edges = np.arange(0, disp_max + 2, 2)
+    a_disp, b_disp = a[a.between(0, disp_max)], b[b.between(0, disp_max)]
+    n_a_over = int((a > disp_max).sum())
+    n_b_over = int((b > disp_max).sum())
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.hist(a.clip(upper=80), bins=edges, alpha=0.55, color=BLUE, edgecolor="white",
+    ax.hist(a_disp, bins=disp_edges, alpha=0.55, color=BLUE, edgecolor="white",
             label=f"Actual body weight (median {a.median():.1f})")
-    ax.hist(b.clip(upper=80), bins=edges, alpha=0.55, color=ORANGE, edgecolor="white",
+    ax.hist(b_disp, bins=disp_edges, alpha=0.55, color=ORANGE, edgecolor="white",
             label=f"Ideal body weight, Devine (median {b.median():.1f})")
     ax.axvspan(20, 30, color=GREEN, alpha=0.18, label="KDIGO Recommendation (20–30)")
     ax.axvline(30, color="black", ls="--", lw=1.0, label="High/Low cutoff (30)")
+    ax.set_xlim(0, disp_max)
     ax.set_xlabel("CRRT Dose (mL/kg/hr)")
     ax.set_ylabel("Encounters")
-    ax.set_title(f"CRRT Dose: Actual vs Ideal Body Weight: {SITE_NAME}")
+    _over = f"  (>{disp_max} not shown: actual {n_a_over}, IBW {n_b_over})" if (n_a_over or n_b_over) else ""
+    ax.set_title(f"CRRT Dose: Actual vs Ideal Body Weight: {SITE_NAME}{_over}")
     ax.legend(fontsize=8.5, loc="upper right")
     ax.text(0.97, 0.55,
             (f"Paired n = {n:,} ({100*n/len(df):.0f}% of cohort with height)\n"
