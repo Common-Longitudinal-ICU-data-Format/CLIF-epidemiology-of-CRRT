@@ -51,7 +51,7 @@ if [ "$DESCRIPTIVE_ONLY" = true ]; then
         "01_create_wide_df.py"
         "02_construct_crrt_tableone.py"
         "03_crrt_epidemiology.py"
-        "08_low_dose_characterization.py"
+        "06_low_dose_characterization.py"
     )
     R_STEPS=()
 else
@@ -60,8 +60,8 @@ else
         "01_create_wide_df.py"
         "02_construct_crrt_tableone.py"
         "03_crrt_epidemiology.py"
-        "08_low_dose_characterization.py"
-        "04_build_msm_competing_risk_df.py"
+        "06_low_dose_characterization.py"
+        "04_build_causal_df.py"
     )
     R_STEPS=(
         "05_PSM_IPTW_CRRT_dose.R"

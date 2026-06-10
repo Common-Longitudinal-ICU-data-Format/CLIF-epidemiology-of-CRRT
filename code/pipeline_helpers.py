@@ -31,12 +31,12 @@ _PRODUCERS = {
     "wide_df.parquet": "01_create_wide_df.py",
     "tableone_analysis_df.parquet": "02_construct_crrt_tableone.py",
     "hospital_diagnosis_df.parquet": "00_cohort.py",
-    "msm_competing_risk_df.parquet": "04_build_msm_competing_risk_df.py",
+    "causal_df.parquet": "04_build_causal_df.py",
 }
 
 _PIPELINE_ORDER = (
     "00_cohort.py -> 01_create_wide_df.py -> 02_construct_crrt_tableone.py "
-    "-> 03_crrt_epidemiology.py -> 04_build_msm_competing_risk_df.py"
+    "-> 03_crrt_epidemiology.py -> 04_build_causal_df.py"
 )
 
 _VALID_FILE_TYPES = {"parquet", "csv", "fst"}

@@ -1,5 +1,5 @@
 """
-08_low_dose_characterization.py — very-low-dose CRRT subcohort (descriptive).
+06_low_dose_characterization.py — very-low-dose CRRT subcohort (descriptive).
 
 Characterizes the very-low-dose CRRT subcohort (dose 10-15 mL/kg/hr,
 the range targeted by upcoming low-dose RCTs, e.g. NCT06021288) across the
@@ -19,7 +19,7 @@ happen in 10 (manuscript). Three products, all keyed by site:
 Requires has_crrt_settings=True (dose-defined subcohort). Skips gracefully otherwise.
 
 Run standalone (from repo root):
-    uv run python code/08_low_dose_characterization.py
+    uv run python code/06_low_dose_characterization.py
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 LOW_LO, LOW_HI = 10.0, 15.0  # very-low-dose band (mL/kg/hr), inclusive
 
 t_start = time.time()
-print(f"=== 08 low-dose CRRT characterization — {SITE_NAME} ===")
+print(f"=== 06 low-dose CRRT characterization — {SITE_NAME} ===")
 
 if not HAS_CRRT_SETTINGS:
     print("  has_crrt_settings=False — dose-defined subcohort not computable; skipping.")
@@ -210,4 +210,4 @@ table_df["p"] = table_df["p"].map(_fmt_p)
 table_df.to_csv(OUT / f"{SITE_NAME}_low_dose_table.csv", index=False)
 
 print(f"  wrote counts / long / table CSVs to {OUT}")
-print(f"=== 08 complete in {time.time() - t_start:.1f}s ===")
+print(f"=== 06 complete in {time.time() - t_start:.1f}s ===")

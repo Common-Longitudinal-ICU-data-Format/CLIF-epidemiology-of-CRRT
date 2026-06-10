@@ -158,11 +158,11 @@ Comprehensive per-site descriptive epidemiology (consolidates the former descrip
 
 > These steps require the descriptive pipeline (steps 00-03) to have completed first.
 
-#### Step 04: Competing Risk DataFrame & Causal CONSORT (`04_build_msm_competing_risk_df.py`)
+#### Step 04: Competing Risk DataFrame & Causal CONSORT (`04_build_causal_df.py`)
 Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxygenation, vasopressors, IMV, and Charlson Comorbidity Index at t=0/12/24h windows. Includes sensitivity columns for 24h/48h interval analyses. Generates a missingness heatmap and a CONSORT flow diagram showing cohort narrowing from descriptive analysis through causal eligibility criteria.
 
 **Outputs:**
-- `output/intermediate/msm_competing_risk_df.parquet`
+- `output/intermediate/causal_df.parquet`
 - `output/final/crrt_epi/graphs/{site}_missingness_heatmap.png`
 - `output/final/psm_iptw/{site}_causal_consort_diagram.{png,pdf}`
 
@@ -198,7 +198,7 @@ output/
 │   ├── crrt_initiation.parquet
 │   ├── wide_df.parquet
 │   ├── tableone_analysis_df.parquet
-│   └── msm_competing_risk_df.parquet
+│   └── causal_df.parquet
 │
 └── final/                           # All files are site-prefixed (e.g., UCMC_*)
     ├── crrt_epi/                    # Descriptive epidemiology

@@ -122,7 +122,7 @@ cat("Site:", SITE_NAME, "\n")
 cat("Timezone:", config$timezone, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate/msm_competing_risk_df.parquet"
+data_path <- "output/intermediate/causal_df.parquet"
 if (!file.exists(data_path)) {
   stop("File '", data_path, "' not found.")
 }

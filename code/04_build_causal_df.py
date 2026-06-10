@@ -1,5 +1,7 @@
 """
-Build the MSM / competing-risk analysis dataframe (59 columns).
+Build the point-treatment causal / competing-risk analysis dataframe (59 columns).
+(Formerly 04_build_msm_competing_risk_df.py; the time-varying MSM analysis it
+also fed was cut from the manuscript and archived, tag msm-v1.)
 
 Extends the archived 04_build_competing_risk_df.py with:
   - P/F or S/F ratio at t=0 and t=12 (labeled pf_sf_ratio; PaO2/FiO2 if available, else SpO2/FiO2)
@@ -8,11 +10,11 @@ Extends the archived 04_build_competing_risk_df.py with:
   - 19 CCI binary components (from clifpy.calculate_cci + ICD-10 cancer split)
   - 30-day censoring (columns named time_to_event_90d / censored_at_90d
     to match R script expectations)
-  - Sensitivity analysis columns for 24h/48h MSM: CRRT dose (0-24h, 24-48h),
+  - Sensitivity analysis columns for 24h/48h intervals: CRRT dose (0-24h, 24-48h),
     labs/SOFA/pf_sf_ratio/NEE/IMV at t=24, and 48h eligibility flag
   - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
-Usage: uv run python code/04_build_msm_competing_risk_df.py
+Usage: uv run python code/04_build_causal_df.py
 """
 
 import json
@@ -959,7 +961,7 @@ n_total = len(result)
 print(f"  Eligible for 48h sensitivity: {n_eligible}/{n_total} "
       f"({n_eligible / n_total * 100:.1f}%)")
 if n_eligible < 200:
-    print(f"  WARNING: N={n_eligible} may be underpowered for sensitivity MSM")
+    print(f"  WARNING: N={n_eligible} may be underpowered for the 48h sensitivity analysis")
 
 # ===================================================================
 # STEP 10: Final column ordering per schema (59 columns)
@@ -1101,12 +1103,12 @@ else:
     print("  No missing covariates — heatmap skipped")
 
 # Save
-out_path = OUTPUT_DIR / "msm_competing_risk_df.parquet"
+out_path = OUTPUT_DIR / "causal_df.parquet"
 result["site_id"] = SITE
 result.to_parquet(out_path, index=False)
 print(f"\nSaved: {out_path} ({len(result)} rows x {len(result.columns)} cols)")
 
-csv_path = OUTPUT_DIR / "msm_competing_risk_df.csv"
+csv_path = OUTPUT_DIR / "causal_df.csv"
 result.to_csv(csv_path, index=False)
 print(f"Saved: {csv_path}")
 
