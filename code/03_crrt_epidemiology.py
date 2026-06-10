@@ -1034,9 +1034,9 @@ def build_dose_by_ibw() -> None:
     n_a_over = int((a > disp_max).sum())
     n_b_over = int((b > disp_max).sum())
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.hist(a_disp, bins=disp_edges, alpha=0.55, color=BLUE, edgecolor="white",
+    ax.hist(a_disp, bins=disp_edges, alpha=0.55, color=BLUE, edgecolor="black", linewidth=0.5,
             label=f"Actual body weight (median {a.median():.1f})")
-    ax.hist(b_disp, bins=disp_edges, alpha=0.55, color=ORANGE, edgecolor="white",
+    ax.hist(b_disp, bins=disp_edges, alpha=0.55, color=ORANGE, edgecolor="black", linewidth=0.5,
             label=f"Ideal body weight, Devine (median {b.median():.1f})")
     ax.axvspan(20, 30, color=GREEN, alpha=0.18, label="KDIGO Recommendation (20–30)")
     ax.axvline(30, color="black", ls="--", lw=1.0, label="High/Low cutoff (30)")
