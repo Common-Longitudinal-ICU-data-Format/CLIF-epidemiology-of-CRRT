@@ -203,9 +203,23 @@ def _q(series: pd.Series) -> tuple[float, float, float, int]:
     return (s.median(), s.quantile(0.25), s.quantile(0.75), len(s))
 
 
-def _long(rows: list, variable, stat, value, n=None, denom=None):
+def _long(rows: list, variable, stat, value, n=None, denom=None,
+          median=None, q25=None, q75=None, mean=None, sd=None):
+    # `value` keeps the human-readable display string (e.g. "32.9 [24.1, 41.2]");
+    # the numeric median/q25/q75/mean/sd columns are what cross-site pooling uses
+    # (a formatted string cannot be N-weighted or inverse-variance meta-analyzed).
     rows.append({"site": SITE_NAME, "variable": variable, "stat": stat,
-                 "value": value, "n": n, "denominator": denom})
+                 "value": value, "n": n, "denominator": denom,
+                 "median": median, "q25": q25, "q75": q75,
+                 "mean": mean, "sd": sd})
+
+
+def _meansd(series: pd.Series) -> tuple[float, float]:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return (np.nan, np.nan)
+    return (round(float(s.mean()), 4),
+            round(float(s.std(ddof=1)), 4) if len(s) > 1 else np.nan)
 
 
 def build_practice_quality() -> pd.DataFrame:
@@ -224,7 +238,9 @@ def build_practice_quality() -> pd.DataFrame:
         # CRRT dose (median-first-3h; prescribed machine dose) + KDIGO bands
         dose = pd.to_numeric(coh["crrt_dose_ml_kg_hr"], errors="coerce")
         med, q1, q3, n = _q(dose)
-        _long(rows, "CRRT dose (mL/kg/hr)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n)
+        mn, sd = _meansd(dose)
+        _long(rows, "CRRT dose (mL/kg/hr)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n,
+              median=med, q25=q1, q75=q3, mean=mn, sd=sd)
         d = dose.dropna()
         bands = {
             "<15 (very low)": (d < 15),
@@ -242,7 +258,9 @@ def build_practice_quality() -> pd.DataFrame:
         uf_rate = uf / wt
         uf_rate = uf_rate.where(uf_rate.between(0, 12))  # drop implausible (>~1000 mL/hr)
         med, q1, q3, n = _q(uf_rate)
-        _long(rows, "Net UF rate (mL/kg/hr)", "median_iqr", f"{med:.2f} [{q1:.2f}, {q3:.2f}]", n)
+        mn, sd = _meansd(uf_rate)
+        _long(rows, "Net UF rate (mL/kg/hr)", "median_iqr", f"{med:.2f} [{q1:.2f}, {q3:.2f}]", n,
+              median=med, q25=q1, q75=q3, mean=mn, sd=sd)
         r = uf_rate.dropna()
         in_band = (r >= 1.0) & (r <= 1.75)
         _long(rows, "Net UF rate", "pct_in_1.0-1.75_band",
@@ -255,7 +273,9 @@ def build_practice_quality() -> pd.DataFrame:
 
         # Blood flow rate
         med, q1, q3, n = _q(coh["blood_flow_rate"])
-        _long(rows, "Blood flow rate (mL/min)", "median_iqr", f"{med:.0f} [{q1:.0f}, {q3:.0f}]", n)
+        mn, sd = _meansd(coh["blood_flow_rate"])
+        _long(rows, "Blood flow rate (mL/min)", "median_iqr", f"{med:.0f} [{q1:.0f}, {q3:.0f}]", n,
+              median=med, q25=q1, q75=q3, mean=mn, sd=sd)
 
         # Acid-base delivery adequacy: among acidotic at baseline, % corrected by post window
         ph_b = pd.to_numeric(coh["ph_arterial_baseline"], errors="coerce")
@@ -274,11 +294,15 @@ def build_practice_quality() -> pd.DataFrame:
     tti = (init - fv).dt.total_seconds() / 3600.0
     tti = tti.where(tti >= 0)
     med, q1, q3, n = _q(tti)
-    _long(rows, "Time to CRRT from first vital (h)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n)
+    mn, sd = _meansd(tti)
+    _long(rows, "Time to CRRT from first vital (h)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n,
+          median=med, q25=q1, q75=q3, mean=mn, sd=sd)
 
     # CRRT duration (days)
     med, q1, q3, n = _q(coh["duration_days"])
-    _long(rows, "CRRT duration (days)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n)
+    mn, sd = _meansd(coh["duration_days"])
+    _long(rows, "CRRT duration (days)", "median_iqr", f"{med:.1f} [{q1:.1f}, {q3:.1f}]", n,
+          median=med, q25=q1, q75=q3, mean=mn, sd=sd)
 
     # Outcomes
     for col, label in [("death_30d", "30-day mortality"), ("in_hosp_death", "In-hospital mortality")]:
@@ -315,6 +339,51 @@ def _barh_incidence(d: pd.DataFrame, title: str, fname: str, prettify: bool) -> 
     fig.tight_layout()
     fig.savefig(GRAPHS / fname, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _export_distribution(values, variable: str, hist_edges, bands, fname: str) -> None:
+    """Export sufficient statistics for a 1-D distribution so it can be pooled
+    cross-site by whatever method we pick later (pooled quantiles, a summed
+    pooled histogram, or band-proportion meta-analysis) WITHOUT re-running sites.
+
+    Tidy long format: columns (site, variable, kind, key, value).
+      kind=summary : key in {n, mean, sd, min, p1, p5, p10, p25, p50, p75, p90,
+                     p95, p99, max}
+      kind=band    : key = clinical band label, value = count in that band
+                     (bands are named subsets, NOT necessarily a partition)
+      kind=hist    : key = 'lo-hi', value = count in fixed bin [lo, hi); plus
+                     '<lo' / '>hi' under/overflow rows so the bin counts
+                     reconcile to n.
+    `bands` = list of (label, lo, hi); hi=None => [lo, inf). `hist_edges` are
+    shared fixed edges (identical across sites so bins are summable)."""
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    rows = []
+
+    def add(kind, key, value):
+        rows.append({"site": SITE_NAME, "variable": variable,
+                     "kind": kind, "key": key, "value": value})
+
+    n = int(len(v))
+    add("summary", "n", n)
+    if n:
+        add("summary", "mean", round(float(v.mean()), 4))
+        add("summary", "sd", round(float(v.std(ddof=1)), 4) if n > 1 else np.nan)
+        for p in (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100):
+            key = {0: "min", 100: "max"}.get(p, f"p{p}")
+            add("summary", key, round(float(v.quantile(p / 100.0)), 4))
+        for label, lo, hi in bands:
+            cnt = (v >= lo).sum() if hi is None else ((v >= lo) & (v < hi)).sum()
+            add("band", label, int(cnt))
+        edges = np.asarray(hist_edges, dtype=float)
+        counts, _ = np.histogram(v, bins=edges)  # last bin is closed on the right
+        for i, c in enumerate(counts):
+            add("hist", f"{edges[i]:g}-{edges[i + 1]:g}", int(c))
+        under, over = int((v < edges[0]).sum()), int((v > edges[-1]).sum())
+        if under:
+            add("hist", f"<{edges[0]:g}", under)
+        if over:
+            add("hist", f">{edges[-1]:g}", over)
+    pd.DataFrame(rows).to_csv(GRAPHS / fname, index=False)
 
 
 def build_figures(inc_df: pd.DataFrame) -> None:
@@ -362,6 +431,14 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+        # Pooling export (full vector; bands incl. Table-1 dose bands + figure highlights)
+        _export_distribution(
+            dose_all, "initial_crrt_dose_ml_kg_hr",
+            hist_edges=np.arange(0, 102.5, 2.5),
+            bands=[("<15 (very low)", 0, 15), ("15-30 (low)", 15, 30),
+                   (">=30 (high)", 30, None), ("10-15 (RCT very-low)", 10, 15),
+                   ("20-30 (KDIGO band)", 20, 30)],
+            fname=f"{SITE_NAME}_dose_distribution.csv")
 
     # Per-encounter net UF rate (mL/kg/hr), shared by figures (3) and (4).
     w = idx[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
@@ -403,6 +480,14 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_distribution.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+    # Pooling export (full plausible vector [0,12]; Murugan bands + zero subset)
+    _export_distribution(
+        uf_rate[uf_rate.between(0, 12)], "net_uf_rate_ml_kg_hr",
+        hist_edges=np.arange(0, 6.25, 0.25),
+        bands=[("zero", 0, 1e-9), ("low <1.01", 0, 1.01),
+               ("middle 1.01-1.75", 1.01, 1.75), ("high >=1.75", 1.75, None)],
+        fname=f"{SITE_NAME}_net_uf_distribution.csv")
+
     # (4) Crude 30-day mortality vs net UF rate (Murugan 2019 Fig e2 style; binned,
     #     marker size ∝ n). Descriptive only — shows the nonlinear (J-shaped)
     #     association; deliberately NOT the Gray time-varying-coefficient survival
@@ -413,13 +498,23 @@ def build_figures(inc_df: pd.DataFrame) -> None:
     if len(mm) >= 50:
         edges = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 4.0]
         mm["bin"] = pd.cut(mm["uf"], bins=edges, include_lowest=True)
-        g = mm.groupby("bin", observed=True)["death"].agg(["mean", "size"])
-        g = g[g["size"] >= 15]
+        gb = (mm.groupby("bin", observed=True)["death"]
+              .agg(n="size", n_deaths="sum").reset_index())
+        gb["bin_left"] = [iv.left for iv in gb["bin"]]
+        gb["bin_right"] = [iv.right for iv in gb["bin"]]
+        gb["bin_mid"] = [iv.mid for iv in gb["bin"]]
+        gb["mortality_pct"] = (gb["n_deaths"] / gb["n"] * 100).round(2)
+        gb["site"] = SITE_NAME
+        # Pooling export: ALL bins (the n>=15 filter below is display-only). Sum
+        # n + n_deaths per bin across sites to pool the mortality-vs-UF curve.
+        gb[["site", "bin_left", "bin_right", "bin_mid", "n", "n_deaths",
+            "mortality_pct"]].to_csv(GRAPHS / f"{SITE_NAME}_uf_mortality.csv", index=False)
+        g = gb[gb["n"] >= 15]
         if len(g) >= 3:
-            x = [iv.mid for iv in g.index]
-            y = (g["mean"] * 100).to_numpy()
-            smax = float(g["size"].max())
-            sizes = (30 + 200 * g["size"] / smax).to_numpy()
+            x = g["bin_mid"].to_numpy()
+            y = g["mortality_pct"].to_numpy()
+            smax = float(g["n"].max())
+            sizes = (30 + 200 * g["n"] / smax).to_numpy()
             fig, ax = plt.subplots(figsize=(8, 5))
             ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan middle (1.01–1.75)")
             ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
@@ -496,13 +591,18 @@ def _median_iqr_by_bin(df: pd.DataFrame, col: str, bin_h: int = BIN_H,
     d["_v"] = pd.to_numeric(d[col], errors="coerce")
     d = d.dropna(subset=["_v"])
     if d.empty:
-        return pd.DataFrame(columns=["hour", "median", "q25", "q75", "n", "site"])
+        return pd.DataFrame(columns=["hour", "median", "q25", "q75", "n",
+                                     "mean", "sd", "site"])
     d["hour"] = (d["hours_from_crrt"] // bin_h).astype(int) * bin_h + bin_h / 2.0
     # one value per encounter per bin
     per_pt = d.groupby(["encounter_block", "hour"], observed=True)["_v"].median().reset_index()
+    # median + IQR + n drive the per-patient trajectory plot; mean + sd are
+    # exported alongside so cross-site pooling can use either N-weighted medians
+    # or inverse-variance meta-analysis of the per-bin value (chosen later).
     g = (per_pt.groupby("hour")["_v"]
          .agg(median="median", q25=lambda x: x.quantile(0.25),
-              q75=lambda x: x.quantile(0.75), n="count")
+              q75=lambda x: x.quantile(0.75), n="count",
+              mean="mean", sd="std")
          .reset_index())
     g["site"] = SITE_NAME
     return g
