@@ -35,7 +35,9 @@ import json  # noqa: E402
 with open(project_root / "config" / "config.json") as _f:
     config = json.load(_f)
 
-from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
+from pipeline_helpers import (  # noqa: E402
+    validate_config, load_intermediate, get_tables_path, course_average_intensity,
+)
 config = validate_config(config)
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
@@ -293,7 +295,8 @@ resp_wide = [f"resp_{c}" for c in RESP_SETTING_COLS] + ["resp_device_category"]
 adt_wide = ["adt_location_category", "adt_location_type"]
 
 available_cols = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
-needed_cols = ["hospitalization_id", "event_dttm"] + lab_wide + vaso_wide + nee_wide + resp_wide + adt_wide
+needed_cols = (["hospitalization_id", "event_dttm", "crrt_ultrafiltration_out"]
+               + lab_wide + vaso_wide + nee_wide + resp_wide + adt_wide)
 needed_cols = [c for c in needed_cols if c in available_cols]
 
 wide_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_cols)
@@ -307,6 +310,26 @@ wide_df["hours_from_crrt"] = (
     (wide_df["event_dttm"] - wide_df["crrt_initiation_time"]).dt.total_seconds() / 3600
 )
 print(f"  wide_df: {wide_df.shape}")
+
+# Net UF intensity (mL/kg/hr) over the FIRST 72 h of CRRT — the Murugan / 2025
+# literature definition (total UFnet / weight / duration), replacing the first-3h
+# initiation snapshot. The fixed early window matches the published UFnet
+# intensity exposure and avoids the duration/survivorship confound of a
+# whole-course average. Shares ONE definition with 03's figures via
+# pipeline_helpers (same 72 h window).
+UF_INTENSITY_WINDOW_H = 72.0
+_uf_intensity_by_eb = None
+if HAS_CRRT_SETTINGS and "crrt_ultrafiltration_out" in wide_df.columns:
+    _wt_eb = index_crrt_df[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
+    _uf_recs = wide_df[["encounter_block", "hours_from_crrt", "crrt_ultrafiltration_out"]].merge(
+        _wt_eb, on="encounter_block", how="left")
+    _uf_recs["uf_rate"] = (pd.to_numeric(_uf_recs["crrt_ultrafiltration_out"], errors="coerce")
+                           / pd.to_numeric(_uf_recs["weight_kg"], errors="coerce"))
+    _uf_int = course_average_intensity(_uf_recs, "encounter_block", "hours_from_crrt",
+                                       "uf_rate", max_h=UF_INTENSITY_WINDOW_H)
+    _uf_intensity_by_eb = _uf_int.set_index("encounter_block")["intensity"]
+    _med = _uf_int["intensity"].median() if len(_uf_int) else float("nan")
+    print(f"    net UF intensity (first 72h): {len(_uf_int)} encounters, median {_med:.2f} mL/kg/hr")
 
 # -------------------------------------------------------------------
 # 4a: 12h forward-fill for labs
@@ -519,18 +542,19 @@ print(f"  Analysis DataFrame: {analysis_df.shape}")
 # STEP 6: Table 1 - baseline characteristics by CRRT dose band
 # ===================================================================
 # Single project Table 1: full analytic CRRT cohort, stratified by initial
-# (median-first-3h) CRRT dose band - Very low (<15) / Low (15-30) /
-# High (>=30 mL/kg/hr). gtsummary shape consumed by the combine renderer (09)
-# and manuscript builder (10). p-value is across the three bands
-# (Kruskal-Wallis for continuous, chi-square for categorical).
+# (median-first-3h) CRRT dose band - <20 / 20-30 / >30 mL/kg/hr (the 20-30
+# band brackets the KDIGO-recommended delivered target). gtsummary shape
+# consumed by the combine renderer (09) and manuscript builder (10). p-value
+# is across the three bands (Kruskal-Wallis for continuous, chi-square for
+# categorical).
 print("Step 6: Generating Table 1 (baseline by CRRT dose band) ...")
 from scipy import stats as _stats
 
 _wt = index_crrt_df[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
 t1 = analysis_df.merge(_wt, on="encounter_block", how="left")
-if HAS_CRRT_SETTINGS and "ultrafiltration_out" in t1.columns:
-    t1["net_uf_rate"] = (pd.to_numeric(t1["ultrafiltration_out"], errors="coerce")
-                         / pd.to_numeric(t1["weight_kg"], errors="coerce"))
+if _uf_intensity_by_eb is not None:
+    # Course-average net UF intensity (mL/kg/hr) — NOT the first-3h snapshot.
+    t1["net_uf_intensity"] = t1["encounter_block"].map(_uf_intensity_by_eb)
 
 # Accurate baseline labs for Table 1: the value MEASURED nearest CRRT
 # initiation within [-12, +3] h. This avoids the unlimited-forward-fill
@@ -558,10 +582,16 @@ for x in _LABS:
         t1[f"{x}_t1"] = t1["encounter_block"].map(near)
 del _wd
 
-BANDS = ["Very low (<15 mL/kg/hr)", "Low (15-30 mL/kg/hr)", "High (>=30 mL/kg/hr)"]
+BANDS = ["<20 mL/kg/hr", "20-30 mL/kg/hr", ">30 mL/kg/hr"]
 _dose = pd.to_numeric(t1.get("crrt_dose_ml_kg_hr"), errors="coerce")
-t1["dose_band"] = pd.cut(_dose, bins=[float("-inf"), 15, 30, float("inf")],
-                         right=False, labels=BANDS)
+# Exact band membership: <20, 20-30 (inclusive of both ends), >30. Mask-based
+# (not pd.cut) so dose==30 lands in the 20-30 guideline band, not >30; missing
+# dose stays NA.
+t1["dose_band"] = pd.Series(pd.NA, index=t1.index, dtype="object")
+t1.loc[_dose < 20, "dose_band"] = BANDS[0]
+t1.loc[(_dose >= 20) & (_dose <= 30), "dose_band"] = BANDS[1]
+t1.loc[_dose > 30, "dose_band"] = BANDS[2]
+t1["dose_band"] = pd.Categorical(t1["dose_band"], categories=BANDS, ordered=True)
 
 # Derived display columns (computed before building strata frames)
 t1["_female"] = t1["sex_category"].astype("string").str.lower().eq("female")
@@ -676,7 +706,7 @@ if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
-    _row_cont("Net Ultrafiltration Rate (mL/kg/hr)", "net_uf_rate", 2)
+    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
 # Outcome
 _row_binary("30-Day Mortality (%)", "_death30")
 

@@ -249,3 +249,49 @@ def get_tables_path(
         tables_path, file_type, hospitalization_ids, filtered_dir, config,
         patient_ids=patient_ids,
     )
+
+
+# ── Net ultrafiltration over the CRRT course (shared by 02 Table 1 + 03 figs) ──
+# Net UF is a persisting machine SETTING (a rate, mL/hr), so the volume removed
+# over an inter-record interval = rate * dt. Integrating across the whole course
+# (rather than reading the first-3h initiation snapshot, where net UF is routinely
+# 0 during the hemodynamic ramp-up) gives the clinically meaningful net-UF burden.
+# ONE definition lives here so Table 1 (02) and the trajectory/intensity figures
+# (03) cannot diverge.
+
+def integrate_persisting_rate(records, group_col, time_col, rate_col,
+                              max_h: float = 720.0, max_gap: float = 6.0):
+    """Cumulative integral of a PERSISTING rate series via gap-capped left-Riemann
+    sums. `records` has one row per measurement with [group_col, time_col (hours
+    from the anchor), rate_col]. dt = gap to the next record within the group,
+    CAPPED at `max_gap` h (an uncapped gap would accrue a stale rate across an
+    off-CRRT pause). Returns the sorted rows with added `dt` and `cum` (running
+    integral). Reserve for quantities that persist between records (rates,
+    settings), NEVER point measurements (labs)."""
+    d = records.dropna(subset=[rate_col]).copy()
+    d = d[(d[time_col] >= 0) & (d[time_col] <= max_h)].sort_values([group_col, time_col])
+    if d.empty:
+        d["dt"] = pd.Series(dtype=float)
+        d["cum"] = pd.Series(dtype=float)
+        return d
+    t_next = d.groupby(group_col)[time_col].shift(-1)
+    d["dt"] = (t_next - d[time_col]).clip(upper=max_gap).fillna(0.0)
+    d["_inc"] = d[rate_col] * d["dt"]
+    d["cum"] = d.groupby(group_col)["_inc"].cumsum()
+    return d.drop(columns="_inc")
+
+
+def course_average_intensity(records, group_col, time_col, rate_col,
+                             max_h: float = 720.0, max_gap: float = 6.0):
+    """Per-group time-weighted mean of a persisting rate over the course =
+    total integral / total time on therapy. Returns a DataFrame
+    [group_col, total, hours_on, intensity]. For net UF with rate in mL/kg/hr,
+    `total` is mL/kg and `intensity` is the course-average mL/kg/hr."""
+    d = integrate_persisting_rate(records, group_col, time_col, rate_col, max_h, max_gap)
+    cols = [group_col, "total", "hours_on", "intensity"]
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(group_col).agg(total=("cum", "last"), hours_on=("dt", "sum")).reset_index()
+    g = g[g["hours_on"] > 0].copy()
+    g["intensity"] = g["total"] / g["hours_on"]
+    return g[cols]

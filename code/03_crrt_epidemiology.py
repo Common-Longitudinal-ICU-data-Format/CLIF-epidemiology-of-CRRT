@@ -6,7 +6,8 @@ to ICU nephrologists). Consolidates the former 07 (incidence + practice/quality
 + distribution figures) with the reworked longitudinal trajectories from the
 former 03_crrt_visualizations.py. Emits AGGREGATE per-site CSVs/figures only —
 no patient-level data leaves the site. Multi-site pooling and rendering happen
-in 09 (dashboard) / 10 (manuscript).
+in 07 (dashboard) / 08 (manuscript), including a between-site heterogeneity
+comparison of every epi metric (08 export_epi_heterogeneity_csv).
 
 Products:
 
@@ -19,19 +20,22 @@ Products:
         -> output/final/crrt_epi/{SITE}_crrt_incidence.csv
 
   B. PRACTICE VARIATION + TIER-A QUALITY (analytic CRRT cohort)
-     From the analytic cohort (index_crrt_df + tableone_analysis_df): delivered
-     dose vs KDIGO band, net ultrafiltration rate vs Murugan band, modality mix,
-     blood flow, time-to-initiation, acid-base correction, duration, mortality.
+     From the analytic cohort (index_crrt_df + tableone_analysis_df): CRRT dose
+     vs the <20 / 20-30 / >30 mL/kg/hr bands, modality mix, blood flow,
+     time-to-initiation, acid-base correction, duration, mortality. (Net UF is
+     summarized over the whole course in D, not from the initiation snapshot.)
         -> output/final/crrt_epi/{SITE}_crrt_practice_quality.csv  (long format)
 
   C. DISTRIBUTION FIGURES (analytic cohort): incidence by context / ICU subtype,
-     CRRT dose distribution, net-UF distribution (Murugan groups), and crude
-     30-day mortality vs net UF.
+     and the CRRT dose distribution (<20 / 20-30 / >30 bands).
 
   D. LONGITUDINAL TRAJECTORIES over 30 days (x-axis in days), each carrying a
-     "% alive and on CRRT" census line: CRRT dose, lab trajectories, vasopressor
-     (NEE), and patient state (On IMV / Off IMV / Discharged / Dead). MAP and
-     respiratory (FiO2/IMV) trajectories were cut.
+     "% alive and on CRRT" census line: CRRT dose, NET ULTRAFILTRATION (rate
+     over time + cumulative volume) and crude mortality vs course-average net UF
+     intensity, lab trajectories, vasopressor (NEE), and patient state (On IMV /
+     Off IMV / Discharged / Dead). MAP and respiratory (FiO2/IMV) trajectories
+     were cut. The former first-3h net-UF snapshot figures were retired (net UF
+     is routinely 0 at initiation -> a misleading zero-spike).
 
 NOTE (t=0 / limitation): t=0 is each encounter's CRRT initiation time. ~2% of
 encounters have a recorded death at or before t=0 (death_dttm <= crrt start) --
@@ -68,7 +72,10 @@ matplotlib.rcParams.update({
     "font.size": 13,
 })
 
-from pipeline_helpers import validate_config, safe_load_clif_table
+from pipeline_helpers import (
+    validate_config, safe_load_clif_table, integrate_persisting_rate,
+    course_average_intensity,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -243,28 +250,20 @@ def build_practice_quality() -> pd.DataFrame:
               median=med, q25=q1, q75=q3, mean=mn, sd=sd)
         d = dose.dropna()
         bands = {
-            "<15 (very low)": (d < 15),
-            "15-20": (d >= 15) & (d < 20),
-            "20-25 (KDIGO)": (d >= 20) & (d <= 25),
-            ">25": (d > 25),
+            "<20": (d < 20),
+            "20-30 (KDIGO)": (d >= 20) & (d <= 30),
+            ">30": (d > 30),
+            "10-15 (RCT very low)": (d >= 10) & (d <= 15),
         }
         for label, m in bands.items():
             _long(rows, "Dose band", f"pct_{label}", round(100 * m.sum() / len(d), 1) if len(d) else np.nan,
                   int(m.sum()), len(d))
 
-        # Net ultrafiltration rate = ultrafiltration_out / weight  (mL/kg/hr)
-        uf = pd.to_numeric(coh["ultrafiltration_out"], errors="coerce")
-        wt = pd.to_numeric(coh["weight_kg"], errors="coerce")
-        uf_rate = uf / wt
-        uf_rate = uf_rate.where(uf_rate.between(0, 12))  # drop implausible (>~1000 mL/hr)
-        med, q1, q3, n = _q(uf_rate)
-        mn, sd = _meansd(uf_rate)
-        _long(rows, "Net UF rate (mL/kg/hr)", "median_iqr", f"{med:.2f} [{q1:.2f}, {q3:.2f}]", n,
-              median=med, q25=q1, q75=q3, mean=mn, sd=sd)
-        r = uf_rate.dropna()
-        in_band = (r >= 1.0) & (r <= 1.75)
-        _long(rows, "Net UF rate", "pct_in_1.0-1.75_band",
-              round(100 * in_band.sum() / len(r), 1) if len(r) else np.nan, int(in_band.sum()), len(r))
+        # NOTE: net ultrafiltration is no longer summarized here from the first-3h
+        # initiation snapshot (it is routinely 0 at initiation -> misleading). The
+        # canonical net-UF metric is the COURSE-average intensity exported by
+        # build_uf_trajectories() as {SITE}_net_uf_intensity_summary.csv, plus the
+        # rate / cumulative trajectory figures.
 
         # Modality mix
         modes = coh["crrt_mode_category"].astype("string").str.upper().fillna("UNKNOWN")
@@ -387,7 +386,6 @@ def _export_distribution(values, variable: str, hist_edges, bands, fname: str) -
 
 
 def build_figures(inc_df: pd.DataFrame) -> None:
-    idx = pd.read_parquet(INTER / "index_crrt_df.parquet")
     t1 = pd.read_parquet(INTER / "tableone_analysis_df.parquet")
 
     # (1) CRRT incidence — split into two figures so a single homogeneous color
@@ -412,18 +410,24 @@ def build_figures(inc_df: pd.DataFrame) -> None:
     dose_all = pd.to_numeric(t1["crrt_dose_ml_kg_hr"], errors="coerce").dropna()
     if len(dose_all):
         med = dose_all.median()
-        pct_vlow = 100 * dose_all.between(10, 15).sum() / len(dose_all)
-        pct_kdigo = 100 * dose_all.between(20, 30).sum() / len(dose_all)
+        n_d = len(dose_all)
+        pct_low = 100 * (dose_all < 20).sum() / n_d
+        pct_mid = 100 * dose_all.between(20, 30).sum() / n_d   # inclusive 20-30
+        pct_high = 100 * (dose_all > 30).sum() / n_d
         dose_disp = dose_all[dose_all.between(0, 80)]
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.hist(dose_disp, bins=40, color=BLUE, alpha=0.85,
                 edgecolor="black", linewidth=0.5)
-        ax.axvspan(10, 15, color=ORANGE, alpha=0.30,
-                   label=f"Very Low (10–15 mL/kg/hr): {pct_vlow:.1f}%")
+        # Shade the 20-30 guideline band; vertical lines mark the three-band edges.
         ax.axvspan(20, 30, color=GREEN, alpha=0.30,
-                   label=f"KDIGO Recommendation (20–30 mL/kg/hr): {pct_kdigo:.1f}%")
+                   label=f"Guideline 20–30 mL/kg/hr: {pct_mid:.1f}%")
+        ax.axvline(20, color="#555555", linestyle=":", linewidth=1.0)
+        ax.axvline(30, color="#555555", linestyle=":", linewidth=1.0)
         ax.axvline(med, color="black", linestyle="--", linewidth=1.2,
                    label=f"Median {med:.1f} mL/kg/hr")
+        # Legend-only proxies for the flanking bands (no extra shading clutter).
+        ax.plot([], [], " ", label=f"<20 mL/kg/hr: {pct_low:.1f}%")
+        ax.plot([], [], " ", label=f">30 mL/kg/hr: {pct_high:.1f}%")
         ax.set_xlabel("Initial CRRT Dose (mL/kg/hr)")
         ax.set_ylabel("Encounters")
         ax.set_title(f"Initial CRRT Dose Distribution (Median First 3 h): {SITE_NAME}")
@@ -431,102 +435,24 @@ def build_figures(inc_df: pd.DataFrame) -> None:
         fig.tight_layout()
         fig.savefig(GRAPHS / f"{SITE_NAME}_dose_distribution.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
-        # Pooling export (full vector; bands incl. Table-1 dose bands + figure highlights)
+        # Pooling export (full vector; Table-1 dose bands <20 / 20-30 / >30 +
+        # the 10-15 RCT very-low subset for the low-dose story).
         _export_distribution(
             dose_all, "initial_crrt_dose_ml_kg_hr",
             hist_edges=np.arange(0, 102.5, 2.5),
-            bands=[("<15 (very low)", 0, 15), ("15-30 (low)", 15, 30),
-                   (">=30 (high)", 30, None), ("10-15 (RCT very-low)", 10, 15),
-                   ("20-30 (KDIGO band)", 20, 30)],
+            bands=[("<20 (low)", 0, 20), ("20-30 (guideline)", 20, 30 + 1e-9),
+                   (">30 (high)", 30 + 1e-9, None),  # 30 -> guideline, matches Table 1
+                   ("10-15 (RCT very-low)", 10, 15 + 1e-9)],
             fname=f"{SITE_NAME}_dose_distribution.csv")
 
-    # Per-encounter net UF rate (mL/kg/hr), shared by figures (3) and (4).
-    w = idx[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
-    m = t1[["encounter_block", "ultrafiltration_out", "death_30d"]].merge(
-        w, on="encounter_block", how="left")
-    uf_rate = (pd.to_numeric(m["ultrafiltration_out"], errors="coerce")
-               / pd.to_numeric(m["weight_kg"], errors="coerce"))
-
-    # (3) Net ultrafiltration rate distribution with the three Murugan 2019 groups
-    #     (low <1.01, middle 1.01-1.75, high >1.75). All percentages are of the
-    #     total analytic cohort (incl. the UF=0 subset, which sits within Low).
-    uf = uf_rate[uf_rate.between(0, 6)].dropna()
-    if len(uf):
-        n = len(uf)
-        pct_low = 100 * (uf < 1.01).sum() / n
-        pct_mid = 100 * uf.between(1.01, 1.75).sum() / n
-        pct_high = 100 * (uf > 1.75).sum() / n
-        pct_zero = 100 * (uf == 0).sum() / n
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.hist(uf, bins=40, color=BLUE, alpha=0.85, edgecolor="black", linewidth=0.5)
-        ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.30, label="Middle (1.01–1.75)")
-        ax.axvline(1.01, color="#555555", linestyle=":", linewidth=1.0)
-        ax.axvline(1.75, color="#555555", linestyle=":", linewidth=1.0)
-        ax.axvline(uf.median(), color="black", linestyle="--", linewidth=1.2,
-                   label=f"Median {uf.median():.2f} mL/kg/hr")
-        ax.set_xlabel("Net Ultrafiltration Rate (mL/kg/hr)")
-        ax.set_ylabel("Encounters")
-        ax.set_title(f"Net Ultrafiltration Rate Distribution: {SITE_NAME}")
-        ax.legend(fontsize=9, loc="center right")
-        txt = (f"Murugan 2019 groups (% of all encounters)\n"
-               f"Low (<1.01): {pct_low:.1f}%\n"
-               f"Middle (1.01–1.75): {pct_mid:.1f}%\n"
-               f"High (>1.75): {pct_high:.1f}%\n"
-               f"Zero net UF: {pct_zero:.1f}%")
-        ax.text(0.97, 0.97, txt, transform=ax.transAxes, ha="right", va="top",
-                fontsize=9, bbox=dict(boxstyle="round", facecolor="white",
-                                      alpha=0.85, edgecolor="#cccccc"))
-        fig.tight_layout()
-        fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_distribution.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-
-    # Pooling export (full plausible vector [0,12]; Murugan bands + zero subset)
-    _export_distribution(
-        uf_rate[uf_rate.between(0, 12)], "net_uf_rate_ml_kg_hr",
-        hist_edges=np.arange(0, 6.25, 0.25),
-        bands=[("zero", 0, 1e-9), ("low <1.01", 0, 1.01),
-               ("middle 1.01-1.75", 1.01, 1.75), ("high >=1.75", 1.75, None)],
-        fname=f"{SITE_NAME}_net_uf_distribution.csv")
-
-    # (4) Crude 30-day mortality vs net UF rate (Murugan 2019 Fig e2 style; binned,
-    #     marker size ∝ n). Descriptive only — shows the nonlinear (J-shaped)
-    #     association; deliberately NOT the Gray time-varying-coefficient survival
-    #     model used in that paper (beyond scope here).
-    mm = pd.DataFrame({"uf": uf_rate,
-                       "death": pd.to_numeric(m["death_30d"], errors="coerce")})
-    mm = mm[mm["uf"].between(0, 4)].dropna()
-    if len(mm) >= 50:
-        edges = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 4.0]
-        mm["bin"] = pd.cut(mm["uf"], bins=edges, include_lowest=True)
-        gb = (mm.groupby("bin", observed=True)["death"]
-              .agg(n="size", n_deaths="sum").reset_index())
-        gb["bin_left"] = [iv.left for iv in gb["bin"]]
-        gb["bin_right"] = [iv.right for iv in gb["bin"]]
-        gb["bin_mid"] = [iv.mid for iv in gb["bin"]]
-        gb["mortality_pct"] = (gb["n_deaths"] / gb["n"] * 100).round(2)
-        gb["site"] = SITE_NAME
-        # Pooling export: ALL bins (the n>=15 filter below is display-only). Sum
-        # n + n_deaths per bin across sites to pool the mortality-vs-UF curve.
-        gb[["site", "bin_left", "bin_right", "bin_mid", "n", "n_deaths",
-            "mortality_pct"]].to_csv(GRAPHS / f"{SITE_NAME}_uf_mortality.csv", index=False)
-        g = gb[gb["n"] >= 15]
-        if len(g) >= 3:
-            x = g["bin_mid"].to_numpy()
-            y = g["mortality_pct"].to_numpy()
-            smax = float(g["n"].max())
-            sizes = (30 + 200 * g["n"] / smax).to_numpy()
-            fig, ax = plt.subplots(figsize=(8, 5))
-            ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan middle (1.01–1.75)")
-            ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
-            ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
-                       label="Crude 30-day mortality (marker size scaled to n)")
-            ax.set_xlabel("Net Ultrafiltration Rate (mL/kg/hr)")
-            ax.set_ylabel("Crude 30-Day Mortality (%)")
-            ax.set_title(f"Crude 30-Day Mortality vs Net Ultrafiltration Rate: {SITE_NAME}")
-            ax.legend(fontsize=9)
-            fig.tight_layout()
-            fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")
-            plt.close(fig)
+    # NOTE: All net-ultrafiltration analysis (rate over time, cumulative volume
+    # over time, and crude mortality vs course-level net UF intensity) now lives
+    # in build_uf_trajectories() in Part D, computed from the FULL CRRT course in
+    # wide_df. The former cross-sectional net-UF distribution + mortality figures
+    # were retired: they were keyed on the first-3h initiation snapshot, where
+    # net UF is routinely 0 (fluid removal is ramped up only after hemodynamic
+    # stabilization), producing a spurious zero-spike (~37% vs ~12% over the
+    # course; 68.5% of "zero" encounters remove fluid later).
 
 
 # ── Part D: longitudinal trajectories over the CRRT course ──────────────────
@@ -565,7 +491,8 @@ def _load_traj_wide() -> pd.DataFrame:
     cohort = pd.read_parquet(INTER / "cohort_df.parquet",
                              columns=["hospitalization_id", "encounter_block"])
     crrt_cols = (["crrt_dialysate_flow_rate", "crrt_pre_filter_replacement_fluid_rate",
-                  "crrt_post_filter_replacement_fluid_rate", "crrt_mode_category"]
+                  "crrt_post_filter_replacement_fluid_rate", "crrt_mode_category",
+                  "crrt_ultrafiltration_out"]
                  if HAS_CRRT_SETTINGS else [])
     lab_cols = ["lab_lactate", "lab_ph_arterial", "lab_bicarbonate", "lab_potassium", "lab_phosphate"]
     other = ["med_cont_nee", "resp_device_category"]  # resp_device_category drives patient-state IMV
@@ -767,6 +694,125 @@ def build_trajectories(w: pd.DataFrame) -> None:
             fig.tight_layout(rect=[0, 0.08, 1, 1])
             fig.savefig(GRAPHS / f"{SITE_NAME}_nee_over_crrt.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
+
+
+def _uf_records(w: pd.DataFrame) -> pd.DataFrame:
+    """Per-record net UF rate (mL/kg/hr) for the cohort's CRRT course, ready for
+    integrate_persisting_rate()."""
+    if "crrt_ultrafiltration_out" not in w.columns:
+        return pd.DataFrame()
+    recs = w[["encounter_block", "hours_from_crrt", "crrt_ultrafiltration_out",
+              "weight_kg"]].copy()
+    recs["uf_rate"] = (pd.to_numeric(recs["crrt_ultrafiltration_out"], errors="coerce")
+                       / pd.to_numeric(recs["weight_kg"], errors="coerce"))
+    return recs
+
+
+def build_uf_trajectories(w: pd.DataFrame) -> None:
+    """(D-UF) Net ultrafiltration over the CRRT course, all from full-course
+    wide_df (replaces the retired first-3h initiation-snapshot figures):
+      (a) net UF RATE over time (mL/kg/hr, per-bin median [IQR]);
+      (b) CUMULATIVE net UF volume over time (mL/kg, among encounters still on
+          CRRT each day);
+      (c) crude 30-day mortality vs COURSE-AVERAGE net UF intensity (Murugan
+          2019 style, over the whole course rather than the initiation snapshot).
+    """
+    if not HAS_CRRT_SETTINGS or "crrt_ultrafiltration_out" not in w.columns:
+        return
+    census = _crrt_census(w)
+
+    # (a) Net UF RATE over time ------------------------------------------------
+    ur = w[(w["hours_from_crrt"] >= 0) & w["crrt_ultrafiltration_out"].notna()].copy()
+    ur["uf_rate"] = (pd.to_numeric(ur["crrt_ultrafiltration_out"], errors="coerce")
+                     / pd.to_numeric(ur["weight_kg"], errors="coerce"))
+    g = _median_iqr_by_bin(ur, "uf_rate", bin_h=6)
+    if not g.empty:
+        g.to_csv(GRAPHS / f"{SITE_NAME}_net_uf_rate_hourly.csv", index=False)
+        fig, ax = plt.subplots(figsize=(11, 5.5))
+        _traj_axis(ax, g, "Net Ultrafiltration Rate (mL/kg/hr)", BLUE,
+                   band=(1.01, 1.75), band_label="Murugan Middle (1.01–1.75)",
+                   line_label="Median Net UF Rate", census=census, legend=True, atrisk=True)
+        ax.set_title(f"Net Ultrafiltration Rate Over 30 Days: {SITE_NAME}")
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+        fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_rate_over_time.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # (b) CUMULATIVE net UF over time -----------------------------------------
+    d = integrate_persisting_rate(_uf_records(w), "encounter_block",
+                                  "hours_from_crrt", "uf_rate")
+    if not d.empty:
+        d["hour"] = (d["hours_from_crrt"] // 6).astype(int) * 6 + 3.0
+        per = d.groupby(["encounter_block", "hour"], observed=True)["cum"].last().reset_index()
+        gc = (per.groupby("hour")["cum"]
+              .agg(median="median", q25=lambda x: x.quantile(0.25),
+                   q75=lambda x: x.quantile(0.75), n="count", mean="mean", sd="std")
+              .reset_index())
+        gc["site"] = SITE_NAME
+        gc.to_csv(GRAPHS / f"{SITE_NAME}_net_uf_cumulative.csv", index=False)
+        fig, ax = plt.subplots(figsize=(11, 5.5))
+        _traj_axis(ax, gc, "Cumulative Net Ultrafiltration (mL/kg)", BLUE,
+                   line_label="Median Cumulative Net UF (Among Those Still on CRRT)",
+                   census=census, legend=True, atrisk=True)
+        ax.set_title(f"Cumulative Net Ultrafiltration Over 30 Days: {SITE_NAME}")
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+        fig.savefig(GRAPHS / f"{SITE_NAME}_net_uf_cumulative_over_time.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # (c) crude 30-day mortality vs FIRST-72h net UF intensity ------------
+        # First-72h fixed window matches the Murugan / 2025 literature UFnet
+        # intensity definition (total UFnet / weight / duration over the first
+        # 72h) and avoids the duration/survivorship confound of a whole-course
+        # average. The rate + cumulative figures above intentionally stay
+        # whole-course (honest 30-day descriptors).
+        tot = course_average_intensity(_uf_records(w), "encounter_block",
+                                       "hours_from_crrt", "uf_rate", max_h=72.0)
+        # Per-site first-72h net-UF intensity summary (n/mean/sd/quantiles) so the
+        # between-site heterogeneity comparison in 08 can pool it like any other
+        # continuous epi metric. SAME window + definition as Table 1 (02).
+        _isum = pd.to_numeric(tot["intensity"], errors="coerce").dropna()
+        pd.DataFrame([{
+            "site": SITE_NAME, "n": int(len(_isum)),
+            "mean": round(float(_isum.mean()), 4) if len(_isum) else np.nan,
+            "sd": round(float(_isum.std(ddof=1)), 4) if len(_isum) > 1 else np.nan,
+            "median": round(float(_isum.median()), 4) if len(_isum) else np.nan,
+            "p25": round(float(_isum.quantile(0.25)), 4) if len(_isum) else np.nan,
+            "p75": round(float(_isum.quantile(0.75)), 4) if len(_isum) else np.nan,
+        }]).to_csv(GRAPHS / f"{SITE_NAME}_net_uf_intensity_summary.csv", index=False)
+        t1d = pd.read_parquet(INTER / "tableone_analysis_df.parquet",
+                              columns=["encounter_block", "death_30d"])
+        mm = tot.merge(t1d, on="encounter_block", how="left")
+        mm["death"] = pd.to_numeric(mm["death_30d"], errors="coerce")
+        mm = mm[["intensity", "death"]].dropna()
+        mm = mm[mm["intensity"].between(0, 4)]
+        if len(mm) >= 50:
+            edges = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 4.0]
+            mm["bin"] = pd.cut(mm["intensity"], bins=edges, include_lowest=True)
+            gb = (mm.groupby("bin", observed=True)["death"]
+                  .agg(n="size", n_deaths="sum").reset_index())
+            gb["bin_left"] = [iv.left for iv in gb["bin"]]
+            gb["bin_right"] = [iv.right for iv in gb["bin"]]
+            gb["bin_mid"] = [iv.mid for iv in gb["bin"]]
+            gb["mortality_pct"] = (gb["n_deaths"] / gb["n"] * 100).round(2)
+            gb["site"] = SITE_NAME
+            gb[["site", "bin_left", "bin_right", "bin_mid", "n", "n_deaths",
+                "mortality_pct"]].to_csv(GRAPHS / f"{SITE_NAME}_uf_mortality.csv", index=False)
+            g2 = gb[gb["n"] >= 15]
+            if len(g2) >= 3:
+                x = g2["bin_mid"].to_numpy(); y = g2["mortality_pct"].to_numpy()
+                smax = float(g2["n"].max())
+                sizes = (30 + 200 * g2["n"] / smax).to_numpy()
+                fig, ax = plt.subplots(figsize=(8, 5))
+                ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan Middle (1.01–1.75)")
+                ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
+                ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
+                           label="Crude 30-Day Mortality (Marker Size Scaled to n)")
+                ax.set_xlabel("Net Ultrafiltration Intensity, First 72 h (mL/kg/hr)")
+                ax.set_ylabel("Crude 30-Day Mortality (%)")
+                ax.set_title(f"Crude 30-Day Mortality vs Net UF Intensity (First 72 h): {SITE_NAME}")
+                ax.legend(fontsize=9)
+                fig.tight_layout()
+                fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")
+                plt.close(fig)
 
 
 def build_patient_course(w: pd.DataFrame) -> None:
@@ -1110,6 +1156,7 @@ build_dose_by_ibw()
 print("\n[D] Longitudinal trajectories (30 d, 3 d inset) ...")
 _traj_w = _load_traj_wide()
 build_trajectories(_traj_w)
+build_uf_trajectories(_traj_w)
 build_patient_course(_traj_w)
 build_crrt_state(_traj_w)
 print(f"  wrote trajectory figures to {GRAPHS}")
