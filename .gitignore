@@ -62,8 +62,9 @@ docs/
 all_site_data/
 all_site_msm_data/
 output/multi_site/
-code/07_combine_causal_results.py
+code/07_build_dashboard.py
 code/08_manuscript_artifacts.py
+code/report_core.py
 code/archive/output/
 code/archive/
 grant/
