@@ -73,16 +73,14 @@ matplotlib.rcParams.update({
 })
 
 from pipeline_helpers import (
-    validate_config, safe_load_clif_table, integrate_persisting_rate,
+    load_config, safe_load_clif_table, integrate_persisting_rate,
     course_average_intensity,
 )
 
 warnings.filterwarnings("ignore")
 
-# ── Config (direct load, mirrors 00_cohort.py; cwd is code/) ────────────────
-with open("../config/config.json", "r") as f:
-    config = json.load(f)
-config = validate_config(config)
+# ── Config (honors CLIF_CONFIG; defaults to config/config.json) ─────────────
+config = load_config()
 
 SITE_NAME = config["site_name"]
 TABLES_PATH = config["tables_path"]

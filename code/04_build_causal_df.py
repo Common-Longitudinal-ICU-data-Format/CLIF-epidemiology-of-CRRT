@@ -32,11 +32,8 @@ import pyarrow.parquet as pq
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
-with open(project_root / "config" / "config.json") as f:
-    config = json.load(f)
-
-from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
-config = validate_config(config)
+from pipeline_helpers import load_config, load_intermediate, get_tables_path  # noqa: E402
+config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 

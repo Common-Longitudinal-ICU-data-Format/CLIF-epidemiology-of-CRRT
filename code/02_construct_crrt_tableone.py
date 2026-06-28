@@ -32,13 +32,10 @@ sys.path.insert(0, str(project_root / "code"))
 # Load config directly (avoid importing utils package which conflicts with clifpy.utils)
 import json  # noqa: E402
 
-with open(project_root / "config" / "config.json") as _f:
-    config = json.load(_f)
-
 from pipeline_helpers import (  # noqa: E402
-    validate_config, load_intermediate, get_tables_path, course_average_intensity,
+    load_config, load_intermediate, get_tables_path, course_average_intensity,
 )
-config = validate_config(config)
+config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 

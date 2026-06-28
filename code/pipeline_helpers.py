@@ -103,6 +103,40 @@ def validate_config(config: dict) -> dict:
     return config
 
 
+def load_config() -> dict:
+    """Load and validate the pipeline config, honoring the CLIF_CONFIG env var.
+
+    Resolution order:
+      - CLIF_CONFIG set  -> that path (absolute used as-is; relative resolved
+        against the project root, e.g. CLIF_CONFIG=config/config_mimic.json)
+      - CLIF_CONFIG unset -> the default config/config.json
+
+    This is the single config entry point for every pipeline step; leaving
+    CLIF_CONFIG unset reproduces the original single-site behavior exactly, so
+    consortium sites are unaffected.
+    """
+    project_root = Path(__file__).resolve().parent.parent  # code/ -> repo root
+    env = os.environ.get("CLIF_CONFIG")
+    if env:
+        cfg_path = Path(env)
+        if not cfg_path.is_absolute():
+            cfg_path = project_root / cfg_path
+    else:
+        cfg_path = project_root / "config" / "config.json"
+
+    if not cfg_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {cfg_path}\n"
+            f"  Set CLIF_CONFIG to a config path, or create config/config.json "
+            f"from config/config_template.json."
+        )
+    with open(cfg_path, "r") as f:
+        config = json.load(f)
+    config = validate_config(config)
+    config["_config_path"] = str(cfg_path)  # provenance for logging
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Intermediate file loading
 # ---------------------------------------------------------------------------

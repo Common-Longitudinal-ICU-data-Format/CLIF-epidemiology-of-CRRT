@@ -61,13 +61,9 @@ print(f"Current directory: {os.getcwd()}")
 # In[2]:
 
 
-# Load configuration
-config_path = "../config/config.json"
-with open(config_path, 'r') as f:
-    config = json.load(f)
-
-from pipeline_helpers import validate_config, safe_load_clif_table
-config = validate_config(config)
+# Load configuration (honors CLIF_CONFIG; defaults to config/config.json)
+from pipeline_helpers import load_config, safe_load_clif_table
+config = load_config()
 SITE_NAME = config["site_name"]
 
 print(f"\n=== Configuration:")

@@ -32,13 +32,11 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from pipeline_helpers import validate_config
+from pipeline_helpers import load_config
 
 warnings.filterwarnings("ignore")
 
-with open("../config/config.json", "r") as f:
-    config = json.load(f)
-config = validate_config(config)
+config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 SITE_NAME = config["site_name"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
