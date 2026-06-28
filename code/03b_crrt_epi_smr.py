@@ -37,7 +37,6 @@ import clifpy
 
 from pipeline_helpers import load_config
 from sofa_calculator import compute_sofa_polars
-from smr_common import byar_ci
 
 config = load_config()
 SITE = config["site_name"]
@@ -55,6 +54,15 @@ MODEL_PATH = Path("../config/smr_reference_model.json")
 
 def P(name): return f"{TABLES_PATH}/clif_{name}.{FILE_TYPE}"
 def pct(n, d): return f"{100*n/d:.1f}%" if d else "n/a"
+
+def byar_ci(O, E):
+    """Exact-Poisson (Byar) 95% CI for the SMR = O/E."""
+    O = int(O)
+    if O == 0:
+        return (0.0, 3.689 / E)
+    lo = (O / E) * (1 - 1/(9*O) - 1.96/(3*np.sqrt(O)))**3
+    hi = ((O + 1) / E) * (1 - 1/(9*(O+1)) + 1.96/(3*np.sqrt(O+1)))**3
+    return lo, hi
 
 # ── Load tables (selected columns) ──────────────────────────────────────────
 crrt = pl.read_parquet(P("crrt_therapy"),
@@ -142,30 +150,24 @@ sofa = compute_sofa_polars(
 ).select(["hospitalization_id", "sofa_total"])
 print(f"  sofa_total non-null {pct(sofa['sofa_total'].drop_nulls().len(), N)}")
 
-# ── Baseline labs: nearest measured in [-12h,+3h] (lactate, bicarbonate, K) ──
-LAB_CATS = ["lactate", "bicarbonate", "potassium"]
+# ── Baseline lactate: nearest measured in [-12h,+3h] ────────────────────────
 labs_cols = pq.read_schema(P("labs")).names
 val_col = "lab_value_numeric" if "lab_value_numeric" in labs_cols else "lab_value"
-labs_win = (pl.scan_parquet(P("labs"))
-            .select(["hospitalization_id", "lab_category", "lab_result_dttm", val_col])
-            .filter((pl.col("hospitalization_id").is_in(cohort_ids))
-                    & (pl.col("lab_category").is_in(LAB_CATS))).collect()
-            .with_columns(pl.col(val_col).cast(pl.Float64, strict=False).alias("v"))
-            .filter(pl.col("v").is_not_null())
-            .join(init, on="hospitalization_id", how="inner")
-            .with_columns((pl.col("lab_result_dttm") - pl.col("crrt_init")).alias("dt"))
-            .filter((pl.col("dt") >= timedelta(hours=-12)) & (pl.col("dt") <= timedelta(hours=3)))
-            .with_columns(pl.col("dt").abs().alias("absdt")))
-print(f"-- baseline labs ({val_col}), nearest in -12h..+3h --")
-lab_wide = None
-for lab in LAB_CATS:
-    one = (labs_win.filter(pl.col("lab_category") == lab)
-           .sort(["hospitalization_id", "absdt"]).group_by("hospitalization_id").first()
-           .select(["hospitalization_id", pl.col("v").alias(lab)]))
-    med = one[lab].median()
-    print(f"  {lab:12s} non-null {pct(one.height, N)}" + (f"; median {med:.2f}" if med is not None else ""))
-    lab_wide = one if lab_wide is None else lab_wide.join(one, on="hospitalization_id",
-                                                          how="full", coalesce=True)
+lac = (pl.scan_parquet(P("labs"))
+       .select(["hospitalization_id", "lab_category", "lab_result_dttm", val_col])
+       .filter((pl.col("hospitalization_id").is_in(cohort_ids))
+               & (pl.col("lab_category") == "lactate")).collect()
+       .with_columns(pl.col(val_col).cast(pl.Float64, strict=False).alias("lactate"))
+       .filter(pl.col("lactate").is_not_null())
+       .join(init, on="hospitalization_id", how="inner")
+       .with_columns((pl.col("lab_result_dttm") - pl.col("crrt_init")).alias("dt"))
+       .filter((pl.col("dt") >= timedelta(hours=-12)) & (pl.col("dt") <= timedelta(hours=3)))
+       .with_columns(pl.col("dt").abs().alias("absdt"))
+       .sort(["hospitalization_id", "absdt"])
+       .group_by("hospitalization_id").first()
+       .select(["hospitalization_id", "lactate"]))
+print(f"-- lactate ({val_col}) non-null {pct(lac['hospitalization_id'].n_unique(), N)}"
+      + (f"; median {lac['lactate'].median():.2f} mmol/L" if lac.height else ""))
 
 # ── CCI: ICD-10 via clifpy + ICD-9 via Quan 2005 mapping (same clifpy scale) ─
 CCI_WEIGHTS = {
@@ -258,7 +260,7 @@ print(f"-- CCI (ICD-10 clifpy + ICD-9 Quan) non-null {pct(cci['hospitalization_i
 # ── Assemble + write cohort ─────────────────────────────────────────────────
 cohort = (base.select(["hospitalization_id", "age", "female", "died_30d"])
           .join(sofa, on="hospitalization_id", how="left")
-          .join(lab_wide, on="hospitalization_id", how="left")
+          .join(lac, on="hospitalization_id", how="left")
           .join(cci, on="hospitalization_id", how="left"))
 cohort_path = OUT / f"{SITE}_smr_cohort.parquet"
 cohort.write_parquet(cohort_path)
@@ -271,13 +273,19 @@ if not MODEL_PATH.exists():
     print("  then re-run 03b at each site to emit output/final/crrt_epi/{SITE}_smr.csv.")
 else:
     from sklearn.metrics import roc_auc_score
-    from smr_common import impute as smr_impute, predict as smr_predict
     model = json.loads(MODEL_PATH.read_text())
     COVARS = model["covariates"]
-    pdf = smr_impute(cohort.to_pandas(), model)   # frozen development-median imputation
+    coef, intercept = model["coef"], model["intercept"]
+    pdf = cohort.to_pandas()
+    # frozen development-median imputation (outcome-free; identical at every site)
+    for cv, med in model.get("impute_medians", {}).items():
+        if cv in pdf.columns:
+            pdf[cv] = pdf[cv].fillna(med)
     n_pre = len(pdf)
     pdf = pdf.dropna(subset=COVARS + ["died_30d"])
-    p = smr_predict(pdf, model)                    # applies linear + spline terms identically
+    # parsimonious linear model: P(death) = sigmoid(intercept + sum coef*covar)
+    lp = intercept + sum(coef[c] * pdf[c] for c in COVARS)
+    p = 1.0 / (1.0 + np.exp(-lp))
     y = pdf["died_30d"].to_numpy(int)
     O = int(y.sum()); E = float(p.sum()); smr = O / E
     lo, hi = byar_ci(O, E)
@@ -296,8 +304,8 @@ else:
     cal.insert(0, "site", SITE)
     cal["expected"] = cal["expected"].round(2)
     cal.to_csv(EPI_OUT / f"{SITE}_smr_calibration.csv", index=False)
-    print(f"\n-- applied reference model ({model.get('dev_site','?')}; "
-          f"splined: {list(model.get('splines', {})) or 'none'}) --")
+    print(f"\n-- applied reference model (dev={model.get('dev_site','?')}, "
+          f"parsimonious linear) --")
     print(f"  SMR {smr:.3f} ({lo:.3f}-{hi:.3f}); O={O} E={E:.1f}; AUC {auc:.3f}; "
           f"crude {row['crude_mort_pct']}%")
     print(f"WROTE {EPI_OUT / f'{SITE}_smr.csv'} + _smr_calibration.csv")
