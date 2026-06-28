@@ -1,30 +1,36 @@
-"""Build a site's SMR cohort (covariates + outcome) on one consistent definition.
+"""03b — Risk-standardized mortality (SMR) for CRRT, per site.
 
-Site-agnostic: the data path/site come from the selected config, so the SAME
-covariate definitions are used at the MIMIC development site and at every
-consortium application site (Option E in docs/smr_addition_plan.md).
+Part of the descriptive-epi family (runs after 03). Site-agnostic: data path/site
+come from the selected config, so identical covariate definitions are used at the
+MIMIC development site and every consortium application site (Option E in
+docs/smr_addition_plan.md).
 
-    # MIMIC (reference / development cohort)
-    CLIF_CONFIG=config/config_mimic.json uv run python smr_build_mimic_dev.py
-    # UChicago (or any consortium site; default config)
-    uv run python smr_build_mimic_dev.py
+Every site runs this:
+    uv run python 03b_crrt_epi_smr.py                       # UChicago / any site
+    CLIF_CONFIG=config/config_mimic.json uv run python 03b_crrt_epi_smr.py  # MIMIC
 
-Produces ONE artifact, output/smr/{SITE}_smr_cohort.parquet, with the locked SMR
-covariates + outcome:
-    hospitalization_id, age, female, sofa_total, lactate, cci_score, died_30d
+It (1) builds the site SMR cohort (covariates + outcome) and writes
+output/smr/{SITE}_smr_cohort.parquet (gitignored, row-level), then (2) if the
+frozen reference model config/smr_reference_model.json is present, applies it to
+compute observed/expected, the SMR with exact-Poisson (Byar) 95% CI, and AUC,
+and writes the per-site exchange CSV output/final/crrt_epi/{SITE}_smr.csv (which
+07/08 pool into the anonymized cross-site forest + dashboard).
 
-Self-contained: writes only under output/smr/, so it cannot clobber the main
-single-site pipeline outputs. Cohort is hospitalization-level (no encounter-block
-stitching) — a deliberate approximation for a case-mix standardization model
-(see docs/smr_addition_plan.md §4.9). Reuses the pipeline's SOFA calculator and
-clifpy CCI so covariate definitions match the rest of the pipeline.
+The reference model is fit ONCE on MIMIC by the coordinating site via
+smr_fit_reference.py; consortium sites only need the shipped coefficient JSON,
+NOT MIMIC data. Cohort is hospitalization-level (no encounter-block stitching) —
+a deliberate approximation for a case-mix standardization model (plan §4.9).
+Reuses the pipeline SOFA calculator and clifpy CCI (+ a Quan-2005 ICD-9 mapping)
+so covariate definitions match the rest of the pipeline.
 """
 import warnings
 warnings.filterwarnings("ignore")
+import json
 from pathlib import Path
 from datetime import timedelta
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
 import clifpy
@@ -32,19 +38,31 @@ import clifpy
 from pipeline_helpers import load_config
 from sofa_calculator import compute_sofa_polars
 
-config = load_config()  # expects CLIF_CONFIG=config/config_mimic.json
+config = load_config()
 SITE = config["site_name"]
 TABLES_PATH = config["tables_path"]
 FILE_TYPE = config["file_type"]
 TIMEZONE = config["timezone"]
-print(f"=== SMR dev-cohort builder | site={SITE} | tz={TIMEZONE} ===")
+print(f"=== 03b CRRT SMR | site={SITE} | tz={TIMEZONE} ===")
 print(f"    tables_path: {TABLES_PATH}")
 
 OUT = Path("../output/smr")
 OUT.mkdir(parents=True, exist_ok=True)
+EPI_OUT = Path("../output/final/crrt_epi")
+EPI_OUT.mkdir(parents=True, exist_ok=True)
+MODEL_PATH = Path("../config/smr_reference_model.json")
 
 def P(name): return f"{TABLES_PATH}/clif_{name}.{FILE_TYPE}"
 def pct(n, d): return f"{100*n/d:.1f}%" if d else "n/a"
+
+def byar_ci(O, E):
+    """Exact-Poisson (Byar) 95% CI for O/E."""
+    O = int(O)
+    if O == 0:
+        return (0.0, 3.689 / E)
+    lo = (O / E) * (1 - 1/(9*O) - 1.96/(3*np.sqrt(O)))**3
+    hi = ((O + 1) / E) * (1 - 1/(9*(O+1)) + 1.96/(3*np.sqrt(O+1)))**3
+    return lo, hi
 
 # ── Load tables (selected columns) ──────────────────────────────────────────
 crrt = pl.read_parquet(P("crrt_therapy"),
@@ -89,18 +107,14 @@ esrd_ids = set(diag_norm.filter(
 )["hospitalization_id"].unique().to_list())
 cohort_ids = [h for h in crrt["hospitalization_id"].unique().to_list() if h not in esrd_ids]
 N = len(cohort_ids)
-print(f"  4. after ESRD exclusion == DEV COHORT:    {N:,}")
+print(f"  4. after ESRD exclusion == SMR COHORT:    {N:,}")
 
 # CRRT initiation = first record per hospitalization
 init = (crrt.filter(pl.col("hospitalization_id").is_in(cohort_ids))
         .group_by("hospitalization_id")
         .agg(pl.col("recorded_dttm").min().alias("crrt_init")))
 
-# ── Demographics + 30-day mortality ─────────────────────────────────────────
-# Death definition mirrors 00_cohort.py: died = discharge_category in
-# {expired, hospice}; death timing = death_dttm if present else discharge_dttm
-# (00 falls back to last_vital; discharge_dttm is the standalone-builder proxy).
-# died_30d = died AND death timing within 30 days of CRRT initiation.
+# ── Demographics + 30-day mortality (mirrors 00_cohort.py death definition) ──
 base = (hosp.filter(pl.col("hospitalization_id").is_in(cohort_ids))
         .join(pat, on="patient_id", how="left")
         .join(init, on="hospitalization_id", how="left")
@@ -119,14 +133,12 @@ base = (hosp.filter(pl.col("hospitalization_id").is_in(cohort_ids))
              & ((pl.col("death_time") - pl.col("crrt_init")) <= timedelta(days=30)))
                 .cast(pl.Int8).alias("died_30d")
         ))
-_died_any = int(base["died_flag"].sum())
-print(f"\n-- mortality (discharge_category in expired/hospice) --")
-print(f"  died in hospital (any time): {_died_any:,} ({pct(_died_any, N)})")
+print(f"\n-- mortality (discharge_category in expired/hospice, <=30d of init) --")
 print(f"  died within 30d of CRRT init: {int(base['died_30d'].sum()):,} "
       f"({pct(int(base['died_30d'].sum()), N)})")
 
 # ── SOFA total at baseline (-12h..+3h), via the pipeline calculator ─────────
-print("\n-- computing SOFA (compute_sofa_polars, -12h..+3h) --")
+print("\n-- SOFA (compute_sofa_polars, -12h..+3h) --")
 sofa_cohort = init.with_columns([
     (pl.col("crrt_init") - pl.duration(hours=12)).alias("start_dttm"),
     (pl.col("crrt_init") + pl.duration(hours=3)).alias("end_dttm"),
@@ -135,14 +147,10 @@ sofa = compute_sofa_polars(
     data_directory=TABLES_PATH, cohort_df=sofa_cohort, filetype=FILE_TYPE,
     id_name="hospitalization_id", extremal_type="worst",
     fill_na_scores_with_zero=False, remove_outliers=True, timezone=TIMEZONE,
-)
-sofa = sofa.select(["hospitalization_id", "sofa_total"])
-print(f"  SOFA computed for {sofa.height:,} hosps; sofa_total non-null "
-      f"{pct(sofa['sofa_total'].drop_nulls().len(), N)}")
+).select(["hospitalization_id", "sofa_total"])
+print(f"  sofa_total non-null {pct(sofa['sofa_total'].drop_nulls().len(), N)}")
 
 # ── Baseline lactate: nearest measured in [-12h,+3h] ────────────────────────
-print("\n-- baseline lactate (nearest in -12h..+3h) --")
-# Prefer lab_value_numeric (clean double); fall back to parsing lab_value string
 labs_cols = pq.read_schema(P("labs")).names
 val_col = "lab_value_numeric" if "lab_value_numeric" in labs_cols else "lab_value"
 lac = (pl.scan_parquet(P("labs"))
@@ -158,20 +166,10 @@ lac = (pl.scan_parquet(P("labs"))
        .sort(["hospitalization_id", "absdt"])
        .group_by("hospitalization_id").first()
        .select(["hospitalization_id", "lactate"]))
-print(f"  (lactate source column: {val_col})")
-print(f"  lactate available: {pct(lac['hospitalization_id'].n_unique(), N)}")
-if lac.height:
-    print(f"  lactate median (UNIT CHECK: ~1-5=mmol/L good, ~10-40=mg/dL mismatch): "
-          f"{lac['lactate'].median():.2f}")
+print(f"-- lactate ({val_col}) non-null {pct(lac['hospitalization_id'].n_unique(), N)}"
+      + (f"; median {lac['lactate'].median():.2f} mmol/L" if lac.height else ""))
 
-# ── CCI: ICD-10 via clifpy + ICD-9 via Quan 2005 mapping ────────────────────
-# clifpy maps ICD10CM only; MIMIC has a large ICD-9 share (older encounters),
-# so ICD-9-only hospitalizations would be dropped (~33% missing, non-random by
-# era). We add a Quan(2005) ICD-9-CM Charlson mapping, OR condition flags from
-# both formats at the condition level, then apply clifpy's hierarchy + weights
-# (read from cci.yaml) so ICD-9 scores land on the exact clifpy scale.
-print("\n-- CCI (ICD-10 via clifpy + ICD-9 via Quan 2005 mapping) --")
-# clifpy's Quan weights + hierarchy (from cci.yaml; matched exactly)
+# ── CCI: ICD-10 via clifpy + ICD-9 via Quan 2005 mapping (same clifpy scale) ─
 CCI_WEIGHTS = {
     "myocardial_infarction": 0, "congestive_heart_failure": 2,
     "peripheral_vascular_disease": 0, "cerebrovascular_disease": 0,
@@ -185,7 +183,6 @@ CONDS = list(CCI_WEIGHTS.keys())
 HIER = [("diabetes_with_complications", "diabetes_uncomplicated"),
         ("moderate_severe_liver_disease", "mild_liver_disease"),
         ("metastatic_solid_tumor", "cancer")]
-# Quan (2005) enhanced ICD-9-CM code prefixes (dot-stripped, lowercased)
 ICD9 = {
     "myocardial_infarction": ["410", "412"],
     "congestive_heart_failure": ["39891","40201","40211","40291","40401","40403",
@@ -217,26 +214,21 @@ ICD9 = {
 
 diag = diag_raw.filter(pl.col("hospitalization_id").is_in(cohort_ids)).to_pandas()
 diag["diagnosis_code"] = diag["diagnosis_code"].astype(str).str.replace(".", "", regex=False).str.lower()
-fmt_counts = diag["diagnosis_code_format"].value_counts(dropna=False)
-print(f"  diagnosis_code_format mix:\n{fmt_counts.to_string()}")
-print("  (POA not used for CCI: MIMIC poa_present is sparse)")
 
 def _flags_from_clifpy_icd10(d10):
     res = clifpy.calculate_cci(
         d10[["hospitalization_id", "diagnosis_code", "diagnosis_code_format"]],
-        hierarchy=False)  # raw flags; hierarchy applied after OR-ing formats
+        hierarchy=False)
     if isinstance(res, pl.DataFrame):
         res = res.to_pandas()
     keep = ["hospitalization_id"] + [c for c in CONDS if c in res.columns]
-    return pl.from_pandas(res[keep]).with_columns(
-        [pl.col(c).cast(pl.Int8) for c in keep[1:]])
+    return pl.from_pandas(res[keep]).with_columns([pl.col(c).cast(pl.Int8) for c in keep[1:]])
 
 def _flags_from_icd9(d9):
     rows = pl.from_pandas(d9[["hospitalization_id", "diagnosis_code"]])
-    exprs = [pl.col("diagnosis_code").str.contains("^(?:" + "|".join(ICD9[c]) + ")")
-             .alias(c) for c in CONDS]
-    return (rows.with_columns(exprs)
-            .group_by("hospitalization_id")
+    exprs = [pl.col("diagnosis_code").str.contains("^(?:" + "|".join(ICD9[c]) + ")").alias(c)
+             for c in CONDS]
+    return (rows.with_columns(exprs).group_by("hospitalization_id")
             .agg([pl.col(c).any().cast(pl.Int8) for c in CONDS]))
 
 d10 = diag[diag["diagnosis_code_format"].astype(str).str.upper() == "ICD10CM"]
@@ -244,7 +236,6 @@ d9 = diag[diag["diagnosis_code_format"].astype(str).str.upper() == "ICD9CM"]
 f10 = _flags_from_clifpy_icd10(d10) if len(d10) else None
 f9 = _flags_from_icd9(d9) if len(d9) else None
 
-# OR condition flags across formats (full outer join, max per condition)
 if f10 is not None and f9 is not None:
     comb = f10.join(f9.rename({c: f"{c}__9" for c in CONDS}),
                     on="hospitalization_id", how="full", coalesce=True)
@@ -258,39 +249,50 @@ else:
 cdf = comb.to_pandas()
 for c in CONDS:
     cdf[c] = cdf[c].fillna(0).astype(int)
-for hi, lo in HIER:                       # assign0 hierarchy
+for hi, lo in HIER:
     cdf.loc[cdf[hi] == 1, lo] = 0
 cdf["cci_score"] = sum(cdf[c] * w for c, w in CCI_WEIGHTS.items())
-
-# Scale-consistency check: my score must reproduce clifpy's on ICD-10-only hosps
-chk = clifpy.calculate_cci(
-    d10[["hospitalization_id", "diagnosis_code", "diagnosis_code_format"]], hierarchy=True)
-if isinstance(chk, pl.DataFrame):
-    chk = chk.to_pandas()
-icd9_ids = set(f9["hospitalization_id"].to_list()) if f9 is not None else set()
-only10 = cdf[~cdf["hospitalization_id"].isin(icd9_ids)]
-m = only10.merge(chk[["hospitalization_id", "cci_score"]], on="hospitalization_id",
-                 suffixes=("_mine", "_clifpy"))
-agree = (m["cci_score_mine"] == m["cci_score_clifpy"]).mean() if len(m) else float("nan")
-print(f"  scale check (my score == clifpy on ICD-10-only, n={len(m):,}): {agree*100:.1f}% agree")
-
 cci = pl.from_pandas(cdf[["hospitalization_id", "cci_score"]]).with_columns(
     pl.col("hospitalization_id").cast(pl.Utf8))
-print(f"  cci_score available: {pct(cci['hospitalization_id'].n_unique(), N)}; "
+print(f"-- CCI (ICD-10 clifpy + ICD-9 Quan) non-null {pct(cci['hospitalization_id'].n_unique(), N)}; "
       f"median {cci['cci_score'].median():.1f}")
 
-# ── Assemble + write ────────────────────────────────────────────────────────
-dev = (base.select(["hospitalization_id", "age", "female", "died_30d"])
-       .join(sofa, on="hospitalization_id", how="left")
-       .join(lac, on="hospitalization_id", how="left")
-       .join(cci, on="hospitalization_id", how="left"))
+# ── Assemble + write cohort ─────────────────────────────────────────────────
+cohort = (base.select(["hospitalization_id", "age", "female", "died_30d"])
+          .join(sofa, on="hospitalization_id", how="left")
+          .join(lac, on="hospitalization_id", how="left")
+          .join(cci, on="hospitalization_id", how="left"))
+cohort_path = OUT / f"{SITE}_smr_cohort.parquet"
+cohort.write_parquet(cohort_path)
+print(f"\nWROTE {cohort_path}  (n={cohort.height:,}, 30d mort {pct(cohort['died_30d'].sum(), cohort.height)})")
 
-print("\n-- dev cohort assembled --")
-print(f"  n = {dev.height:,}")
-print(f"  died_30d rate: {pct(dev['died_30d'].sum(), dev.height)}")
-for c in ["age", "female", "sofa_total", "lactate", "cci_score"]:
-    print(f"  {c:12s} non-null {pct(dev[c].drop_nulls().len(), dev.height)}")
-
-out_path = OUT / f"{SITE}_smr_cohort.parquet"
-dev.write_parquet(out_path)
-print(f"\nWROTE {out_path.resolve()}")
+# ── Apply the frozen reference model (if present) → per-site exchange CSV ────
+if not MODEL_PATH.exists():
+    print(f"\nNo reference model at {MODEL_PATH}. Cohort built only.")
+    print("  Run smr_fit_reference.py on the development site (MIMIC) to create it,")
+    print("  then re-run 03b at each site to emit output/final/crrt_epi/{SITE}_smr.csv.")
+else:
+    from sklearn.metrics import roc_auc_score
+    model = json.loads(MODEL_PATH.read_text())
+    COVARS, coef, intercept = model["covariates"], model["coef"], model["intercept"]
+    lac_med = model["lactate_impute_median"]
+    pdf = cohort.to_pandas()
+    pdf["lactate"] = pdf["lactate"].fillna(lac_med)
+    n_pre = len(pdf)
+    pdf = pdf.dropna(subset=COVARS + ["died_30d"])
+    lp = intercept + sum(coef[c] * pdf[c] for c in COVARS)
+    p = 1.0 / (1.0 + np.exp(-lp))
+    O = int(pdf["died_30d"].sum()); E = float(p.sum()); smr = O / E
+    lo, hi = byar_ci(O, E)
+    auc = roc_auc_score(pdf["died_30d"], p) if pdf["died_30d"].nunique() > 1 else float("nan")
+    row = {"site": SITE, "n": int(len(pdf)), "n_dropped_missing": int(n_pre - len(pdf)),
+           "observed": O, "expected": round(E, 2), "smr": round(smr, 3),
+           "lo": round(lo, 3), "hi": round(hi, 3), "auc": round(float(auc), 3),
+           "crude_mort_pct": round(100 * O / len(pdf), 1),
+           "reference_dev_site": model.get("dev_site", "")}
+    out_csv = EPI_OUT / f"{SITE}_smr.csv"
+    pd.DataFrame([row]).to_csv(out_csv, index=False)
+    print(f"\n-- applied reference model ({model.get('dev_site','?')}) --")
+    print(f"  SMR {smr:.3f} ({lo:.3f}-{hi:.3f}); O={O} E={E:.1f}; AUC {auc:.3f}; "
+          f"crude {row['crude_mort_pct']}%")
+    print(f"WROTE {out_csv}")

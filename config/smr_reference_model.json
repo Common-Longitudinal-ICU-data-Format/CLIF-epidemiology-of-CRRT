@@ -1,0 +1,21 @@
+{
+  "dev_site": "MIMIC",
+  "covariates": [
+    "age",
+    "female",
+    "sofa_total",
+    "lactate",
+    "cci_score"
+  ],
+  "intercept": -2.8562444146200945,
+  "coef": {
+    "age": 0.020391269980825105,
+    "female": 0.05947546089860527,
+    "sofa_total": 0.11185942032040505,
+    "lactate": 0.08828530695321252,
+    "cci_score": 0.03354567566347505
+  },
+  "lactate_impute_median": 2.1,
+  "dev_n": 1702,
+  "dev_auc": 0.654
+}
