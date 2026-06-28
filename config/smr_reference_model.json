@@ -5,17 +5,56 @@
     "female",
     "sofa_total",
     "lactate",
+    "bicarbonate",
+    "potassium",
     "cci_score"
   ],
-  "intercept": -2.8562444146200945,
-  "coef": {
-    "age": 0.020391269980825105,
-    "female": 0.05947546089860527,
-    "sofa_total": 0.11185942032040505,
-    "lactate": 0.08828530695321252,
-    "cci_score": 0.03354567566347505
+  "splines": {
+    "bicarbonate": [
+      10.0,
+      17.0,
+      20.0,
+      27.0
+    ]
   },
-  "lactate_impute_median": 2.1,
-  "dev_n": 1702,
-  "dev_auc": 0.654
+  "intercept": -4.472831916791657,
+  "coef": {
+    "age": 0.020189544877615997,
+    "female": 0.08370846511580318,
+    "sofa_total": 0.10913933731391812,
+    "lactate": 0.11224665622459816,
+    "bicarbonate": 0.10358458940760451,
+    "bicarbonate__s1": -0.18790951442481796,
+    "bicarbonate__s2": 0.6553446979698498,
+    "potassium": 0.029408365044055668,
+    "cci_score": 0.04101579209333226
+  },
+  "impute_medians": {
+    "age": 63.0,
+    "female": 0.0,
+    "sofa_total": 10.0,
+    "lactate": 2.1,
+    "bicarbonate": 18.0,
+    "potassium": 4.6,
+    "cci_score": 4.0
+  },
+  "dev_n": 1705,
+  "dev_auc": 0.659,
+  "dev_auc_optimism_corrected": 0.652,
+  "nonlinearity_p": {
+    "age": 0.1522,
+    "sofa_total": 0.5347,
+    "lactate": 0.39,
+    "bicarbonate": 0.0151,
+    "potassium": 0.6778
+  },
+  "vif": {
+    "age": 1.04,
+    "female": 1.04,
+    "sofa_total": 1.1,
+    "lactate": 1.3,
+    "bicarbonate": 1.36,
+    "potassium": 1.08,
+    "cci_score": 1.02
+  }
 }
