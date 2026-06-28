@@ -1,10 +1,16 @@
-"""Build the MIMIC SMR development cohort (Option E reference model input).
+"""Build a site's SMR cohort (covariates + outcome) on one consistent definition.
 
-Run from code/ with the MIMIC config selected:
+Site-agnostic: the data path/site come from the selected config, so the SAME
+covariate definitions are used at the MIMIC development site and at every
+consortium application site (Option E in docs/smr_addition_plan.md).
+
+    # MIMIC (reference / development cohort)
     CLIF_CONFIG=config/config_mimic.json uv run python smr_build_mimic_dev.py
+    # UChicago (or any consortium site; default config)
+    uv run python smr_build_mimic_dev.py
 
-Produces ONE artifact, output/smr/mimic_dev_cohort.parquet, with the locked SMR
-covariates + outcome for the MIMIC CRRT cohort:
+Produces ONE artifact, output/smr/{SITE}_smr_cohort.parquet, with the locked SMR
+covariates + outcome:
     hospitalization_id, age, female, sofa_total, lactate, cci_score, died_30d
 
 Self-contained: writes only under output/smr/, so it cannot clobber the main
@@ -20,6 +26,7 @@ from datetime import timedelta
 
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 import clifpy
 
 from pipeline_helpers import load_config
@@ -43,7 +50,8 @@ def pct(n, d): return f"{100*n/d:.1f}%" if d else "n/a"
 crrt = pl.read_parquet(P("crrt_therapy"),
     columns=["hospitalization_id", "recorded_dttm", "crrt_mode_category"])
 hosp = pl.read_parquet(P("hospitalization"),
-    columns=["hospitalization_id", "patient_id", "age_at_admission"])
+    columns=["hospitalization_id", "patient_id", "age_at_admission",
+             "discharge_category", "discharge_dttm"])
 pat = pl.read_parquet(P("patient"),
     columns=["patient_id", "sex_category", "death_dttm"])
 
@@ -89,6 +97,10 @@ init = (crrt.filter(pl.col("hospitalization_id").is_in(cohort_ids))
         .agg(pl.col("recorded_dttm").min().alias("crrt_init")))
 
 # ── Demographics + 30-day mortality ─────────────────────────────────────────
+# Death definition mirrors 00_cohort.py: died = discharge_category in
+# {expired, hospice}; death timing = death_dttm if present else discharge_dttm
+# (00 falls back to last_vital; discharge_dttm is the standalone-builder proxy).
+# died_30d = died AND death timing within 30 days of CRRT initiation.
 base = (hosp.filter(pl.col("hospitalization_id").is_in(cohort_ids))
         .join(pat, on="patient_id", how="left")
         .join(init, on="hospitalization_id", how="left")
@@ -96,11 +108,22 @@ base = (hosp.filter(pl.col("hospitalization_id").is_in(cohort_ids))
             pl.col("age_at_admission").alias("age"),
             (pl.col("sex_category").str.to_lowercase().is_in(["female", "f"]))
                 .cast(pl.Int8).alias("female"),
-            (pl.col("death_dttm").is_not_null()
-             & ((pl.col("death_dttm") - pl.col("crrt_init")) >= timedelta(0))
-             & ((pl.col("death_dttm") - pl.col("crrt_init")) <= timedelta(days=30)))
-                .cast(pl.Int8).alias("died_30d"),
-        ]))
+            pl.col("discharge_category").str.to_lowercase().is_in(["expired", "hospice"])
+                .alias("died_flag"),
+            pl.coalesce([pl.col("death_dttm"), pl.col("discharge_dttm")]).alias("death_time"),
+        ])
+        .with_columns(
+            (pl.col("died_flag")
+             & pl.col("death_time").is_not_null()
+             & ((pl.col("death_time") - pl.col("crrt_init")) >= timedelta(0))
+             & ((pl.col("death_time") - pl.col("crrt_init")) <= timedelta(days=30)))
+                .cast(pl.Int8).alias("died_30d")
+        ))
+_died_any = int(base["died_flag"].sum())
+print(f"\n-- mortality (discharge_category in expired/hospice) --")
+print(f"  died in hospital (any time): {_died_any:,} ({pct(_died_any, N)})")
+print(f"  died within 30d of CRRT init: {int(base['died_30d'].sum()):,} "
+      f"({pct(int(base['died_30d'].sum()), N)})")
 
 # ── SOFA total at baseline (-12h..+3h), via the pipeline calculator ─────────
 print("\n-- computing SOFA (compute_sofa_polars, -12h..+3h) --")
@@ -119,19 +142,23 @@ print(f"  SOFA computed for {sofa.height:,} hosps; sofa_total non-null "
 
 # ── Baseline lactate: nearest measured in [-12h,+3h] ────────────────────────
 print("\n-- baseline lactate (nearest in -12h..+3h) --")
+# Prefer lab_value_numeric (clean double); fall back to parsing lab_value string
+labs_cols = pq.read_schema(P("labs")).names
+val_col = "lab_value_numeric" if "lab_value_numeric" in labs_cols else "lab_value"
 lac = (pl.scan_parquet(P("labs"))
-       .select(["hospitalization_id", "lab_category", "lab_result_dttm", "lab_value_numeric"])
+       .select(["hospitalization_id", "lab_category", "lab_result_dttm", val_col])
        .filter((pl.col("hospitalization_id").is_in(cohort_ids))
-               & (pl.col("lab_category") == "lactate")
-               & (pl.col("lab_value_numeric").is_not_null())).collect()
+               & (pl.col("lab_category") == "lactate")).collect()
+       .with_columns(pl.col(val_col).cast(pl.Float64, strict=False).alias("lactate"))
+       .filter(pl.col("lactate").is_not_null())
        .join(init, on="hospitalization_id", how="inner")
        .with_columns((pl.col("lab_result_dttm") - pl.col("crrt_init")).alias("dt"))
        .filter((pl.col("dt") >= timedelta(hours=-12)) & (pl.col("dt") <= timedelta(hours=3)))
        .with_columns(pl.col("dt").abs().alias("absdt"))
        .sort(["hospitalization_id", "absdt"])
        .group_by("hospitalization_id").first()
-       .select(["hospitalization_id",
-                pl.col("lab_value_numeric").cast(pl.Float64).alias("lactate")]))
+       .select(["hospitalization_id", "lactate"]))
+print(f"  (lactate source column: {val_col})")
 print(f"  lactate available: {pct(lac['hospitalization_id'].n_unique(), N)}")
 if lac.height:
     print(f"  lactate median (UNIT CHECK: ~1-5=mmol/L good, ~10-40=mg/dL mismatch): "
@@ -264,6 +291,6 @@ print(f"  died_30d rate: {pct(dev['died_30d'].sum(), dev.height)}")
 for c in ["age", "female", "sofa_total", "lactate", "cci_score"]:
     print(f"  {c:12s} non-null {pct(dev[c].drop_nulls().len(), dev.height)}")
 
-out_path = OUT / "mimic_dev_cohort.parquet"
+out_path = OUT / f"{SITE}_smr_cohort.parquet"
 dev.write_parquet(out_path)
 print(f"\nWROTE {out_path.resolve()}")
