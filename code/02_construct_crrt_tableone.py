@@ -1,18 +1,21 @@
 """
-Construct CRRT Table 1 matching reference/tableone_crrt_template.csv.
+Construct the CRRT analytic cohort DataFrame and Table 1.
 
-Produces a Table 1 with 5 column groups:
-  - Baseline: characteristics at CRRT initiation (-12h to +3h)
-  - At 72h - Survivors: patients alive at 72h post-CRRT
-  - At 72h - Non-survivors: patients dead within 72h of CRRT
-  - At discharge - Survivors: patients surviving to hospital discharge (90-day cap)
-  - At discharge - Non-survivors: patients who died in-hospital (90-day cap)
+Outputs:
+  - output/intermediate/tableone_analysis_df.parquet - per-encounter analytic
+    cohort: baseline characteristics at CRRT initiation (-12h to +3h), outcomes,
+    SOFA at initiation, sepsis flag, and post-CRRT window labs (consumed by 03).
+  - output/final/{SITE}_table1_crrt.{csv,html} - Table 1 of baseline
+    characteristics stratified by the initial (median-first-3h) CRRT dose band
+    (<20 / 20-30 / >30 mL/kg/hr; the 20-30 band brackets the KDIGO target), in
+    gtsummary shape consumed by the dashboard (07) and manuscript builder (08).
 
-Continuous variables use last recorded value in the relevant window (not mean).
-Labs use unlimited forward-fill (no 12h cap).
-SOFA scores use window-specific computations (baseline, 72h, post-CRRT).
+Continuous variables use the last recorded value in the relevant window (not mean).
+Labs use unlimited forward-fill (no 12h cap); Table 1 baseline labs instead use
+the value MEASURED nearest CRRT initiation within [-12, +3] h (see Step 6).
+SOFA is computed over the baseline window (-12h to +3h).
 
-Usage: uv run python code/construct_crrt_tableone.py
+Usage: uv run python code/02_construct_crrt_tableone.py
 """
 
 import gc
@@ -177,63 +180,6 @@ del sofa_scores, sofa_cohort
 gc.collect()
 print(f"  SOFA at initiation: {len(sofa_df)} encounters")
 
-# 2b: SOFA 72h window (0h to 72h) — used for 72h survivor/non-survivor columns
-print("Step 2b: Computing SOFA over 72h window (0h to +72h) …")
-sofa_cohort_72h = crrt_initiation.merge(eb_map, on="encounter_block")
-sofa_cohort_72h["start_dttm"] = sofa_cohort_72h["crrt_initiation_time"]
-sofa_cohort_72h["end_dttm"] = sofa_cohort_72h["crrt_initiation_time"] + pd.Timedelta(hours=72)
-sofa_cohort_72h = sofa_cohort_72h[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
-
-sofa_72h_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
-    cohort_df=pl.from_pandas(sofa_cohort_72h),
-    filetype=FILE_TYPE,
-    id_name="encounter_block",
-    extremal_type="worst",
-    fill_na_scores_with_zero=False,
-    remove_outliers=True,
-    timezone=TIMEZONE,
-).to_pandas()
-
-sofa_72h_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_72h_scores.columns]
-sofa_72h_df = sofa_72h_scores[sofa_72h_keep].rename(
-    columns={c: f"{c}_72h" for c in SOFA_COLS if c in sofa_72h_scores.columns}
-)
-del sofa_72h_scores, sofa_cohort_72h
-gc.collect()
-print(f"  SOFA 72h: {len(sofa_72h_df)} encounters")
-
-# 2c: SOFA post-CRRT (0h to last_vital_dttm) — used for discharge survivor/non-survivor columns
-print("Step 2c: Computing SOFA post-CRRT (0h to last_vital_dttm) …")
-sofa_cohort_post = crrt_initiation.merge(eb_map, on="encounter_block")
-sofa_cohort_post = sofa_cohort_post.merge(
-    outcomes_df[["encounter_block", "last_vital_dttm"]],
-    on="encounter_block",
-    how="left",
-)
-sofa_cohort_post["start_dttm"] = sofa_cohort_post["crrt_initiation_time"]
-sofa_cohort_post["end_dttm"] = sofa_cohort_post["last_vital_dttm"]
-sofa_cohort_post = sofa_cohort_post[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
-
-sofa_post_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
-    cohort_df=pl.from_pandas(sofa_cohort_post),
-    filetype=FILE_TYPE,
-    id_name="encounter_block",
-    extremal_type="worst",
-    fill_na_scores_with_zero=False,
-    remove_outliers=True,
-    timezone=TIMEZONE,
-).to_pandas()
-
-sofa_post_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_post_scores.columns]
-sofa_post_df = sofa_post_scores[sofa_post_keep].rename(
-    columns={c: f"{c}_post" for c in SOFA_COLS if c in sofa_post_scores.columns}
-)
-del sofa_post_scores, sofa_cohort_post
-gc.collect()
-print(f"  SOFA post-CRRT: {len(sofa_post_df)} encounters")
-
 
 # ===================================================================
 # STEP 3: Compute sepsis flags (ASE ±72h of CRRT initiation)
@@ -375,11 +321,10 @@ def window_last_values(df, min_h, max_h, suffix, cols):
 
 
 baseline_last = window_last_values(wide_df, -12, 3, "baseline", continuous_wide)
-post72h_last = window_last_values(wide_df, 0, 72, "post72h", continuous_wide)
+# post_crrt window (0h to end of stay) supplies the *_post_crrt labs read by 03.
 post_crrt_last = window_last_values(wide_df, 0, None, "post_crrt", continuous_wide)
 
-print(f"    baseline: {len(baseline_last)}, "
-      f"post72h: {len(post72h_last)}, post_crrt: {len(post_crrt_last)} encounters")
+print(f"    baseline: {len(baseline_last)}, post_crrt: {len(post_crrt_last)} encounters")
 
 # -------------------------------------------------------------------
 # 4c: Extract categorical baselines (ADT location, resp device)
@@ -495,17 +440,14 @@ analysis_df = analysis_df.merge(index_crrt_df[crrt_merge_cols], on="encounter_bl
 
 # NOTE: crrt_initiation_time already merged into outcomes_df in Step 1 (90-day cap)
 
-# SOFA at initiation + SOFA 72h + SOFA post-CRRT
+# SOFA at initiation
 analysis_df = analysis_df.merge(sofa_df, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(sofa_72h_df, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(sofa_post_df, on="encounter_block", how="left")
 
 # Sepsis
 analysis_df = analysis_df.merge(sepsis_flag_df, on="encounter_block", how="left")
 
 # Window last values (labs, vasopressors, respiratory settings)
 analysis_df = analysis_df.merge(baseline_last, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(post72h_last, on="encounter_block", how="left")
 analysis_df = analysis_df.merge(post_crrt_last, on="encounter_block", how="left")
 
 # Categorical baselines (ADT, device)
@@ -517,11 +459,6 @@ analysis_df = analysis_df.merge(imv_duration_df, on="encounter_block", how="left
 analysis_df = analysis_df.merge(vaso_duration_df, on="encounter_block", how="left")
 
 # Derived columns
-analysis_df["alive_72h"] = (
-    analysis_df["death_dttm"].isna()
-    | ((analysis_df["death_dttm"] - analysis_df["crrt_initiation_time"]).dt.total_seconds() / 3600 > 72)
-)
-analysis_df["dead_within_72h"] = ~analysis_df["alive_72h"]
 if HAS_CRRT_SETTINGS:
     analysis_df["last_crrt_mode"] = analysis_df["crrt_mode_category"]
 
@@ -541,7 +478,7 @@ print(f"  Analysis DataFrame: {analysis_df.shape}")
 # Single project Table 1: full analytic CRRT cohort, stratified by initial
 # (median-first-3h) CRRT dose band - <20 / 20-30 / >30 mL/kg/hr (the 20-30
 # band brackets the KDIGO-recommended delivered target). gtsummary shape
-# consumed by the combine renderer (09) and manuscript builder (10). p-value
+# consumed by the dashboard (07) and manuscript builder (08). p-value
 # is across the three bands (Kruskal-Wallis for continuous, chi-square for
 # categorical).
 print("Step 6: Generating Table 1 (baseline by CRRT dose band) ...")
