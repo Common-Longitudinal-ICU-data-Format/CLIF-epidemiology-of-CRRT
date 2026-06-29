@@ -553,6 +553,12 @@ t1["_imv"] = t1["device_category"].astype("string").str.lower().eq("imv") if "de
 t1["_death30"] = (pd.to_numeric(t1["death_30d"], errors="coerce") == 1) if "death_30d" in t1.columns else False
 _r = t1["race_category"].astype("string").str.lower().fillna("unknown")
 t1["_race_grp"] = _r.map(lambda s: "Black" if "black" in s else ("White" if s == "white" else "Other"))
+# Non-renal SOFA (= total - renal): extra-renal illness severity. Reported
+# alongside total SOFA because renal failure is the cohort's defining organ and
+# the CRRT indication, so the renal component is not an independent severity axis.
+if {"sofa_total", "sofa_renal"}.issubset(t1.columns):
+    t1["sofa_nonrenal"] = (pd.to_numeric(t1["sofa_total"], errors="coerce")
+                           - pd.to_numeric(t1["sofa_renal"], errors="coerce"))
 
 GROUPS = ["Overall"] + BANDS
 gframe = {"Overall": t1}
@@ -646,6 +652,7 @@ _row_binary("Female (%)", "_female")
 _row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
 # Severity and labs at CRRT initiation
 _row_cont("SOFA Score", "sofa_total", 0)
+_row_cont("SOFA Score, non-renal", "sofa_nonrenal", 0)
 _row_cont("Creatinine (mg/dL)", "creatinine_t1", 2)
 _row_cont("BUN (mg/dL)", "bun_t1", 0)
 _row_cont("Lactate (mmol/L)", "lactate_t1", 1)
