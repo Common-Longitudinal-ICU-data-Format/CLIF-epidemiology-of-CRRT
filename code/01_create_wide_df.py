@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import clifpy
 from utils.config import config
-from pipeline_helpers import load_intermediate, safe_load_clif_table
+from pipeline_helpers import load_intermediate, safe_load_clif_table, get_output_root
 from clifpy.utils.outlier_handler import apply_outlier_handling
 import gc
 import yaml
@@ -41,7 +41,7 @@ print(f"Tables Path: {tables_path}")
 print(f"File Type: {file_type}")
 PROJECT_ROOT = Path(config['project_root'])
 UTILS_DIR = PROJECT_ROOT / "utils"
-OUTPUT_DIR = PROJECT_ROOT / "output"
+OUTPUT_DIR = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
 OUTPUT_FINAL_DIR = OUTPUT_DIR / "final"
 OUTPUT_INTERMEDIATE_DIR = OUTPUT_DIR / "intermediate"
 

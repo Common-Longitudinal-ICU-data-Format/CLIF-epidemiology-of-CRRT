@@ -7,8 +7,15 @@ is the one place MIMIC-CLIF is required (Option E, docs/smr_addition_plan.md §4
     CLIF_CONFIG=config/config_mimic.json uv run python 03b_crrt_epi_smr.py   # build cohort
     CLIF_CONFIG=config/config_mimic.json uv run python smr_fit_reference.py  # fit + freeze
 
-Reads  output/smr/{DEV_SITE}_smr_cohort.parquet
+Reads  output[_root]/smr/{DEV_SITE}_smr_cohort.parquet
 Writes config/smr_reference_model.json   (TRACKED; shipped to all sites)
+
+Cohort (harmonized 2026-06-29): 03b builds {DEV_SITE}_smr_cohort.parquet from the
+SAME analytic CRRT cohort as Table 1 (00->02; adult, continuous CRRT, ESRD-
+excluded, with required baseline data) with NO minimum-CRRT-duration filter, so
+the reference model is fit on the same cohort definition the consortium applies.
+At MIMIC this requires the full pipeline run into its isolated output_mimic/ tree
+(CLIF_CONFIG=config/config_mimic.json on 00 -> 01 -> 02 -> 03b).
 
 Model: pre-specified PARSIMONIOUS LINEAR logistic — age, female, sofa_total,
 lactate, cci_score (all orthogonal to SOFA components; no double-counting). We
@@ -31,13 +38,13 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.metrics import roc_auc_score
 
-from pipeline_helpers import load_config
+from pipeline_helpers import load_config, get_output_root
 
 config = load_config()
 DEV_SITE = config["site_name"]
 COVARS = ["age", "female", "sofa_total", "lactate", "cci_score"]
 
-OUT = Path("../output/smr")
+OUT = get_output_root(config) / "smr"  # honors config['output_dir'] (dev-site isolation)
 cohort_path = OUT / f"{DEV_SITE}_smr_cohort.parquet"
 if not cohort_path.exists():
     raise FileNotFoundError(

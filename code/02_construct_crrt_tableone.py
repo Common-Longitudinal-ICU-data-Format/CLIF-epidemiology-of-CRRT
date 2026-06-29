@@ -37,6 +37,7 @@ import json  # noqa: E402
 
 from pipeline_helpers import (  # noqa: E402
     load_config, load_intermediate, get_tables_path, course_average_intensity,
+    get_output_root,
 )
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
@@ -45,9 +46,9 @@ from sofa_calculator import compute_sofa_polars  # noqa: E402
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
+INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate"
+FINAL_DIR = OUTPUT_ROOT / "final" / "crrt_epi"
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]
@@ -467,6 +468,31 @@ for col in analysis_df.columns:
     if (col.endswith("_category") or col == "location_type") and analysis_df[col].dtype == "object":
         analysis_df[col] = analysis_df[col].str.lower()
 
+# Nearest-MEASURED baseline labs ({x}_t1): the value measured nearest CRRT
+# initiation within [-12, +3] h, off the tz-normalized wide_df. Avoids the
+# unlimited-forward-fill staleness in the *_baseline columns (a point lab does
+# not persist like an infusion rate). Computed ONCE here and persisted so BOTH
+# Table 1 (below) and the SMR builder (03b) consume one definition (and one
+# tz-correct windowing). NOTE: the *_baseline columns consumed by 04/causal
+# still use the forward-filled values - a separate, causal-affecting decision.
+_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
+_t1_lab_cols = [f"lab_{x}" for x in _T1_LABS]
+_t1_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
+_t1_need = ["hospitalization_id", "event_dttm"] + [c for c in _t1_lab_cols if c in _t1_avail]
+_t1_wd = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=_t1_need)
+_t1_wd = _t1_wd.merge(eb_map, on="hospitalization_id", how="inner").merge(
+    crrt_initiation[["encounter_block", "crrt_initiation_time"]], on="encounter_block", how="inner")
+_t1_wd["_h"] = (_t1_wd["event_dttm"] - _t1_wd["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+_t1_wd = _t1_wd[(_t1_wd["_h"] >= -12) & (_t1_wd["_h"] <= 3)].copy()
+_t1_wd["_abs"] = _t1_wd["_h"].abs()
+for _x in _T1_LABS:
+    _c = f"lab_{_x}"
+    if _c in _t1_wd.columns:
+        _near = (_t1_wd.dropna(subset=[_c]).sort_values("_abs")
+                 .groupby("encounter_block")[_c].first())
+        analysis_df[f"{_x}_t1"] = analysis_df["encounter_block"].map(_near)
+del _t1_wd
+
 # Save
 analysis_df.to_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet", index=False)
 print(f"  Analysis DataFrame: {analysis_df.shape}")
@@ -490,31 +516,9 @@ if _uf_intensity_by_eb is not None:
     # Course-average net UF intensity (mL/kg/hr) — NOT the first-3h snapshot.
     t1["net_uf_intensity"] = t1["encounter_block"].map(_uf_intensity_by_eb)
 
-# Accurate baseline labs for Table 1: the value MEASURED nearest CRRT
-# initiation within [-12, +3] h. This avoids the unlimited-forward-fill
-# staleness in the analysis_df *_baseline columns (a point lab does not
-# persist the way an infusion rate does), which otherwise carried stale
-# pre-window values into the baseline (e.g. lactate median 3.3 vs ~4.6
-# measured nearest t=0). NOTE: the *_baseline columns consumed by 04/causal
-# still use the forward-filled values - addressing that is a separate,
-# causal-affecting decision.
-_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
-_lab_cols = [f"lab_{x}" for x in _LABS]
-_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
-_need = ["hospitalization_id", "event_dttm"] + [c for c in _lab_cols if c in _avail]
-_wd = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=_need)
-_wd = _wd.merge(eb_map, on="hospitalization_id", how="inner").merge(
-    crrt_initiation[["encounter_block", "crrt_initiation_time"]], on="encounter_block", how="inner")
-_wd["_h"] = (_wd["event_dttm"] - _wd["crrt_initiation_time"]).dt.total_seconds() / 3600.0
-_wd = _wd[(_wd["_h"] >= -12) & (_wd["_h"] <= 3)].copy()
-_wd["_abs"] = _wd["_h"].abs()
-for x in _LABS:
-    c = f"lab_{x}"
-    if c in _wd.columns:
-        near = (_wd.dropna(subset=[c]).sort_values("_abs")
-                .groupby("encounter_block")[c].first())
-        t1[f"{x}_t1"] = t1["encounter_block"].map(near)
-del _wd
+# Nearest-measured baseline labs ({x}_t1) were computed once above and persisted
+# into analysis_df (tz-correct, single definition shared with the SMR builder
+# 03b), so they flow into t1 through the merge - no recomputation here.
 
 BANDS = ["<20 mL/kg/hr", "20-30 mL/kg/hr", ">30 mL/kg/hr"]
 _dose = pd.to_numeric(t1.get("crrt_dose_ml_kg_hr"), errors="coerce")

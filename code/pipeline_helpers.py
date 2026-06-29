@@ -100,6 +100,23 @@ def validate_config(config: dict) -> dict:
                 f"got {type(val).__name__}."
             )
 
+    # --- Output isolation (optional) ---
+    # output_dir lets an external development site (e.g. MIMIC) run the full
+    # pipeline into its own tree without clobbering the primary site's outputs.
+    # Default "output" reproduces the original single-site behavior exactly.
+    config.setdefault("output_dir", "output")
+    config.setdefault("external_dev_site", False)
+    if not isinstance(config["output_dir"], str):
+        raise TypeError(
+            f"Config field 'output_dir' must be a string, "
+            f"got {type(config['output_dir']).__name__}."
+        )
+    if not isinstance(config["external_dev_site"], bool):
+        raise TypeError(
+            f"Config field 'external_dev_site' must be a boolean, "
+            f"got {type(config['external_dev_site']).__name__}."
+        )
+
     return config
 
 
@@ -135,6 +152,29 @@ def load_config() -> dict:
     config = validate_config(config)
     config["_config_path"] = str(cfg_path)  # provenance for logging
     return config
+
+
+def get_output_root(config: dict) -> Path:
+    """Resolve the output root directory for this run.
+
+    Returns project_root / config['output_dir'] (default 'output'), as an
+    ABSOLUTE Path. A non-default output_dir lets an external development site
+    (e.g. MIMIC) run the full pipeline into its own tree (e.g. 'output_mimic')
+    without touching the primary site's 'output/'. Leaving output_dir at the
+    default reproduces the original single-site paths exactly.
+
+    Guard: an external_dev_site run is refused if it would write to the default
+    'output' tree, so a dev-site run can never clobber the primary outputs.
+    """
+    project_root = Path(__file__).resolve().parent.parent  # code/ -> repo root
+    out_name = config.get("output_dir", "output")
+    if config.get("external_dev_site") and out_name == "output":
+        raise ValueError(
+            "external_dev_site=true but output_dir is the default 'output'.\n"
+            "  Set a distinct output_dir (e.g. \"output_mimic\") in this config so "
+            "the development run does not overwrite the primary site's outputs."
+        )
+    return project_root / out_name
 
 
 # ---------------------------------------------------------------------------

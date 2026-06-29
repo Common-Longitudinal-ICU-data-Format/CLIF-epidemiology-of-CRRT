@@ -62,7 +62,7 @@ print(f"Current directory: {os.getcwd()}")
 
 
 # Load configuration (honors CLIF_CONFIG; defaults to config/config.json)
-from pipeline_helpers import load_config, safe_load_clif_table
+from pipeline_helpers import load_config, safe_load_clif_table, get_output_root
 config = load_config()
 SITE_NAME = config["site_name"]
 
@@ -79,10 +79,15 @@ print(f"   Has CRRT settings: {has_crrt_settings}")
 
 
 import os
+# Output root: honors config['output_dir'] so a development site (e.g. MIMIC)
+# writes to its own tree (output_mimic/) without touching the primary site's
+# output/. Default reproduces the original ../output paths exactly.
+OUTPUT_ROOT = get_output_root(config)
+OUT = str(OUTPUT_ROOT)
 # Create output directories if they do not exist
-os.makedirs("../output/final/crrt_epi/graphs", exist_ok=True)
-os.makedirs("../output/final/diagnostics/graphs", exist_ok=True)  # internal QC / data-completeness outputs
-os.makedirs("../output/intermediate", exist_ok=True)
+os.makedirs(f"{OUT}/final/crrt_epi/graphs", exist_ok=True)
+os.makedirs(f"{OUT}/final/diagnostics/graphs", exist_ok=True)  # internal QC / data-completeness outputs
+os.makedirs(f"{OUT}/intermediate", exist_ok=True)
 
 
 # # Required columns and categories
@@ -213,7 +218,7 @@ clif = ClifOrchestrator(
     data_directory=config['tables_path'],
     filetype=config['file_type'],
     timezone=config['timezone'],
-    output_directory="../output"  # else clifpy logs to <cwd>/output (= code/output)
+    output_directory=OUT  # else clifpy logs to <cwd>/output (= code/output)
 )
 
 
@@ -444,8 +449,8 @@ for col in crrt_miss_cols:
     miss_data.append({'column': col, 'n_total': n_total, 'n_missing': int(n_missing), 'pct_missing': round(pct, 1)})
     print(f"   {col}: {n_missing:,}/{n_total:,} ({pct:.1f}%) missing")
 miss_report = pd.DataFrame(miss_data)
-Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
-miss_report.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_column_missingness.csv', index=False)
+Path(f'{OUT}/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+miss_report.to_csv(f'{OUT}/final/diagnostics/{SITE_NAME}_crrt_column_missingness.csv', index=False)
 print(f"\n✓ Saved to: output/final/diagnostics/{SITE_NAME}_crrt_column_missingness.csv")
 print("=" * 80)
 
@@ -616,8 +621,8 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    plt.savefig(f'../output/final/diagnostics/graphs/{SITE_NAME}_crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
+    Path(f"{OUT}/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    plt.savefig(f'{OUT}/final/diagnostics/graphs/{SITE_NAME}_crrt_parameter_histograms_grid.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     print("\n✓ Grid histograms saved to: output/final/diagnostics/graphs/")
@@ -674,7 +679,7 @@ if has_crrt_settings:
     print(summary_df[display_cols].to_string(index=False))
 
     # Save detailed summary
-    summary_df.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_settings_distribution_by_mode.csv', index=False)
+    summary_df.to_csv(f'{OUT}/final/diagnostics/{SITE_NAME}_crrt_settings_distribution_by_mode.csv', index=False)
     print(f"\n✓ Detailed summary saved to: output/final/diagnostics/{SITE_NAME}_crrt_settings_distribution_by_mode.csv")
 
     # Also create a simplified summary for quick reference
@@ -704,7 +709,7 @@ if has_crrt_settings:
     print(simple_summary_df.to_string(index=False))
 
     # Save simple summary
-    simple_summary_df.to_csv(f'../output/final/diagnostics/{SITE_NAME}_crrt_settings_summary_simple.csv', index=False)
+    simple_summary_df.to_csv(f'{OUT}/final/diagnostics/{SITE_NAME}_crrt_settings_summary_simple.csv', index=False)
     print(f"\n✓ Simple summary saved to: output/final/diagnostics/{SITE_NAME}_crrt_settings_summary_simple.csv")
     print("=" * 80)
 
@@ -1264,8 +1269,8 @@ print(f"Dropped encounter_blocks for missing labs: {len(dropped_blocks)} encount
 # Save hospitalization_id and encounter_block for dropped cases
 if len(dropped_blocks) > 0:
     dropped_encounters_df = cohort_df[cohort_df['encounter_block'].isin(dropped_blocks)][['hospitalization_id', 'encounter_block']]
-    dropped_encounters_df.to_parquet('../output/intermediate/dropped_missing_labs_blocks.parquet', index=False)
-    print(f"Saved dropped hospitalization_id and encounter_block to ../output/intermediate/dropped_missing_labs_blocks.parquet")
+    dropped_encounters_df.to_parquet(f'{OUT}/intermediate/dropped_missing_labs_blocks.parquet', index=False)
+    print(f"Saved dropped hospitalization_id and encounter_block to {OUT}/intermediate/dropped_missing_labs_blocks.parquet")
 else:
     print("No encounter_blocks dropped for missing labs.")
 
@@ -1368,7 +1373,7 @@ desired_order = ['hospitalization_id', 'encounter_block', 'recorded_dttm', 'crrt
 remaining_cols = [col for col in crrt_non_icu_df.columns if col not in desired_order]
 crrt_non_icu_df = crrt_non_icu_df[desired_order + remaining_cols]
 adt_df_non_icu_hosps = adt_stitched[adt_stitched['encounter_block'].isin(non_icu_hosps)]
-adt_df_non_icu_hosps.to_csv('../output/intermediate/adt_df_non_icu_hosps.csv', index=False)
+adt_df_non_icu_hosps.to_csv(f'{OUT}/intermediate/adt_df_non_icu_hosps.csv', index=False)
 
 
 # # Strobe
@@ -1384,8 +1389,8 @@ print(strobe_counts)
 # Save strobe counts to CSV in ../output/intermediate
 strobe_counts_df = pd.DataFrame(list(strobe_counts.items()), columns=['counter', 'value'])
 strobe_counts_df["site"] = config["site_name"]
-Path('../output/final/crrt_epi').mkdir(parents=True, exist_ok=True)
-strobe_counts_df.to_csv(f'../output/final/crrt_epi/{SITE_NAME}_strobe_counts.csv', index=False)
+Path(f'{OUT}/final/crrt_epi').mkdir(parents=True, exist_ok=True)
+strobe_counts_df.to_csv(f'{OUT}/final/crrt_epi/{SITE_NAME}_strobe_counts.csv', index=False)
 
 
 # In[43]:
@@ -1399,7 +1404,7 @@ from matplotlib.patches import FancyBboxPatch
 
 def create_consort_diagram_straight_flow(
     strobe_counts: Dict,
-    output_dir: Union[str, Path] = "../output/final/crrt_epi/graphs"
+    output_dir: Union[str, Path] = f"{OUT}/final/crrt_epi/graphs"
 ) -> Path:
     """
     Creates a CONSORT flow diagram with a straight vertical main flow 
@@ -2189,8 +2194,8 @@ if has_crrt_settings:
 
     # Save figure
     plt.tight_layout()
-    Path("../output/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"../output/final/diagnostics/graphs/{SITE_NAME}_dose_comparison.png")
+    Path(f"{OUT}/final/crrt_epi/graphs").mkdir(parents=True, exist_ok=True)
+    fig.savefig(f"{OUT}/final/diagnostics/graphs/{SITE_NAME}_dose_comparison.png")
     plt.close(fig)
 
 
@@ -2265,7 +2270,7 @@ if has_crrt_settings:
     plt.tight_layout()
 
     # Save figure
-    output_path = f'../output/final/diagnostics/graphs/{SITE_NAME}_crrt_dose_comparison_by_mode.png'
+    output_path = f'{OUT}/final/diagnostics/graphs/{SITE_NAME}_crrt_dose_comparison_by_mode.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"\n✓ Saved mode-specific comparison to: {output_path}")
@@ -2595,20 +2600,20 @@ index_crrt_df = index_crrt_df.merge(
 # In[58]:
 
 
-cohort_df.to_parquet("../output/intermediate/cohort_df.parquet", index=False)
-outcomes_df.to_parquet("../output/intermediate/outcomes_df.parquet", index=False)
+cohort_df.to_parquet(f"{OUT}/intermediate/cohort_df.parquet", index=False)
+outcomes_df.to_parquet(f"{OUT}/intermediate/outcomes_df.parquet", index=False)
 # Filter weight_df to hospitalization_ids present in cohort_df before saving
 weight_df_filtered = weight_df[weight_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
-weight_df_filtered.to_parquet("../output/intermediate/weight_df.parquet", index=False)
+weight_df_filtered.to_parquet(f"{OUT}/intermediate/weight_df.parquet", index=False)
 # save or use crrt_initiation df
-crrt_initiation.to_parquet("../output/intermediate/crrt_initiation.parquet", index=False)
-crrt_at_initiation.to_parquet("../output/intermediate/crrt_at_initiation.parquet", index=False)
-index_crrt_df.to_parquet("../output/intermediate/index_crrt_df.parquet", index=False)
-crrt_cohort.to_parquet("../output/intermediate/crrt_cohort.parquet", index=False)
+crrt_initiation.to_parquet(f"{OUT}/intermediate/crrt_initiation.parquet", index=False)
+crrt_at_initiation.to_parquet(f"{OUT}/intermediate/crrt_at_initiation.parquet", index=False)
+index_crrt_df.to_parquet(f"{OUT}/intermediate/index_crrt_df.parquet", index=False)
+crrt_cohort.to_parquet(f"{OUT}/intermediate/crrt_cohort.parquet", index=False)
 # Save processed hospital_diagnosis (with POA normalized, codes cleaned)
 # Filtered to cohort hospitalization_ids for use by script 04
 diag_cohort = hospital_diagnosis_df[hospital_diagnosis_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
-diag_cohort.to_parquet("../output/intermediate/hospital_diagnosis_df.parquet", index=False)
+diag_cohort.to_parquet(f"{OUT}/intermediate/hospital_diagnosis_df.parquet", index=False)
 print(f"Saved hospital_diagnosis_df: {len(diag_cohort):,} rows ({diag_cohort['poa_present'].sum():,} POA=1)")
 
 

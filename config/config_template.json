@@ -6,5 +6,7 @@
     "project_root": "/path/to/CLIF-epidemiology-of-CRRT",
     "has_crrt_settings": true,
     "admission_year_start": 2018,
-    "admission_year_end": null
+    "admission_year_end": null,
+    "output_dir": "output",
+    "external_dev_site": false
 }

@@ -1,33 +1,45 @@
 """03b — Risk-standardized mortality (SMR) for CRRT, per site.
 
-Part of the descriptive-epi family (runs after 03). Site-agnostic: data path/site
-come from the selected config, so identical covariate definitions are used at the
-MIMIC development site and every consortium application site (Option E in
-docs/smr_addition_plan.md).
+Part of the descriptive-epi family (runs after 02). Site-agnostic: the data
+path/site come from the selected config, so identical covariate definitions are
+used at the MIMIC development site and every consortium application site
+(Option E in docs/smr_addition_plan.md).
 
 Every site runs this:
     uv run python 03b_crrt_epi_smr.py                       # UChicago / any site
     CLIF_CONFIG=config/config_mimic.json uv run python 03b_crrt_epi_smr.py  # MIMIC
 
-It (1) builds the site SMR cohort (covariates + outcome) and writes
-output/smr/{SITE}_smr_cohort.parquet (gitignored, row-level), then (2) if the
-frozen reference model config/smr_reference_model.json is present, applies it to
-compute observed/expected, the SMR with exact-Poisson (Byar) 95% CI, and AUC,
-and writes the per-site exchange CSV output/final/crrt_epi/{SITE}_smr.csv (which
-07/08 pool into the anonymized cross-site forest + dashboard).
+COHORT (harmonized 2026-06-29): the SMR uses the SAME analytic CRRT cohort as
+Table 1 — `output[_root]/intermediate/tableone_analysis_df.parquet`, built by
+00->01->02 (adult >=18, continuous CRRT mode, ESRD-excluded, with required
+baseline data). There is **no minimum-CRRT-duration filter**: a mortality-
+standardization model must not exclude patients who died early in CRRT (that
+would bias the observed count). Cohort key = encounter_block, so the SMR N
+equals the Table-1 N exactly. (Previously 03b re-derived a hospitalization-level
+cohort with a >=24h span filter; that drift from plan §4.2 is removed.)
+
+It (1) assembles the per-site SMR cohort (covariates + outcome) and writes
+output[_root]/smr/{SITE}_smr_cohort.parquet (gitignored, row-level), then (2) if
+the frozen reference model config/smr_reference_model.json is present, applies it
+to compute observed/expected, the SMR with exact-Poisson (Byar) 95% CI, and AUC,
+and writes the per-site exchange CSV output[_root]/final/crrt_epi/{SITE}_smr.csv
+(which 07/08 pool into the anonymized cross-site forest + dashboard).
+
+Covariates (5, parsimonious linear): age, female, SOFA total, baseline lactate,
+CCI. age / female / sofa_total / lactate (nearest-measured {lab}_t1) / 30-day
+mortality are read straight from the pipeline (tz-correct, identical to Table 1).
+CCI is the only covariate computed here (clifpy ICD-10 + a Quan-2005 ICD-9 map),
+keyed to the cohort's encounter_blocks via the hospitalization map; it has no
+datetime/tz dependence.
 
 The reference model is fit ONCE on MIMIC by the coordinating site via
 smr_fit_reference.py; consortium sites only need the shipped coefficient JSON,
-NOT MIMIC data. Cohort is hospitalization-level (no encounter-block stitching) —
-a deliberate approximation for a case-mix standardization model (plan §4.9).
-Reuses the pipeline SOFA calculator and clifpy CCI (+ a Quan-2005 ICD-9 mapping)
-so covariate definitions match the rest of the pipeline.
+NOT MIMIC data.
 """
 import warnings
 warnings.filterwarnings("ignore")
 import json
 from pathlib import Path
-from datetime import timedelta
 
 import numpy as np
 import pandas as pd
@@ -35,20 +47,20 @@ import polars as pl
 import pyarrow.parquet as pq
 import clifpy
 
-from pipeline_helpers import load_config
-from sofa_calculator import compute_sofa_polars
+from pipeline_helpers import load_config, get_output_root
 
 config = load_config()
 SITE = config["site_name"]
 TABLES_PATH = config["tables_path"]
 FILE_TYPE = config["file_type"]
-TIMEZONE = config["timezone"]
-print(f"=== 03b CRRT SMR | site={SITE} | tz={TIMEZONE} ===")
+print(f"=== 03b CRRT SMR | site={SITE} ===")
 print(f"    tables_path: {TABLES_PATH}")
 
-OUT = Path("../output/smr")
+OUTPUT_ROOT = get_output_root(config)            # honors config['output_dir']
+INTER = OUTPUT_ROOT / "intermediate"
+OUT = OUTPUT_ROOT / "smr"
 OUT.mkdir(parents=True, exist_ok=True)
-EPI_OUT = Path("../output/final/crrt_epi")
+EPI_OUT = OUTPUT_ROOT / "final" / "crrt_epi"
 EPI_OUT.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = Path("../config/smr_reference_model.json")
 
@@ -64,112 +76,43 @@ def byar_ci(O, E):
     hi = ((O + 1) / E) * (1 - 1/(9*(O+1)) + 1.96/(3*np.sqrt(O+1)))**3
     return lo, hi
 
-# ── Load tables (selected columns) ──────────────────────────────────────────
-crrt = pl.read_parquet(P("crrt_therapy"),
-    columns=["hospitalization_id", "recorded_dttm", "crrt_mode_category"])
-hosp = pl.read_parquet(P("hospitalization"),
-    columns=["hospitalization_id", "patient_id", "age_at_admission",
-             "discharge_category", "discharge_dttm"])
-pat = pl.read_parquet(P("patient"),
-    columns=["patient_id", "sex_category", "death_dttm"])
+# ── Cohort + covariates from the pipeline (the Table-1 analytic cohort) ──────
+TBL_PATH = INTER / "tableone_analysis_df.parquet"
+if not TBL_PATH.exists():
+    raise FileNotFoundError(
+        f"{TBL_PATH} not found. Run the pipeline first (00 -> 01 -> 02):\n"
+        f"  uv run python 00_cohort.py && uv run python 01_create_wide_df.py && "
+        f"uv run python 02_construct_crrt_tableone.py")
+NEED = ["encounter_block", "age_at_admission", "sex_category",
+        "sofa_total", "lactate_t1", "death_30d"]
+_avail = set(pq.read_schema(TBL_PATH).names)
+_missing = [c for c in NEED if c not in _avail]
+if _missing:
+    raise KeyError(
+        f"tableone_analysis_df.parquet is missing {_missing}. Re-run "
+        f"02_construct_crrt_tableone.py (it persists nearest-measured lactate_t1).")
+tbl = pd.read_parquet(TBL_PATH, columns=NEED)
+N = len(tbl)
 
-# ── Cohort funnel (hospitalization-level; mirrors 00 rules) ─────────────────
-print("\n-- cohort funnel --")
-n0 = crrt["hospitalization_id"].n_unique()
-print(f"  0. any CRRT record:                       {n0:,}")
-
-adult_ids = hosp.filter(pl.col("age_at_admission") >= 18)["hospitalization_id"]
-crrt = crrt.filter(pl.col("hospitalization_id").is_in(adult_ids.to_list()))
-print(f"  1. adult (>=18):                          {crrt['hospitalization_id'].n_unique():,}")
-
-valid_modes = ["cvvhdf", "cvvhd", "cvvh"]
-has_valid = (crrt.with_columns(pl.col("crrt_mode_category").str.to_lowercase().alias("m"))
-             .filter(pl.col("m").is_in(valid_modes))["hospitalization_id"].unique())
-crrt = crrt.filter(pl.col("hospitalization_id").is_in(has_valid.to_list()))
-print(f"  2. continuous mode (cvvhdf/cvvhd/cvvh):   {crrt['hospitalization_id'].n_unique():,}")
-
-span = (crrt.group_by("hospitalization_id")
-        .agg((pl.col("recorded_dttm").max() - pl.col("recorded_dttm").min()).alias("span")))
-ge24 = span.filter(pl.col("span") >= timedelta(hours=24))["hospitalization_id"]
-crrt = crrt.filter(pl.col("hospitalization_id").is_in(ge24.to_list()))
-print(f"  3. CRRT span >= 24h:                      {crrt['hospitalization_id'].n_unique():,}")
-
-# ESRD exclusion (codes + poa in {1, NA}); normalize codes
-esrd_codes = ['z992','z9115','i120','n186','i132','z91158','i1311','z4931','z4901',
-              'i272','5856','40391','40311','v4511','v4512']
-diag_raw = pl.read_parquet(P("hospital_diagnosis"),
-    columns=["hospitalization_id", "diagnosis_code", "diagnosis_code_format", "poa_present"])
-diag_norm = diag_raw.with_columns(
-    pl.col("diagnosis_code").str.to_lowercase().str.replace_all(r"\.", "").alias("code"))
-esrd_ids = set(diag_norm.filter(
-    pl.col("code").is_in(esrd_codes) &
-    ((pl.col("poa_present") == 1) | (pl.col("poa_present").is_null()))
-)["hospitalization_id"].unique().to_list())
-cohort_ids = [h for h in crrt["hospitalization_id"].unique().to_list() if h not in esrd_ids]
-N = len(cohort_ids)
-print(f"  4. after ESRD exclusion == SMR COHORT:    {N:,}")
-
-# CRRT initiation = first record per hospitalization
-init = (crrt.filter(pl.col("hospitalization_id").is_in(cohort_ids))
-        .group_by("hospitalization_id")
-        .agg(pl.col("recorded_dttm").min().alias("crrt_init")))
-
-# ── Demographics + 30-day mortality (mirrors 00_cohort.py death definition) ──
-base = (hosp.filter(pl.col("hospitalization_id").is_in(cohort_ids))
-        .join(pat, on="patient_id", how="left")
-        .join(init, on="hospitalization_id", how="left")
-        .with_columns([
-            pl.col("age_at_admission").alias("age"),
-            (pl.col("sex_category").str.to_lowercase().is_in(["female", "f"]))
-                .cast(pl.Int8).alias("female"),
-            pl.col("discharge_category").str.to_lowercase().is_in(["expired", "hospice"])
-                .alias("died_flag"),
-            pl.coalesce([pl.col("death_dttm"), pl.col("discharge_dttm")]).alias("death_time"),
-        ])
-        .with_columns(
-            (pl.col("died_flag")
-             & pl.col("death_time").is_not_null()
-             & ((pl.col("death_time") - pl.col("crrt_init")) >= timedelta(0))
-             & ((pl.col("death_time") - pl.col("crrt_init")) <= timedelta(days=30)))
-                .cast(pl.Int8).alias("died_30d")
-        ))
-print(f"\n-- mortality (discharge_category in expired/hospice, <=30d of init) --")
-print(f"  died within 30d of CRRT init: {int(base['died_30d'].sum()):,} "
-      f"({pct(int(base['died_30d'].sum()), N)})")
-
-# ── SOFA total at baseline (-12h..+3h), via the pipeline calculator ─────────
-print("\n-- SOFA (compute_sofa_polars, -12h..+3h) --")
-sofa_cohort = init.with_columns([
-    (pl.col("crrt_init") - pl.duration(hours=12)).alias("start_dttm"),
-    (pl.col("crrt_init") + pl.duration(hours=3)).alias("end_dttm"),
-]).select(["hospitalization_id", "start_dttm", "end_dttm"])
-sofa = compute_sofa_polars(
-    data_directory=TABLES_PATH, cohort_df=sofa_cohort, filetype=FILE_TYPE,
-    id_name="hospitalization_id", extremal_type="worst",
-    fill_na_scores_with_zero=False, remove_outliers=True, timezone=TIMEZONE,
-).select(["hospitalization_id", "sofa_total"])
-print(f"  sofa_total non-null {pct(sofa['sofa_total'].drop_nulls().len(), N)}")
-
-# ── Baseline lactate: nearest measured in [-12h,+3h] ────────────────────────
-labs_cols = pq.read_schema(P("labs")).names
-val_col = "lab_value_numeric" if "lab_value_numeric" in labs_cols else "lab_value"
-lac = (pl.scan_parquet(P("labs"))
-       .select(["hospitalization_id", "lab_category", "lab_result_dttm", val_col])
-       .filter((pl.col("hospitalization_id").is_in(cohort_ids))
-               & (pl.col("lab_category") == "lactate")).collect()
-       .with_columns(pl.col(val_col).cast(pl.Float64, strict=False).alias("lactate"))
-       .filter(pl.col("lactate").is_not_null())
-       .join(init, on="hospitalization_id", how="inner")
-       .with_columns((pl.col("lab_result_dttm") - pl.col("crrt_init")).alias("dt"))
-       .filter((pl.col("dt") >= timedelta(hours=-12)) & (pl.col("dt") <= timedelta(hours=3)))
-       .with_columns(pl.col("dt").abs().alias("absdt"))
-       .sort(["hospitalization_id", "absdt"])
-       .group_by("hospitalization_id").first()
-       .select(["hospitalization_id", "lactate"]))
-print(f"-- lactate ({val_col}) non-null {pct(lac['hospitalization_id'].n_unique(), N)}"
-      + (f"; median {lac['lactate'].median():.2f} mmol/L" if lac.height else ""))
+base = pd.DataFrame({
+    "encounter_block": tbl["encounter_block"],
+    "age": pd.to_numeric(tbl["age_at_admission"], errors="coerce"),
+    "female": tbl["sex_category"].astype("string").str.lower().isin(["female", "f"]).astype("int8"),
+    "sofa_total": pd.to_numeric(tbl["sofa_total"], errors="coerce"),
+    "lactate": pd.to_numeric(tbl["lactate_t1"], errors="coerce"),
+    "died_30d": (pd.to_numeric(tbl["death_30d"], errors="coerce") == 1).astype("int8"),
+})
+print(f"\n-- cohort (== Table-1 analytic CRRT cohort; no duration filter) --")
+print(f"  N encounter_blocks: {N:,}")
+print(f"  died within 30d: {int(base['died_30d'].sum()):,} ({pct(int(base['died_30d'].sum()), N)})")
+print(f"  completeness: age {pct(base['age'].notna().sum(), N)}, "
+      f"SOFA {pct(base['sofa_total'].notna().sum(), N)}, "
+      f"lactate {pct(base['lactate'].notna().sum(), N)}")
 
 # ── CCI: ICD-10 via clifpy + ICD-9 via Quan 2005 mapping (same clifpy scale) ─
+# Computed here (the only raw-data covariate; no datetime/tz). Keyed to the
+# cohort's encounter_blocks via the hospitalization map (cohort_df), OR-ing the
+# condition flags across a block's hospitalizations before scoring.
 CCI_WEIGHTS = {
     "myocardial_infarction": 0, "congestive_heart_failure": 2,
     "peripheral_vascular_disease": 0, "cerebrovascular_disease": 0,
@@ -212,7 +155,17 @@ ICD9 = {
     "aids": ["042","043","044"],
 }
 
-diag = diag_raw.filter(pl.col("hospitalization_id").is_in(cohort_ids)).to_pandas()
+# encounter_block <-> hospitalization_id map (pipeline), restricted to the cohort
+eb_map = pd.read_parquet(INTER / "cohort_df.parquet",
+                         columns=["hospitalization_id", "encounter_block"])
+eb_map = eb_map[eb_map["encounter_block"].isin(set(base["encounter_block"]))].copy()
+eb_map["hospitalization_id"] = eb_map["hospitalization_id"].astype(str)
+cohort_hosp_ids = eb_map["hospitalization_id"].unique().tolist()
+
+diag_raw = pl.read_parquet(P("hospital_diagnosis"),
+    columns=["hospitalization_id", "diagnosis_code", "diagnosis_code_format", "poa_present"])
+diag = (diag_raw.with_columns(pl.col("hospitalization_id").cast(pl.Utf8))
+        .filter(pl.col("hospitalization_id").is_in(cohort_hosp_ids)).to_pandas())
 diag["diagnosis_code"] = diag["diagnosis_code"].astype(str).str.replace(".", "", regex=False).str.lower()
 
 def _flags_from_clifpy_icd10(d10):
@@ -247,24 +200,28 @@ else:
     comb = f10 if f10 is not None else f9
 
 cdf = comb.to_pandas()
+cdf["hospitalization_id"] = cdf["hospitalization_id"].astype(str)
 for c in CONDS:
     cdf[c] = cdf[c].fillna(0).astype(int)
+# Map hospitalization-level flags to encounter_block, OR across the block's
+# hospitalizations, THEN apply the Charlson hierarchy + weights per block.
+cdf = cdf.merge(eb_map, on="hospitalization_id", how="inner")
+blk = cdf.groupby("encounter_block")[CONDS].max().reset_index()
 for hi, lo in HIER:
-    cdf.loc[cdf[hi] == 1, lo] = 0
-cdf["cci_score"] = sum(cdf[c] * w for c, w in CCI_WEIGHTS.items())
-cci = pl.from_pandas(cdf[["hospitalization_id", "cci_score"]]).with_columns(
-    pl.col("hospitalization_id").cast(pl.Utf8))
-print(f"-- CCI (ICD-10 clifpy + ICD-9 Quan) non-null {pct(cci['hospitalization_id'].n_unique(), N)}; "
+    blk.loc[blk[hi] == 1, lo] = 0
+blk["cci_score"] = sum(blk[c] * w for c, w in CCI_WEIGHTS.items())
+cci = blk[["encounter_block", "cci_score"]]
+print(f"-- CCI (ICD-10 clifpy + ICD-9 Quan) computed for {pct(len(cci), N)} of cohort; "
       f"median {cci['cci_score'].median():.1f}")
 
-# ── Assemble + write cohort ─────────────────────────────────────────────────
-cohort = (base.select(["hospitalization_id", "age", "female", "died_30d"])
-          .join(sofa, on="hospitalization_id", how="left")
-          .join(lac, on="hospitalization_id", how="left")
-          .join(cci, on="hospitalization_id", how="left"))
+# ── Assemble + write cohort (encounter_block-keyed) ─────────────────────────
+cohort = base.merge(cci, on="encounter_block", how="left")
+# Blocks with no diagnosis records -> cci_score NA; left to the frozen-median
+# imputation in the apply step (consistent with how other missing covariates
+# are handled, and with the reference fitter).
 cohort_path = OUT / f"{SITE}_smr_cohort.parquet"
-cohort.write_parquet(cohort_path)
-print(f"\nWROTE {cohort_path}  (n={cohort.height:,}, 30d mort {pct(cohort['died_30d'].sum(), cohort.height)})")
+cohort.to_parquet(cohort_path, index=False)
+print(f"\nWROTE {cohort_path}  (n={len(cohort):,}, 30d mort {pct(int(cohort['died_30d'].sum()), len(cohort))})")
 
 # ── Apply the frozen reference model (if present) → per-site exchange CSV ────
 if not MODEL_PATH.exists():
@@ -276,7 +233,7 @@ else:
     model = json.loads(MODEL_PATH.read_text())
     COVARS = model["covariates"]
     coef, intercept = model["coef"], model["intercept"]
-    pdf = cohort.to_pandas()
+    pdf = cohort.copy()
     # frozen development-median imputation (outcome-free; identical at every site)
     for cv, med in model.get("impute_medians", {}).items():
         if cv in pdf.columns:
