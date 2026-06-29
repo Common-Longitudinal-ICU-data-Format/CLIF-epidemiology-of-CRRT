@@ -12,8 +12,9 @@ if [ ! -f "$SCRIPT_DIR/config/config.json" ]; then
     exit 1
 fi
 
-# ── Mode parsing: --descriptive-only runs the descriptive deliverable
-#    (00 01 02 07 08) and skips 03/04 + the causal R stack ──
+# ── Mode parsing: --descriptive-only runs the descriptive + SMR deliverable
+#    (00 01 02 03 03b 06) and skips the causal stack (04 + the R scripts).
+#    07/08 are coordinator-only (run at the pooling site), not part of either mode. ──
 DESCRIPTIVE_ONLY=false
 for arg in "$@"; do
     case "$arg" in
@@ -51,6 +52,7 @@ if [ "$DESCRIPTIVE_ONLY" = true ]; then
         "01_create_wide_df.py"
         "02_construct_crrt_tableone.py"
         "03_crrt_epidemiology.py"
+        "03b_crrt_epi_smr.py"
         "06_low_dose_characterization.py"
     )
     R_STEPS=()
@@ -60,6 +62,7 @@ else
         "01_create_wide_df.py"
         "02_construct_crrt_tableone.py"
         "03_crrt_epidemiology.py"
+        "03b_crrt_epi_smr.py"
         "06_low_dose_characterization.py"
         "04_build_causal_df.py"
     )
