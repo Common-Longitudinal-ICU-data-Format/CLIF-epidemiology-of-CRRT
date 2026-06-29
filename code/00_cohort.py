@@ -296,15 +296,19 @@ adult_encounters = adult_encounters[
     (adult_encounters['age_at_admission'] >= 18) & (adult_encounters['age_at_admission'].notna())
 ]
 
-# Filter for admission years (configurable, defaults: start=2018, end=None)
+# Filter for admission years (configurable, defaults: start=2018, end=None).
+# Either bound may be null to leave that side open (MIMIC sets both null = no
+# year filter); guard both so a null start does not zero out the cohort.
 year_start = config["admission_year_start"]
 year_end = config["admission_year_end"]
-year_mask = adult_encounters['admission_dttm'].dt.year >= year_start
+year_mask = pd.Series(True, index=adult_encounters.index)
+if year_start is not None:
+    year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year >= year_start)
 if year_end is not None:
     year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year <= year_end)
 adult_encounters = adult_encounters[year_mask]
 
-year_label = f"{year_start}-{year_end if year_end else 'present'}"
+year_label = f"{year_start if year_start else 'earliest'}-{year_end if year_end else 'present'}"
 print(f"\nFiltering Results:")
 print(f"   Total hospitalizations: {len(all_encounters['hospitalization_id'].unique()):,}")
 print(f"   Adult hospitalizations (age >= 18, {year_label}): {len(adult_encounters['hospitalization_id'].unique()):,}")
