@@ -12,6 +12,18 @@ if [ ! -f "$SCRIPT_DIR/config/config.json" ]; then
     exit 1
 fi
 
+# ── Mode parsing: --descriptive-only runs the descriptive + SMR deliverable
+#    (00 01 02 03 03b 06) and skips the causal stack (04 + the R scripts).
+#    07/08 are coordinator-only (run at the pooling site), not part of either mode. ──
+DESCRIPTIVE_ONLY=false
+for arg in "$@"; do
+    case "$arg" in
+        --descriptive-only) DESCRIPTIVE_ONLY=true ;;
+        -h|--help) echo "Usage: $0 [--descriptive-only]"; exit 0 ;;
+        *) echo "Unknown argument: $arg"; echo "Usage: $0 [--descriptive-only]"; exit 1 ;;
+    esac
+done
+
 # Set up logging — capture all output to a timestamped log file + console
 LOG_DIR="$SCRIPT_DIR/output/final"
 mkdir -p "$LOG_DIR"
@@ -32,22 +44,35 @@ PIPELINE_START=$SECONDS
 # Scripts use relative paths like ../config/config.json, so run from code/
 cd "$SCRIPT_DIR/code"
 
-PYTHON_STEPS=(
-    "00_cohort.py"
-    "01_create_wide_df.py"
-    "02_construct_crrt_tableone.py"
-    "03_crrt_visualizations.py"
-    "04_build_msm_competing_risk_df.py"
-)
+if [ "$DESCRIPTIVE_ONLY" = true ]; then
+    echo "  Mode: DESCRIPTIVE-ONLY (cohort + Table 1 + descriptive epi + low-dose; no causal R stack)"
+    echo ""
+    PYTHON_STEPS=(
+        "00_cohort.py"
+        "01_create_wide_df.py"
+        "02_construct_crrt_tableone.py"
+        "03_crrt_epidemiology.py"
+        "03b_crrt_epi_smr.py"
+        "06_low_dose_characterization.py"
+    )
+    R_STEPS=()
+else
+    PYTHON_STEPS=(
+        "00_cohort.py"
+        "01_create_wide_df.py"
+        "02_construct_crrt_tableone.py"
+        "03_crrt_epidemiology.py"
+        "03b_crrt_epi_smr.py"
+        "06_low_dose_characterization.py"
+        "04_build_causal_df.py"
+    )
+    R_STEPS=(
+        "05_PSM_IPTW_CRRT_dose.R"
+        "05b_dose_response_analysis.R"
+    )
+fi
 
-R_STEPS=(
-    "05_PSM_IPTW_CRRT_dose.R"
-    "05b_dose_response_analysis.R"
-    "06_time_varying_MSM.R"
-    "06b_time_varying_MSM_sensitivity.R"
-)
-
-echo "=== Descriptive + MSM data prep (Python) ==="
+echo "=== Descriptive + causal data prep (Python) ==="
 echo ""
 for step in "${PYTHON_STEPS[@]}"; do
     name=$(basename "$step" .py)
@@ -59,28 +84,30 @@ for step in "${PYTHON_STEPS[@]}"; do
     echo ""
 done
 
-# Load R module on HPC systems (no-op if not available)
-if command -v module &>/dev/null; then
-    module load R 2>/dev/null || true
-fi
-
-echo "=== Causal inference (R) ==="
-echo ""
 R_FAILED=()
-for step in "${R_STEPS[@]}"; do
-    name=$(basename "$step" .R)
-    STEP_START=$SECONDS
-    echo "--- Running $name ---"
-    if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
-        elapsed=$(( SECONDS - STEP_START ))
-        echo "--- $name complete (${elapsed}s) ---"
-    else
-        elapsed=$(( SECONDS - STEP_START ))
-        echo "--- $name FAILED (${elapsed}s) ---"
-        R_FAILED+=("$step")
+if [ ${#R_STEPS[@]} -gt 0 ]; then
+    # Load R module on HPC systems (no-op if not available)
+    if command -v module &>/dev/null; then
+        module load R 2>/dev/null || true
     fi
+
+    echo "=== Causal inference (R) ==="
     echo ""
-done
+    for step in "${R_STEPS[@]}"; do
+        name=$(basename "$step" .R)
+        STEP_START=$SECONDS
+        echo "--- Running $name ---"
+        if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
+            elapsed=$(( SECONDS - STEP_START ))
+            echo "--- $name complete (${elapsed}s) ---"
+        else
+            elapsed=$(( SECONDS - STEP_START ))
+            echo "--- $name FAILED (${elapsed}s) ---"
+            R_FAILED+=("$step")
+        fi
+        echo ""
+    done
+fi
 
 total_elapsed=$(( SECONDS - PIPELINE_START ))
 total_min=$(( total_elapsed / 60 ))
@@ -109,8 +136,6 @@ if [ ${#R_FAILED[@]} -gt 0 ]; then
     echo "  Required R scripts and their outputs:"
     echo "    05_PSM_IPTW_CRRT_dose.R        -> output/final/psm_iptw/"
     echo "    05b_dose_response_analysis.R    -> output/final/psm_iptw/ (dose-response)"
-    echo "    06_time_varying_MSM.R           -> output/final/time_varying/ (primary 12h)"
-    echo "    06b_time_varying_MSM_sensitivity.R -> output/final/time_varying_sensitivity/ (24h)"
     echo ""
     echo "  Check the log for error details: $LOG_FILE"
 fi

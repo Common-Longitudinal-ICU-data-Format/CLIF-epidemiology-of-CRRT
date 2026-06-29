@@ -122,7 +122,7 @@ cat("Site:", SITE_NAME, "\n")
 cat("Timezone:", config$timezone, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate/msm_competing_risk_df.parquet"
+data_path <- "output/intermediate/causal_df.parquet"
 if (!file.exists(data_path)) {
   stop("File '", data_path, "' not found.")
 }
@@ -221,9 +221,12 @@ if (n_incomplete > 0) {
 
   # Only impute vars that actually have missingness, plus a small set of predictors
   vars_with_na <- names(miss_counts[miss_counts > 0])
+  # sofa_total_0 included as an imputation PREDICTOR only (not a model covariate):
+  # it is the strongest available correlate of the now ~20%-missing lactate_0 and
+  # is not a SOFA component, so no leakage. Improves pmm imputation quality.
   predictor_vars <- c("age_at_admission", "sex_category", "lactate_0",
                        "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
-                       "imv_status_0", "crrt_dose_median_3h")
+                       "imv_status_0", "crrt_dose_median_3h", "sofa_total_0")
   mice_vars <- unique(c(vars_with_na, intersect(predictor_vars, model_vars)))
   mice_vars <- mice_vars[mice_vars %in% names(df)]
 
@@ -684,14 +687,19 @@ table1 <- table1 %>%
     label      = "Female (%)"
   )
 
-# Save Table 1 as HTML
+# Save the unadjusted balance table (causal cohort, by dose group).
+# Manuscript Table 2 (the full-cohort descriptive baseline is manuscript
+# Table 1, built upstream in 02). Filename carries "table2_unadjusted_balance"
+# so downstream artifacts (09 dashboard, 10 manuscript) resolve it by its
+# manuscript role; 09/10 keep a fallback to the legacy "_Table1_unadjusted"
+# name until every site re-runs 05.
 gt::gtsave(
   as_gt(table1),
   filename = file.path(output_dir,
-                       paste0(SITE_NAME, "_Table1_unadjusted.html"))
+                       paste0(SITE_NAME, "_table2_unadjusted_balance.html"))
 )
 write.csv(as_tibble(table1),
-          file.path(output_dir, paste0(SITE_NAME, "_Table1_unadjusted.csv")),
+          file.path(output_dir, paste0(SITE_NAME, "_table2_unadjusted_balance.csv")),
           row.names = FALSE)
 
 # ============================================ #

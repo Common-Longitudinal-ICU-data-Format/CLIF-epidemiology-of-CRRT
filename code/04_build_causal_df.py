@@ -1,5 +1,7 @@
 """
-Build the MSM / competing-risk analysis dataframe (59 columns).
+Build the point-treatment causal / competing-risk analysis dataframe (59 columns).
+(Formerly 04_build_msm_competing_risk_df.py; the time-varying MSM analysis it
+also fed was cut from the manuscript and archived, tag msm-v1.)
 
 Extends the archived 04_build_competing_risk_df.py with:
   - P/F or S/F ratio at t=0 and t=12 (labeled pf_sf_ratio; PaO2/FiO2 if available, else SpO2/FiO2)
@@ -8,11 +10,11 @@ Extends the archived 04_build_competing_risk_df.py with:
   - 19 CCI binary components (from clifpy.calculate_cci + ICD-10 cancer split)
   - 30-day censoring (columns named time_to_event_90d / censored_at_90d
     to match R script expectations)
-  - Sensitivity analysis columns for 24h/48h MSM: CRRT dose (0-24h, 24-48h),
+  - Sensitivity analysis columns for 24h/48h intervals: CRRT dose (0-24h, 24-48h),
     labs/SOFA/pf_sf_ratio/NEE/IMV at t=24, and 48h eligibility flag
   - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
-Usage: uv run python code/04_build_msm_competing_risk_df.py
+Usage: uv run python code/04_build_causal_df.py
 """
 
 import json
@@ -30,11 +32,8 @@ import pyarrow.parquet as pq
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
-with open(project_root / "config" / "config.json") as f:
-    config = json.load(f)
-
-from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
-config = validate_config(config)
+from pipeline_helpers import load_config, load_intermediate, get_tables_path  # noqa: E402
+config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
@@ -92,28 +91,67 @@ result["imv_duration_days"] = result["imv_duration_days"].fillna(0)
 print(f"  {len(result)} rows after merge")
 
 # ===================================================================
-# STEP 3: Baseline labs (t=0) from tableone_analysis_df
+# STEP 3: Baseline labs (t=0) = nearest MEASURED value in [-12, +3h]
 # ===================================================================
-print("Step 3: Baseline labs (t=0) from tableone …")
-baseline_lab_map = {
-    "creatinine_baseline": "creatinine_0",
-    "lactate_baseline": "lactate_0",
-    "bicarbonate_baseline": "bicarbonate_0",
-    "potassium_baseline": "potassium_0",
+# NOTE (2026-06-09): switched from tableone_analysis_df's forward-filled
+# *_baseline columns to a nearest-measured recompute from wide_df. The
+# *_baseline columns apply an UNLIMITED forward-fill to point labs
+# (02_construct_crrt_tableone.py:322) before taking the last value in
+# [-12,+3h], which carried arbitrarily old pre-window values into "baseline"
+# for patients with no in-window measurement. At UCMC this made ~20% of
+# baseline lactates stale (median carry-in 27h, max ~55 days) and was
+# differential by dose arm (low-dose 28.7% vs high-dose 13.7%). A point lab
+# does not persist the way an infusion rate does, so forward-fill is invalid
+# here. Nearest-measured leaves those patients NA, and 05's MICE (which runs
+# BEFORE drop_na) imputes them from the other covariates instead of a weeks-old
+# value. This also matches 02's Table-1 definition (02:543-558), so Table 1 and
+# the causal covariates now share one consistent baseline-lab definition.
+print("Step 3: Baseline labs (t=0) = nearest measured in [-12,+3h] …")
+_baseline_lab_map = {
+    "lab_creatinine": "creatinine_0",
+    "lab_lactate": "lactate_0",
+    "lab_bicarbonate": "bicarbonate_0",
+    "lab_potassium": "potassium_0",
 }
-baseline_cols = ["encounter_block"] + list(baseline_lab_map.keys())
-available_baseline = [c for c in baseline_cols if c in tableone_df.columns]
-baseline_labs = tableone_df[available_baseline].rename(columns=baseline_lab_map)
-result = result.merge(baseline_labs, on="encounter_block", how="left")
+_wide_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
+_lab_present = [c for c in _baseline_lab_map if c in _wide_avail]
+_blabs = load_intermediate(
+    INTERMEDIATE_DIR / "wide_df.parquet",
+    columns=["hospitalization_id", "event_dttm"] + _lab_present,
+)
+_blabs = _blabs.merge(eb_map, on="hospitalization_id", how="inner").merge(
+    crrt_initiation[["encounter_block", "crrt_initiation_time"]],
+    on="encounter_block", how="inner",
+)
+_blabs["_h"] = (
+    (_blabs["event_dttm"] - _blabs["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+)
+_blabs = _blabs[(_blabs["_h"] >= -12) & (_blabs["_h"] <= 3)].copy()
+_blabs["_abs"] = _blabs["_h"].abs()
+for _col, _new in _baseline_lab_map.items():
+    if _col in _lab_present:
+        # nearest non-null measurement to t=0 within the window (02:553-558)
+        _near = (
+            _blabs.dropna(subset=[_col]).sort_values("_abs")
+            .groupby("encounter_block")[_col].first()
+        )
+        result[_new] = result["encounter_block"].map(_near)
+    else:
+        result[_new] = np.nan
+del _blabs
+_n_lac = int(result["lactate_0"].notna().sum()) if "lactate_0" in result.columns else 0
+print(f"  nearest-measured baseline labs attached "
+      f"(lactate_0 measured in-window: {_n_lac}/{len(result)}; remainder -> MICE in 05)")
 
-# SOFA at t=0
+# SOFA at t=0 (from tableone — unchanged; sofa_total_0 is excluded from the
+# causal models, used only for descriptive sample_characteristics)
 result = result.merge(
     tableone_df[["encounter_block", "sofa_total"]].rename(
         columns={"sofa_total": "sofa_total_0"}
     ),
     on="encounter_block", how="left",
 )
-print(f"  Baseline labs + SOFA attached")
+print(f"  SOFA attached")
 
 # ===================================================================
 # STEP 4: CRRT dose — at initiation, 0-12h mean, 12-24h mean
@@ -705,18 +743,19 @@ if "pf_sf_ratio" in extra_df.columns:
     n_oxy_24_miss = result["pf_sf_ratio_24"].isna().sum()
     print(f"    pf_sf_ratio_24 missing after cascade: {n_oxy_24_miss}")
 
-# --- 7c. Lactate: impute normal value (1.0 mmol/L) for missing ---
-print("\n  Lactate imputation …")
-n_miss_before = result["lactate_0"].isna().sum()
-if n_miss_before > 0:
-    result["lactate_0"] = result["lactate_0"].fillna(1.0)
-    # Also cascade to lactate_12 if it was using baseline fallback
-    result["lactate_12"] = result["lactate_12"].fillna(result["lactate_0"])
-    # Also cascade to lactate_24 (sensitivity)
-    result["lactate_24"] = result["lactate_24"].fillna(result["lactate_0"])
-    print(f"    lactate_0 missing: {n_miss_before} → {result['lactate_0'].isna().sum()} (imputed normal=1.0)")
-else:
-    print(f"    lactate_0: no missing values")
+# --- 7c. Lactate: leave missing as NA for principled MICE imputation in 05 ---
+# Previously missing lactate_0 was hard-filled to a "normal" 1.0 mmol/L. That
+# deterministic fill is biased for a causal covariate — unmeasured lactate at
+# CRRT initiation is not "normal", and (with the nearest-measured baseline in
+# Step 3) the missingness is real and differential by dose arm. It also
+# pre-empted 05's MICE, which runs BEFORE drop_na and can impute lactate_0 from
+# the correlated covariates (SOFA, bicarbonate, NEE, …) via pmm with Rubin's
+# rules. We now leave lactate_0 missing so MICE handles it, consistent with
+# bicarbonate_0/potassium_0 (which were never normal-filled). See lessons.md
+# (2026-06-09 baseline-lab forward-fill entry).
+n_lac0_miss = int(result["lactate_0"].isna().sum())
+print(f"\n  Lactate: leaving {n_lac0_miss} missing lactate_0 as NA → MICE in 05 "
+      f"(previously hard-filled to normal=1.0)")
 
 del extra_df
 gc.collect()
@@ -919,7 +958,7 @@ n_total = len(result)
 print(f"  Eligible for 48h sensitivity: {n_eligible}/{n_total} "
       f"({n_eligible / n_total * 100:.1f}%)")
 if n_eligible < 200:
-    print(f"  WARNING: N={n_eligible} may be underpowered for sensitivity MSM")
+    print(f"  WARNING: N={n_eligible} may be underpowered for the 48h sensitivity analysis")
 
 # ===================================================================
 # STEP 10: Final column ordering per schema (59 columns)
@@ -1013,12 +1052,10 @@ diag_missing.to_csv(diag_path, index=False)
 print(f"\nSaved patient-level missingness: {diag_path}")
 print(f"  Patients with any missing covariate: {(diag_missing['total_missing'] > 0).sum()}/{len(diag_missing)}")
 
-# --- Aggregate missingness summary (safe to share) ---
-FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
-GRAPHS_DIR = FINAL_DIR / "graphs"
-GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
+# --- Aggregate missingness summary (safe to share) — internal QC, lives under diagnostics/ ---
+DIAG_DIR = project_root / "output" / "final" / "diagnostics"
+DIAG_GRAPHS = DIAG_DIR / "graphs"
+DIAG_GRAPHS.mkdir(parents=True, exist_ok=True)
 
 n_total = len(result)
 agg_rows = []
@@ -1033,7 +1070,7 @@ for col in covariate_cols:
     })
 agg_df = pd.DataFrame(agg_rows).sort_values("pct_missing", ascending=False)
 agg_df["site_id"] = SITE
-agg_csv_path = FINAL_DIR / f"{SITE}_missingness_summary.csv"
+agg_csv_path = DIAG_DIR / f"{SITE}_missingness_summary.csv"
 agg_df.to_csv(agg_csv_path, index=False)
 print(f"Saved aggregate missingness: {agg_csv_path}")
 
@@ -1055,7 +1092,7 @@ if len(agg_any) > 0:
                 f"{pct}% (n={n})", va="center", fontsize=9)
     ax.set_xlim(0, agg_any["pct_missing"].max() * 1.4)
     plt.tight_layout()
-    heatmap_path = GRAPHS_DIR / f"{SITE}_missingness_heatmap.png"
+    heatmap_path = DIAG_GRAPHS / f"{SITE}_missingness_heatmap.png"
     fig.savefig(heatmap_path, dpi=150)
     plt.close(fig)
     print(f"Saved missingness heatmap: {heatmap_path}")
@@ -1063,12 +1100,12 @@ else:
     print("  No missing covariates — heatmap skipped")
 
 # Save
-out_path = OUTPUT_DIR / "msm_competing_risk_df.parquet"
+out_path = OUTPUT_DIR / "causal_df.parquet"
 result["site_id"] = SITE
 result.to_parquet(out_path, index=False)
 print(f"\nSaved: {out_path} ({len(result)} rows x {len(result.columns)} cols)")
 
-csv_path = OUTPUT_DIR / "msm_competing_risk_df.csv"
+csv_path = OUTPUT_DIR / "causal_df.csv"
 result.to_csv(csv_path, index=False)
 print(f"Saved: {csv_path}")
 
@@ -1147,7 +1184,7 @@ def draw_box(x, y, w, h, text, fontsize=11, weight="normal"):
     return x + w / 2, y
 
 
-ax.text(0.5, 0.98, "CRRT Causal Cohort Selection",
+ax.text(0.5, 0.98, "CRRT Cohort Selection",
         ha="center", va="center", fontsize=16, fontweight="bold")
 
 top_y = 0.90 - box_h
@@ -1167,7 +1204,7 @@ rows = [
      "remaining_n": n_with_weight,
      "excluded_label": f"Excluded: Missing weight\nn = {n_no_esrd - n_with_weight:,}",
      "excluded_n": n_no_esrd - n_with_weight},
-    {"remaining_label": "Remaining hospitalizations\nWith required baseline labs",
+    {"remaining_label": "Descriptive analytic cohort\n(Table 1 + descriptive analyses)",
      "remaining_n": n_with_labs,
      "excluded_label": f"Excluded: Missing required labs\nn = {n_with_settings - n_with_labs:,}",
      "excluded_n": n_with_settings - n_with_labs},
@@ -1177,7 +1214,7 @@ excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_shor
 if n_excluded_scuf > 0:
     excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
 rows.append({
-    "remaining_label": "Causal analysis cohort",
+    "remaining_label": "Causal analysis cohort\n(complete-case, dichotomized dose)",
     "remaining_n": n_causal,
     "excluded_label": excl_short_label,
     "excluded_n": n_excluded_short + n_excluded_scuf,

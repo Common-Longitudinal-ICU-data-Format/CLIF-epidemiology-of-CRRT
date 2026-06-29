@@ -1,18 +1,21 @@
 """
-Construct CRRT Table 1 matching reference/tableone_crrt_template.csv.
+Construct the CRRT analytic cohort DataFrame and Table 1.
 
-Produces a Table 1 with 5 column groups:
-  - Baseline: characteristics at CRRT initiation (-12h to +3h)
-  - At 72h - Survivors: patients alive at 72h post-CRRT
-  - At 72h - Non-survivors: patients dead within 72h of CRRT
-  - At discharge - Survivors: patients surviving to hospital discharge (90-day cap)
-  - At discharge - Non-survivors: patients who died in-hospital (90-day cap)
+Outputs:
+  - output/intermediate/tableone_analysis_df.parquet - per-encounter analytic
+    cohort: baseline characteristics at CRRT initiation (-12h to +3h), outcomes,
+    SOFA at initiation, sepsis flag, and post-CRRT window labs (consumed by 03).
+  - output/final/{SITE}_table1_crrt.{csv,html} - Table 1 of baseline
+    characteristics stratified by the initial (median-first-3h) CRRT dose band
+    (<20 / 20-30 / >30 mL/kg/hr; the 20-30 band brackets the KDIGO target), in
+    gtsummary shape consumed by the dashboard (07) and manuscript builder (08).
 
-Continuous variables use last recorded value in the relevant window (not mean).
-Labs use unlimited forward-fill (no 12h cap).
-SOFA scores use window-specific computations (baseline, 72h, post-CRRT).
+Continuous variables use the last recorded value in the relevant window (not mean).
+Labs use unlimited forward-fill (no 12h cap); Table 1 baseline labs instead use
+the value MEASURED nearest CRRT initiation within [-12, +3] h (see Step 6).
+SOFA is computed over the baseline window (-12h to +3h).
 
-Usage: uv run python code/construct_crrt_tableone.py
+Usage: uv run python code/02_construct_crrt_tableone.py
 """
 
 import gc
@@ -32,20 +35,20 @@ sys.path.insert(0, str(project_root / "code"))
 # Load config directly (avoid importing utils package which conflicts with clifpy.utils)
 import json  # noqa: E402
 
-with open(project_root / "config" / "config.json") as _f:
-    config = json.load(_f)
-
-from pipeline_helpers import validate_config, load_intermediate, get_tables_path  # noqa: E402
-config = validate_config(config)
+from pipeline_helpers import (  # noqa: E402
+    load_config, load_intermediate, get_tables_path, course_average_intensity,
+    get_output_root,
+)
+config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-FINAL_DIR = project_root / "output" / "final" / "crrt_epi"
-FINAL_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
+INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate"
+FINAL_DIR = OUTPUT_ROOT / "final" / "crrt_epi"
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]
@@ -178,63 +181,6 @@ del sofa_scores, sofa_cohort
 gc.collect()
 print(f"  SOFA at initiation: {len(sofa_df)} encounters")
 
-# 2b: SOFA 72h window (0h to 72h) — used for 72h survivor/non-survivor columns
-print("Step 2b: Computing SOFA over 72h window (0h to +72h) …")
-sofa_cohort_72h = crrt_initiation.merge(eb_map, on="encounter_block")
-sofa_cohort_72h["start_dttm"] = sofa_cohort_72h["crrt_initiation_time"]
-sofa_cohort_72h["end_dttm"] = sofa_cohort_72h["crrt_initiation_time"] + pd.Timedelta(hours=72)
-sofa_cohort_72h = sofa_cohort_72h[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
-
-sofa_72h_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
-    cohort_df=pl.from_pandas(sofa_cohort_72h),
-    filetype=FILE_TYPE,
-    id_name="encounter_block",
-    extremal_type="worst",
-    fill_na_scores_with_zero=False,
-    remove_outliers=True,
-    timezone=TIMEZONE,
-).to_pandas()
-
-sofa_72h_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_72h_scores.columns]
-sofa_72h_df = sofa_72h_scores[sofa_72h_keep].rename(
-    columns={c: f"{c}_72h" for c in SOFA_COLS if c in sofa_72h_scores.columns}
-)
-del sofa_72h_scores, sofa_cohort_72h
-gc.collect()
-print(f"  SOFA 72h: {len(sofa_72h_df)} encounters")
-
-# 2c: SOFA post-CRRT (0h to last_vital_dttm) — used for discharge survivor/non-survivor columns
-print("Step 2c: Computing SOFA post-CRRT (0h to last_vital_dttm) …")
-sofa_cohort_post = crrt_initiation.merge(eb_map, on="encounter_block")
-sofa_cohort_post = sofa_cohort_post.merge(
-    outcomes_df[["encounter_block", "last_vital_dttm"]],
-    on="encounter_block",
-    how="left",
-)
-sofa_cohort_post["start_dttm"] = sofa_cohort_post["crrt_initiation_time"]
-sofa_cohort_post["end_dttm"] = sofa_cohort_post["last_vital_dttm"]
-sofa_cohort_post = sofa_cohort_post[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]
-
-sofa_post_scores = compute_sofa_polars(
-    data_directory=TABLES_PATH,
-    cohort_df=pl.from_pandas(sofa_cohort_post),
-    filetype=FILE_TYPE,
-    id_name="encounter_block",
-    extremal_type="worst",
-    fill_na_scores_with_zero=False,
-    remove_outliers=True,
-    timezone=TIMEZONE,
-).to_pandas()
-
-sofa_post_keep = ["encounter_block"] + [c for c in SOFA_COLS if c in sofa_post_scores.columns]
-sofa_post_df = sofa_post_scores[sofa_post_keep].rename(
-    columns={c: f"{c}_post" for c in SOFA_COLS if c in sofa_post_scores.columns}
-)
-del sofa_post_scores, sofa_cohort_post
-gc.collect()
-print(f"  SOFA post-CRRT: {len(sofa_post_df)} encounters")
-
 
 # ===================================================================
 # STEP 3: Compute sepsis flags (ASE ±72h of CRRT initiation)
@@ -243,42 +189,58 @@ print("Step 3: Computing sepsis flags …")
 from clifpy.utils.ase import compute_ase  # noqa: E402
 
 hosp_ids = outcomes_df["hospitalization_id"].unique().tolist()
-# Use filtered config if pre-filtering was applied, otherwise original
+# Use filtered config if pre-filtering was applied, otherwise the SELECTED
+# config (honors CLIF_CONFIG, so a MIMIC run uses MIMIC's tables for ASE - not
+# a hardcoded config.json, which would point at the primary site).
 _ase_config_path = Path(TABLES_PATH) / "config.json"
 if not _ase_config_path.exists():
-    _ase_config_path = project_root / "config" / "config.json"
-sepsis_raw = compute_ase(
-    hospitalization_ids=hosp_ids,
-    config_path=str(_ase_config_path),
-    apply_rit=True,
-    include_lactate=True,
-    verbose=True,
-)
-
-# Identify encounters with sepsis onset within ±72h of CRRT initiation
-sepsis_pos = sepsis_raw[sepsis_raw["sepsis"] == 1].copy()
-sepsis_pos = sepsis_pos.merge(eb_map, on="hospitalization_id", how="inner")
-sepsis_pos = sepsis_pos.merge(
-    crrt_initiation[["encounter_block", "crrt_initiation_time"]],
-    on="encounter_block",
-    how="inner",
-)
-
+    _ase_config_path = config.get("_config_path", str(project_root / "config" / "config.json"))
+# ASE needs microbiology_culture; degrade gracefully if a site lacks it (e.g.
+# MIMIC) - sepsis_within_window is a Table-1 covariate only, NOT an SMR
+# covariate, so a missing-table failure here must not sink the whole build.
 ebs_with_sepsis: set = set()
-onset_col = "ase_onset_w_lactate_dttm"
-if onset_col in sepsis_pos.columns and len(sepsis_pos) > 0:
-    sepsis_pos["onset_dttm"] = pd.to_datetime(sepsis_pos[onset_col], utc=True)
-    crrt_utc = sepsis_pos["crrt_initiation_time"].dt.tz_convert("UTC")
-    hours_diff = (sepsis_pos["onset_dttm"] - crrt_utc).dt.total_seconds() / 3600
-    ebs_with_sepsis = set(sepsis_pos.loc[hours_diff.abs() <= 72, "encounter_block"])
+_sepsis_ok = True
+try:
+    sepsis_raw = compute_ase(
+        hospitalization_ids=hosp_ids,
+        config_path=str(_ase_config_path),
+        apply_rit=True,
+        include_lactate=True,
+        verbose=True,
+    )
+    # Identify encounters with sepsis onset within ±72h of CRRT initiation
+    sepsis_pos = sepsis_raw[sepsis_raw["sepsis"] == 1].copy()
+    sepsis_pos = sepsis_pos.merge(eb_map, on="hospitalization_id", how="inner")
+    sepsis_pos = sepsis_pos.merge(
+        crrt_initiation[["encounter_block", "crrt_initiation_time"]],
+        on="encounter_block",
+        how="inner",
+    )
+    onset_col = "ase_onset_w_lactate_dttm"
+    if onset_col in sepsis_pos.columns and len(sepsis_pos) > 0:
+        sepsis_pos["onset_dttm"] = pd.to_datetime(sepsis_pos[onset_col], utc=True)
+        crrt_utc = sepsis_pos["crrt_initiation_time"].dt.tz_convert("UTC")
+        hours_diff = (sepsis_pos["onset_dttm"] - crrt_utc).dt.total_seconds() / 3600
+        ebs_with_sepsis = set(sepsis_pos.loc[hours_diff.abs() <= 72, "encounter_block"])
+    del sepsis_raw, sepsis_pos
+except Exception as _e:
+    _sepsis_ok = False
+    print(f"  WARNING: sepsis/ASE unavailable ({type(_e).__name__}: {_e}).")
+    print("           Setting sepsis_within_window = NA (site likely lacks "
+          "microbiology_culture). Table-1 covariate only; the SMR does not use it.")
 
-sepsis_flag_df = pd.DataFrame({
-    "encounter_block": crrt_initiation["encounter_block"],
-    "sepsis_within_window": crrt_initiation["encounter_block"].isin(ebs_with_sepsis),
-})
-del sepsis_raw, sepsis_pos
+if _sepsis_ok:
+    sepsis_flag_df = pd.DataFrame({
+        "encounter_block": crrt_initiation["encounter_block"],
+        "sepsis_within_window": crrt_initiation["encounter_block"].isin(ebs_with_sepsis),
+    })
+    print(f"  Sepsis within ±72h: {sepsis_flag_df['sepsis_within_window'].sum()}/{len(sepsis_flag_df)}")
+else:
+    sepsis_flag_df = pd.DataFrame({
+        "encounter_block": crrt_initiation["encounter_block"],
+        "sepsis_within_window": pd.array([pd.NA] * len(crrt_initiation), dtype="boolean"),
+    })
 gc.collect()
-print(f"  Sepsis within ±72h: {sepsis_flag_df['sepsis_within_window'].sum()}/{len(sepsis_flag_df)}")
 
 
 # ===================================================================
@@ -293,7 +255,8 @@ resp_wide = [f"resp_{c}" for c in RESP_SETTING_COLS] + ["resp_device_category"]
 adt_wide = ["adt_location_category", "adt_location_type"]
 
 available_cols = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
-needed_cols = ["hospitalization_id", "event_dttm"] + lab_wide + vaso_wide + nee_wide + resp_wide + adt_wide
+needed_cols = (["hospitalization_id", "event_dttm", "crrt_ultrafiltration_out"]
+               + lab_wide + vaso_wide + nee_wide + resp_wide + adt_wide)
 needed_cols = [c for c in needed_cols if c in available_cols]
 
 wide_df = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=needed_cols)
@@ -307,6 +270,26 @@ wide_df["hours_from_crrt"] = (
     (wide_df["event_dttm"] - wide_df["crrt_initiation_time"]).dt.total_seconds() / 3600
 )
 print(f"  wide_df: {wide_df.shape}")
+
+# Net UF intensity (mL/kg/hr) over the FIRST 72 h of CRRT — the Murugan / 2025
+# literature definition (total UFnet / weight / duration), replacing the first-3h
+# initiation snapshot. The fixed early window matches the published UFnet
+# intensity exposure and avoids the duration/survivorship confound of a
+# whole-course average. Shares ONE definition with 03's figures via
+# pipeline_helpers (same 72 h window).
+UF_INTENSITY_WINDOW_H = 72.0
+_uf_intensity_by_eb = None
+if HAS_CRRT_SETTINGS and "crrt_ultrafiltration_out" in wide_df.columns:
+    _wt_eb = index_crrt_df[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
+    _uf_recs = wide_df[["encounter_block", "hours_from_crrt", "crrt_ultrafiltration_out"]].merge(
+        _wt_eb, on="encounter_block", how="left")
+    _uf_recs["uf_rate"] = (pd.to_numeric(_uf_recs["crrt_ultrafiltration_out"], errors="coerce")
+                           / pd.to_numeric(_uf_recs["weight_kg"], errors="coerce"))
+    _uf_int = course_average_intensity(_uf_recs, "encounter_block", "hours_from_crrt",
+                                       "uf_rate", max_h=UF_INTENSITY_WINDOW_H)
+    _uf_intensity_by_eb = _uf_int.set_index("encounter_block")["intensity"]
+    _med = _uf_int["intensity"].median() if len(_uf_int) else float("nan")
+    print(f"    net UF intensity (first 72h): {len(_uf_int)} encounters, median {_med:.2f} mL/kg/hr")
 
 # -------------------------------------------------------------------
 # 4a: 12h forward-fill for labs
@@ -355,11 +338,10 @@ def window_last_values(df, min_h, max_h, suffix, cols):
 
 
 baseline_last = window_last_values(wide_df, -12, 3, "baseline", continuous_wide)
-post72h_last = window_last_values(wide_df, 0, 72, "post72h", continuous_wide)
+# post_crrt window (0h to end of stay) supplies the *_post_crrt labs read by 03.
 post_crrt_last = window_last_values(wide_df, 0, None, "post_crrt", continuous_wide)
 
-print(f"    baseline: {len(baseline_last)}, "
-      f"post72h: {len(post72h_last)}, post_crrt: {len(post_crrt_last)} encounters")
+print(f"    baseline: {len(baseline_last)}, post_crrt: {len(post_crrt_last)} encounters")
 
 # -------------------------------------------------------------------
 # 4c: Extract categorical baselines (ADT location, resp device)
@@ -475,17 +457,14 @@ analysis_df = analysis_df.merge(index_crrt_df[crrt_merge_cols], on="encounter_bl
 
 # NOTE: crrt_initiation_time already merged into outcomes_df in Step 1 (90-day cap)
 
-# SOFA at initiation + SOFA 72h + SOFA post-CRRT
+# SOFA at initiation
 analysis_df = analysis_df.merge(sofa_df, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(sofa_72h_df, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(sofa_post_df, on="encounter_block", how="left")
 
 # Sepsis
 analysis_df = analysis_df.merge(sepsis_flag_df, on="encounter_block", how="left")
 
 # Window last values (labs, vasopressors, respiratory settings)
 analysis_df = analysis_df.merge(baseline_last, on="encounter_block", how="left")
-analysis_df = analysis_df.merge(post72h_last, on="encounter_block", how="left")
 analysis_df = analysis_df.merge(post_crrt_last, on="encounter_block", how="left")
 
 # Categorical baselines (ADT, device)
@@ -497,11 +476,6 @@ analysis_df = analysis_df.merge(imv_duration_df, on="encounter_block", how="left
 analysis_df = analysis_df.merge(vaso_duration_df, on="encounter_block", how="left")
 
 # Derived columns
-analysis_df["alive_72h"] = (
-    analysis_df["death_dttm"].isna()
-    | ((analysis_df["death_dttm"] - analysis_df["crrt_initiation_time"]).dt.total_seconds() / 3600 > 72)
-)
-analysis_df["dead_within_72h"] = ~analysis_df["alive_72h"]
 if HAS_CRRT_SETTINGS:
     analysis_df["last_crrt_mode"] = analysis_df["crrt_mode_category"]
 
@@ -510,344 +484,221 @@ for col in analysis_df.columns:
     if (col.endswith("_category") or col == "location_type") and analysis_df[col].dtype == "object":
         analysis_df[col] = analysis_df[col].str.lower()
 
+# Nearest-MEASURED baseline labs ({x}_t1): the value measured nearest CRRT
+# initiation within [-12, +3] h, off the tz-normalized wide_df. Avoids the
+# unlimited-forward-fill staleness in the *_baseline columns (a point lab does
+# not persist like an infusion rate). Computed ONCE here and persisted so BOTH
+# Table 1 (below) and the SMR builder (03b) consume one definition (and one
+# tz-correct windowing). NOTE: the *_baseline columns consumed by 04/causal
+# still use the forward-filled values - a separate, causal-affecting decision.
+_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
+_t1_lab_cols = [f"lab_{x}" for x in _T1_LABS]
+_t1_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
+_t1_need = ["hospitalization_id", "event_dttm"] + [c for c in _t1_lab_cols if c in _t1_avail]
+_t1_wd = load_intermediate(INTERMEDIATE_DIR / "wide_df.parquet", columns=_t1_need)
+_t1_wd = _t1_wd.merge(eb_map, on="hospitalization_id", how="inner").merge(
+    crrt_initiation[["encounter_block", "crrt_initiation_time"]], on="encounter_block", how="inner")
+_t1_wd["_h"] = (_t1_wd["event_dttm"] - _t1_wd["crrt_initiation_time"]).dt.total_seconds() / 3600.0
+_t1_wd = _t1_wd[(_t1_wd["_h"] >= -12) & (_t1_wd["_h"] <= 3)].copy()
+_t1_wd["_abs"] = _t1_wd["_h"].abs()
+for _x in _T1_LABS:
+    _c = f"lab_{_x}"
+    if _c in _t1_wd.columns:
+        _near = (_t1_wd.dropna(subset=[_c]).sort_values("_abs")
+                 .groupby("encounter_block")[_c].first())
+        analysis_df[f"{_x}_t1"] = analysis_df["encounter_block"].map(_near)
+del _t1_wd
+
 # Save
 analysis_df.to_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet", index=False)
 print(f"  Analysis DataFrame: {analysis_df.shape}")
 
 
 # ===================================================================
-# STEP 6: Generate Table 1
+# STEP 6: Table 1 - baseline characteristics by CRRT dose band
 # ===================================================================
-print("Step 6: Generating Table 1 …")
+# Single project Table 1: full analytic CRRT cohort, stratified by initial
+# (median-first-3h) CRRT dose band - <20 / 20-30 / >30 mL/kg/hr (the 20-30
+# band brackets the KDIGO-recommended delivered target). gtsummary shape
+# consumed by the dashboard (07) and manuscript builder (08). p-value
+# is across the three bands (Kruskal-Wallis for continuous, chi-square for
+# categorical).
+print("Step 6: Generating Table 1 (baseline by CRRT dose band) ...")
+from scipy import stats as _stats
 
-# --- Encounter-level subgroups (for clinical measurements) ---
-enc_subgroups = {
-    "Baseline": analysis_df,
-    "At 72h - Survivors": analysis_df[analysis_df["alive_72h"]],
-    "At 72h - Non-survivors": analysis_df[analysis_df["dead_within_72h"]],
-    "At discharge - Survivors": analysis_df[analysis_df["in_hosp_death"] == 0],
-    "At discharge - Non-survivors": analysis_df[analysis_df["in_hosp_death"] == 1],
-}
+_wt = index_crrt_df[["encounter_block", "weight_kg"]].drop_duplicates("encounter_block")
+t1 = analysis_df.merge(_wt, on="encounter_block", how="left")
+if _uf_intensity_by_eb is not None:
+    # Course-average net UF intensity (mL/kg/hr) — NOT the first-3h snapshot.
+    t1["net_uf_intensity"] = t1["encounter_block"].map(_uf_intensity_by_eb)
 
-# --- Patient-level subgroups (for static demographics & death) ---
-# Deduplicate: one row per patient, keeping first CRRT encounter
-patient_df = analysis_df.sort_values("crrt_initiation_time").drop_duplicates(subset="patient_id", keep="first")
-pat_subgroups = {
-    "Baseline": patient_df,
-    "At 72h - Survivors": patient_df[patient_df["alive_72h"]],
-    "At 72h - Non-survivors": patient_df[patient_df["dead_within_72h"]],
-    "At discharge - Survivors": patient_df[patient_df["in_hosp_death"] == 0],
-    "At discharge - Non-survivors": patient_df[patient_df["in_hosp_death"] == 1],
-}
+# Nearest-measured baseline labs ({x}_t1) were computed once above and persisted
+# into analysis_df (tz-correct, single definition shared with the SMR builder
+# 03b), so they flow into t1 through the merge - no recomputation here.
 
-SG_NAMES = list(enc_subgroups.keys())
+BANDS = ["<20 mL/kg/hr", "20-30 mL/kg/hr", ">30 mL/kg/hr"]
+_dose = pd.to_numeric(t1.get("crrt_dose_ml_kg_hr"), errors="coerce")
+# Exact band membership: <20, 20-30 (inclusive of both ends), >30. Mask-based
+# (not pd.cut) so dose==30 lands in the 20-30 guideline band, not >30; missing
+# dose stays NA.
+t1["dose_band"] = pd.Series(pd.NA, index=t1.index, dtype="object")
+t1.loc[_dose < 20, "dose_band"] = BANDS[0]
+t1.loc[(_dose >= 20) & (_dose <= 30), "dose_band"] = BANDS[1]
+t1.loc[_dose > 30, "dose_band"] = BANDS[2]
+t1["dose_band"] = pd.Categorical(t1["dose_band"], categories=BANDS, ordered=True)
 
-# Build rows as 7-element lists matching template structure
-rows: list[list[str]] = []
+# Derived display columns (computed before building strata frames)
+t1["_female"] = t1["sex_category"].astype("string").str.lower().eq("female")
+t1["_imv"] = t1["device_category"].astype("string").str.lower().eq("imv") if "device_category" in t1.columns else False
+t1["_death30"] = (pd.to_numeric(t1["death_30d"], errors="coerce") == 1) if "death_30d" in t1.columns else False
+_r = t1["race_category"].astype("string").str.lower().fillna("unknown")
+t1["_race_grp"] = _r.map(lambda s: "Black" if "black" in s else ("White" if s == "white" else "Other"))
+# Non-renal SOFA (= total - renal): extra-renal illness severity. Reported
+# alongside total SOFA because renal failure is the cohort's defining organ and
+# the CRRT indication, so the renal component is not an independent severity axis.
+if {"sofa_total", "sofa_renal"}.issubset(t1.columns):
+    t1["sofa_nonrenal"] = (pd.to_numeric(t1["sofa_total"], errors="coerce")
+                           - pd.to_numeric(t1["sofa_renal"], errors="coerce"))
 
-# Machine-readable long-format rows for multi-site aggregation
-long_rows: list[dict] = []
-
-# ── Header rows ──
-rows.append(["CRRT Population (excluding ESRD patients)"] + [""] * (len(SG_NAMES) + 1))
-rows.append(["", "", SITE_NAME] + [""] * (len(SG_NAMES) - 1))
-rows.append(["", ""] + SG_NAMES)
-
-
-# ── Helper: add categorical variable rows ──
-def add_categorical(var_name: str, levels: list, col_name: str | None = None,
-                    patient_level: bool = False):
-    """Add rows for a categorical variable. All string levels are lowercase."""
-    col = col_name or var_name
-    sgs = pat_subgroups if patient_level else enc_subgroups
-    for level in levels:
-        if level is None:
-            level_str = "None"
-        elif isinstance(level, bool):
-            level_str = str(level).upper()
-        else:
-            level_str = str(level)
-        row = [f"{var_name}, n (%)", level_str]
-        for sg_name, sg_df in sgs.items():
-            if col not in sg_df.columns:
-                row.append("—")
-                continue
-            count = int(sg_df[col].isna().sum()) if level is None else int((sg_df[col] == level).sum())
-            total = len(sg_df)
-            row.append(fmt_n_pct(count, total))
-            long_rows.append({
-                "variable": var_name, "level": level_str, "subgroup": sg_name,
-                "stat_type": "categorical", "n": count, "total": total,
-                "median": None, "q25": None, "q75": None,
-            })
-        rows.append(row)
+GROUPS = ["Overall"] + BANDS
+gframe = {"Overall": t1}
+for _b in BANDS:
+    gframe[_b] = t1[t1["dose_band"] == _b]
+gn = {g: len(gframe[g]) for g in GROUPS}
+GHDR = {g: f"**{g}**  N = {gn[g]:,}" for g in GROUPS}
+_dosed = t1[t1["dose_band"].isin(BANDS)]
+COL = "**Characteristic**"
+PCOL = "**p-value**"
+columns = [COL] + [GHDR[g] for g in GROUPS] + [PCOL]
 
 
-# ── Helper: add continuous variable row ──
-def add_continuous(label: str, col_name: str, col_map: dict | None = None,
-                   patient_level: bool = False):
-    """Add a row for a continuous variable.
-
-    col_map: optional dict {subgroup_name: column_name} to use a different
-    column for specific subgroups (e.g., window-specific means).
-    Falls back to col_name for any subgroup not in col_map.
-    """
-    sgs = pat_subgroups if patient_level else enc_subgroups
-    row = [label, ""]
-    for sg_name, sg_df in sgs.items():
-        col = col_map.get(sg_name, col_name) if col_map else col_name
-        if col in sg_df.columns:
-            valid = sg_df[col].dropna()
-            row.append(fmt_median_iqr(sg_df[col]))
-            long_rows.append({
-                "variable": label, "level": "", "subgroup": sg_name,
-                "stat_type": "continuous", "n": len(valid), "total": len(sg_df),
-                "median": float(valid.median()) if len(valid) > 0 else None,
-                "q25": float(valid.quantile(0.25)) if len(valid) > 0 else None,
-                "q75": float(valid.quantile(0.75)) if len(valid) > 0 else None,
-            })
-        else:
-            row.append("—")
-    rows.append(row)
+def _iqr(s, dec):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return "NA"
+    return f"{s.median():.{dec}f} ({s.quantile(0.25):.{dec}f}, {s.quantile(0.75):.{dec}f})"
 
 
-# ── Per-subgroup column mapping for windowed continuous variables ──
-WINDOW_SUFFIXES = {
-    "Baseline": "baseline",
-    "At 72h - Survivors": "post72h",
-    "At 72h - Non-survivors": "post72h",
-    "At discharge - Survivors": "post_crrt",
-    "At discharge - Non-survivors": "post_crrt",
-}
+def _npct(count, total):
+    return f"{int(count):,} ({100 * count / total:.0f}%)" if total else "NA"
 
 
-def _windowed_col_map(base: str) -> dict:
-    """Build {subgroup: column} mapping for a windowed variable."""
-    return {sg: f"{base}_{suffix}" for sg, suffix in WINDOW_SUFFIXES.items()}
+def _fmt_p(p):
+    if p is None or pd.isna(p):
+        return "NA"
+    if p < 0.001:
+        return "<0.001"
+    return f"{p:.3f}" if p < 0.01 else f"{p:.2f}"
 
 
-# ── Counts ──
-n_pat_row = ["n patients", ""]
-for sg_name, sg_df in pat_subgroups.items():
-    n_pat_row.append(str(len(sg_df)))
-    long_rows.append({
-        "variable": "n_patients", "level": "", "subgroup": sg_name,
-        "stat_type": "count", "n": len(sg_df), "total": len(sg_df),
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(n_pat_row)
+def _p_cont(col):
+    arrs = []
+    for _b in BANDS:
+        a = pd.to_numeric(gframe[_b][col], errors="coerce").dropna()
+        if len(a) >= 2:
+            arrs.append(a)
+    if len(arrs) < 2:
+        return None
+    try:
+        return _stats.kruskal(*arrs).pvalue
+    except Exception:
+        return None
 
-n_hosp_row = ["n hospitalizations ", ""]
-for sg_name, sg_df in enc_subgroups.items():
-    n_hosp_row.append(str(len(sg_df)))
-    long_rows.append({
-        "variable": "n_hospitalizations", "level": "", "subgroup": sg_name,
-        "stat_type": "count", "n": len(sg_df), "total": len(sg_df),
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(n_hosp_row)
 
-# ── Categorical variables (all levels lowercase to match data) ──
-# Patient-level: demographics & death
-add_categorical("sex_category", ["female", "male", None], patient_level=True)
-add_categorical("race_category", [
-    "american indian or alaska native", "asian", "black or african american",
-    "native hawaiian or other pacific islander", None, "other", "unknown", "white",
-], patient_level=True)
-add_categorical("ethnicity_category", ["hispanic", "non-hispanic", None, "unknown"], patient_level=True)
+def _p_cat(series):
+    ct = pd.crosstab(series, _dosed["dose_band"])
+    if ct.shape[0] < 2 or ct.shape[1] < 2:
+        return None
+    try:
+        return _stats.chi2_contingency(ct)[1]
+    except Exception:
+        return None
 
-# Encounter-level: clinical context at CRRT initiation
-add_categorical("location_category", [None, "icu", "procedural", "ward", "ed"])
-add_categorical("location_type", [
-    None, "general_icu", "medical_icu", "mixed_cardiothoracic_icu",
-    "mixed_neuro_icu", "surgical_icu",
-])
-add_categorical("device_category", [
-    None, "cpap", "face mask", "high flow nc", "imv", "nasal cannula",
-    "nippv", "other", "room air", "trach collar",
-])
-# Mortality within window — contextual per subgroup:
-#   Baseline / Discharge columns use in-hospital mortality
-#   72h columns use 72h mortality
-_wm_row_false = ["Mortality within window, n (%)", "FALSE"]
-_wm_row_true = ["Mortality within window, n (%)", "TRUE"]
-_wm_col_map = {
-    "Baseline": "in_hosp_death",
-    "At 72h - Survivors": "dead_within_72h",
-    "At 72h - Non-survivors": "dead_within_72h",
-    "At discharge - Survivors": "in_hosp_death",
-    "At discharge - Non-survivors": "in_hosp_death",
-}
-for sg_name, sg_df in pat_subgroups.items():
-    col = _wm_col_map[sg_name]
-    total = len(sg_df)
-    true_count = int(sg_df[col].sum())
-    false_count = total - true_count
-    _wm_row_false.append(fmt_n_pct(false_count, total))
-    _wm_row_true.append(fmt_n_pct(true_count, total))
-    long_rows.append({
-        "variable": "Mortality within window", "level": "FALSE", "subgroup": sg_name,
-        "stat_type": "categorical", "n": false_count, "total": total,
-        "median": None, "q25": None, "q75": None,
-    })
-    long_rows.append({
-        "variable": "Mortality within window", "level": "TRUE", "subgroup": sg_name,
-        "stat_type": "categorical", "n": true_count, "total": total,
-        "median": None, "q25": None, "q75": None,
-    })
-rows.append(_wm_row_false)
-rows.append(_wm_row_true)
 
-# Mortality overall — in-hospital mortality across all subgroups
-add_categorical("Mortality overall", [0, 1], col_name="in_hosp_death", patient_level=True)
-add_categorical("sepsis_within_window", [False, True])
+_rows = []
 
-# ── LOS ──
-add_continuous("hospital LOS (days), median [Q1,Q3]", "hosp_los_days")
-add_continuous("ICU LOS (days), median [Q1,Q3]", "icu_los_days")
 
-# ── Age (patient-level) ──
-add_continuous("age_at_admission, median [Q1,Q3]", "age_at_admission", patient_level=True)
+def _row_cont(label, col, dec):
+    if col not in t1.columns:
+        return
+    r = {COL: f"__{label}__", PCOL: _fmt_p(_p_cont(col))}
+    for g in GROUPS:
+        r[GHDR[g]] = _iqr(gframe[g][col], dec)
+    _rows.append(r)
 
-# ── Vasopressors (windowed per subgroup) ──
-for v in VASO_COLS:
-    add_continuous(f"{v}, median [Q1,Q3]", f"{v}_baseline", col_map=_windowed_col_map(v))
 
-# ── NEE (windowed per subgroup) ──
-for n in NEE_COLS:
-    add_continuous(f"NEE (mcg/kg/min), median [Q1,Q3]", f"{n}_baseline", col_map=_windowed_col_map(n))
+def _row_binary(label, boolcol):
+    r = {COL: f"__{label}__", PCOL: _fmt_p(_p_cat(_dosed[boolcol]))}
+    for g in GROUPS:
+        f = gframe[g]
+        r[GHDR[g]] = _npct(int(f[boolcol].sum()), len(f))
+    _rows.append(r)
 
-# ── Labs (windowed per subgroup) ──
-for lab in LAB_COLS:
-    add_continuous(f"{lab}, median [Q1,Q3]", f"{lab}_baseline", col_map=_windowed_col_map(lab))
 
-# ── Respiratory settings (windowed per subgroup) ──
-for r in RESP_SETTING_COLS:
-    add_continuous(f"{r}, median [Q1,Q3]", f"{r}_baseline", col_map=_windowed_col_map(r))
+def _row_multi(label, col, level_order):
+    _rows.append({COL: f"__{label}__", PCOL: _fmt_p(_p_cat(_dosed[col])),
+                  **{GHDR[g]: "" for g in GROUPS}})
+    for lv, disp in level_order:
+        r = {COL: disp, PCOL: ""}
+        for g in GROUPS:
+            f = gframe[g]
+            r[GHDR[g]] = _npct(int((f[col] == lv).sum()), len(f))
+        _rows.append(r)
 
-# ── SOFA scores (initiation for Baseline, 72h for 72h cols, post for discharge cols) ──
-for s in SOFA_COLS:
-    add_continuous(f"{s}, median [Q1,Q3]", s, col_map={
-        "At 72h - Survivors": f"{s}_72h",
-        "At 72h - Non-survivors": f"{s}_72h",
-        "At discharge - Survivors": f"{s}_post",
-        "At discharge - Non-survivors": f"{s}_post",
-    })
 
-# ── Duration of IMV and vasopressor support ──
-add_continuous("Duration of IMV (hours), median [Q1,Q3]", "imv_duration_hours")
-add_continuous("Duration of vasopressor support (hours), median [Q1,Q3]", "vaso_duration_hours")
-
-# ── CRRT details ──
-rows.append(["CRRT details", ""] + [""] * len(SG_NAMES))
-
-# Duration of CRRT
-add_continuous("Duration of CRRT (hours), median [Q1,Q3]", "duration_hours")
-
+# Demographics
+_row_cont("Age at Admission (years)", "age_at_admission", 0)
+_row_binary("Female (%)", "_female")
+_row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
+# Severity and labs at CRRT initiation
+_row_cont("SOFA Score", "sofa_total", 0)
+_row_cont("SOFA Score, Non-Renal", "sofa_nonrenal", 0)
+_row_cont("Creatinine (mg/dL)", "creatinine_t1", 2)
+_row_cont("BUN (mg/dL)", "bun_t1", 0)
+_row_cont("Lactate (mmol/L)", "lactate_t1", 1)
+_row_cont("Bicarbonate (mEq/L)", "bicarbonate_t1", 1)
+_row_cont("Potassium (mEq/L)", "potassium_t1", 2)
+_row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
+_row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
+_row_binary("On IMV (%)", "_imv")
+# CRRT practice descriptors
+_row_cont("CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
 if HAS_CRRT_SETTINGS:
-    # CRRT mode distribution
-    modes = sorted(analysis_df["last_crrt_mode"].dropna().unique())
-    add_categorical("last_crrt_mode", modes)
-
-
-    # ── Helper: add continuous row filtered by CRRT mode ──
-    def add_continuous_by_mode(label: str, col_name: str, mode_value: str):
-        """Add a row for a continuous variable, filtered to a specific CRRT mode."""
-        row = [label, ""]
-        for sg_name, sg_df in enc_subgroups.items():
-            mode_df = sg_df[sg_df["last_crrt_mode"] == mode_value]
-            if col_name in mode_df.columns and len(mode_df) > 0:
-                valid = mode_df[col_name].dropna()
-                row.append(fmt_median_iqr(mode_df[col_name]))
-                long_rows.append({
-                    "variable": label, "level": mode_value, "subgroup": sg_name,
-                    "stat_type": "continuous", "n": len(valid), "total": len(mode_df),
-                    "median": float(valid.median()) if len(valid) > 0 else None,
-                    "q25": float(valid.quantile(0.25)) if len(valid) > 0 else None,
-                    "q75": float(valid.quantile(0.75)) if len(valid) > 0 else None,
-                })
-            else:
-                row.append("—")
-        rows.append(row)
-
-
-    # Per-mode CRRT settings and dose
-    crrt_detail_cols = [
-        ("crrt_dose_ml_kg_hr", "crrt_dose_ml_kg_hr, median [Q1,Q3]"),
-        ("blood_flow_rate", "blood_flow_rate, median [Q1,Q3]"),
-        ("pre_filter_replacement_fluid_rate", "pre_filter_replacement_fluid_rate, median [Q1,Q3]"),
-        ("post_filter_replacement_fluid_rate", "post_filter_replacement_fluid_rate, median [Q1,Q3]"),
-        ("dialysate_flow_rate", "dialysate_flow_rate, median [Q1,Q3]"),
-        ("ultrafiltration_out", "ultrafiltration_out, median [Q1,Q3]"),
-    ]
-
-    for mode in modes:
-        rows.append([mode, ""] + [""] * len(SG_NAMES))
-        for col, label in crrt_detail_cols:
-            add_continuous_by_mode(label, col, mode)
-else:
-    rows.append(["CRRT settings not available at this site", ""] + [""] * len(SG_NAMES))
+    _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
+    if _modes:
+        _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
+    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
+# Outcome
+_row_binary("30-Day Mortality (%)", "_death30")
 
 
 # ===================================================================
-# STEP 7: Write output
+# STEP 7: Write Table 1 (gtsummary-shaped CSV + standalone HTML)
 # ===================================================================
-print("Step 7: Writing output …")
-
-table1_df = pd.DataFrame(rows)
-
-# CSV (formatted, for display)
+import re as _re
+print("Step 7: Writing Table 1 ...")
+table1_df = pd.DataFrame(_rows, columns=columns)
 output_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt.csv"
-table1_df.to_csv(output_csv, index=False, header=False)
-print(f"  CSV: {output_csv}")
+table1_df.to_csv(output_csv, index=False)
+print(f"  CSV: {output_csv}  ({len(table1_df)} rows; N {gn})")
 
-# Long-format CSV (machine-readable, for multi-site aggregation)
-long_df = pd.DataFrame(long_rows)
-long_df["site"] = SITE_NAME
-output_long_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt_long.csv"
-long_df.to_csv(output_long_csv, index=False)
-print(f"  Long CSV: {output_long_csv}")
-
-# HTML
+_disp = table1_df.copy()
+_disp.columns = [_re.sub(r"\*+", "", c).strip() for c in _disp.columns]
+_disp[_disp.columns[0]] = _disp[_disp.columns[0]].apply(
+    lambda v: _re.sub(r"^__(.+?)__$", r"<b>\1</b>",
+                      ("&nbsp;&nbsp;&nbsp;" + v if not str(v).startswith("__") else v)))
 html_path = FINAL_DIR / f"{SITE_NAME}_table1_crrt.html"
-# Use rows 3+ as the actual data table (skip the 3 header meta-rows)
-data_df = pd.DataFrame(rows[3:], columns=["Variable", "Level"] + SG_NAMES)
-
-html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Table 1 - CRRT Population</title>
-    <style>
-        body {{ font-family: 'Arial', sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1400px; margin: 0 auto; background: white; padding: 30px;
-                      box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        h1 {{ color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }}
-        th {{ background: #4CAF50; color: white; padding: 12px; text-align: left;
-              border: 1px solid #ddd; }}
-        td {{ padding: 10px; border: 1px solid #ddd; vertical-align: top; }}
-        tr:nth-child(even) {{ background: #f9f9f9; }}
-        tr:hover {{ background: #f0f0f0; }}
-        .footer {{ margin-top: 20px; padding-top: 10px; border-top: 1px solid #ddd;
-                   font-size: 11px; color: #666; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Table 1: CRRT Population (excluding ESRD patients) — {SITE_NAME}</h1>
-        <p><em>Continuous variables: median [Q1, Q3] (n/N with data)</em></p>
-        <p><em>Categorical variables: n (%)</em></p>
-        {data_df.to_html(index=False, escape=False, classes='table')}
-        <div class="footer">
-            <p>Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-    </div>
-</body>
-</html>"""
-
-with open(html_path, "w", encoding="utf-8") as f:
-    f.write(html_content)
+with open(html_path, "w", encoding="utf-8") as _f:
+    _f.write(
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<title>Table 1 - CRRT cohort by dose band</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:20px}"
+        "table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
+        "th{background:#1e417c;color:#fff}</style></head><body>"
+        f"<h2>Table 1: Baseline Characteristics by CRRT Dose Band - {SITE_NAME}</h2>"
+        "<p><em>Continuous: median (Q1, Q3); categorical: n (%). Labs and severity "
+        "measured at or nearest CRRT initiation (-12 to +3 h); age at hospital admission. "
+        "p-value across the three dose bands (Kruskal-Wallis / chi-square).</em></p>"
+        + _disp.to_html(index=False, escape=False) + "</body></html>")
 print(f"  HTML: {html_path}")
-
-print("\nDone!")
+print("Done!")

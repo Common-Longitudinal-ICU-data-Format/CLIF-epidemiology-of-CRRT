@@ -10,7 +10,7 @@
 #   Section 4: Combined three-panel figure
 #   Section 5: Target trial emulation specification table
 #
-# Input:  output/intermediate/msm_competing_risk_df.parquet
+# Input:  output/intermediate/causal_df.parquet
 # Output: output/final/psm_iptw/{SITE}_dose_*.{csv,png,pdf}
 #
 # Usage:
@@ -75,7 +75,7 @@ SITE_NAME <- config$site_name
 cat("Site:", SITE_NAME, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate/msm_competing_risk_df.parquet"
+data_path <- "output/intermediate/causal_df.parquet"
 if (!file.exists(data_path)) stop("File not found: ", data_path)
 df <- arrow::read_parquet(data_path)
 cat("Loaded:", nrow(df), "rows x", ncol(df), "columns\n")
@@ -118,10 +118,12 @@ if (any(miss_counts > 0)) {
   cat("Imputing", sum(!complete.cases(df[, required_vars])),
       "incomplete rows via MICE (pmm, m=5)...\n")
   vars_with_na <- names(miss_counts[miss_counts > 0])
+  # sofa_total_0 as an imputation PREDICTOR only (strongest correlate of the now
+  # ~20%-missing lactate_0; not a SOFA component, so no leakage).
   predictor_vars <- c("age_at_admission", "sex_category", "lactate_0",
                        "bicarbonate_0", "potassium_0",
                        "norepinephrine_equivalent_0",
-                       "imv_status_0", "crrt_dose_median_3h")
+                       "imv_status_0", "crrt_dose_median_3h", "sofa_total_0")
   mice_vars <- unique(c(vars_with_na, intersect(predictor_vars, names(df))))
   imp <- mice(df[, mice_vars], m = 5, method = "pmm", seed = 42,
               maxit = 10, printFlag = FALSE)

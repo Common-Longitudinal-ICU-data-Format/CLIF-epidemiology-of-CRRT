@@ -31,12 +31,12 @@ _PRODUCERS = {
     "wide_df.parquet": "01_create_wide_df.py",
     "tableone_analysis_df.parquet": "02_construct_crrt_tableone.py",
     "hospital_diagnosis_df.parquet": "00_cohort.py",
-    "msm_competing_risk_df.parquet": "04_build_msm_competing_risk_df.py",
+    "causal_df.parquet": "04_build_causal_df.py",
 }
 
 _PIPELINE_ORDER = (
     "00_cohort.py -> 01_create_wide_df.py -> 02_construct_crrt_tableone.py "
-    "-> 03_crrt_visualizations.py -> 04_build_msm_competing_risk_df.py"
+    "-> 03_crrt_epidemiology.py -> 04_build_causal_df.py"
 )
 
 _VALID_FILE_TYPES = {"parquet", "csv", "fst"}
@@ -100,7 +100,81 @@ def validate_config(config: dict) -> dict:
                 f"got {type(val).__name__}."
             )
 
+    # --- Output isolation (optional) ---
+    # output_dir lets an external development site (e.g. MIMIC) run the full
+    # pipeline into its own tree without clobbering the primary site's outputs.
+    # Default "output" reproduces the original single-site behavior exactly.
+    config.setdefault("output_dir", "output")
+    config.setdefault("external_dev_site", False)
+    if not isinstance(config["output_dir"], str):
+        raise TypeError(
+            f"Config field 'output_dir' must be a string, "
+            f"got {type(config['output_dir']).__name__}."
+        )
+    if not isinstance(config["external_dev_site"], bool):
+        raise TypeError(
+            f"Config field 'external_dev_site' must be a boolean, "
+            f"got {type(config['external_dev_site']).__name__}."
+        )
+
     return config
+
+
+def load_config() -> dict:
+    """Load and validate the pipeline config, honoring the CLIF_CONFIG env var.
+
+    Resolution order:
+      - CLIF_CONFIG set  -> that path (absolute used as-is; relative resolved
+        against the project root, e.g. CLIF_CONFIG=config/config_mimic.json)
+      - CLIF_CONFIG unset -> the default config/config.json
+
+    This is the single config entry point for every pipeline step; leaving
+    CLIF_CONFIG unset reproduces the original single-site behavior exactly, so
+    consortium sites are unaffected.
+    """
+    project_root = Path(__file__).resolve().parent.parent  # code/ -> repo root
+    env = os.environ.get("CLIF_CONFIG")
+    if env:
+        cfg_path = Path(env)
+        if not cfg_path.is_absolute():
+            cfg_path = project_root / cfg_path
+    else:
+        cfg_path = project_root / "config" / "config.json"
+
+    if not cfg_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {cfg_path}\n"
+            f"  Set CLIF_CONFIG to a config path, or create config/config.json "
+            f"from config/config_template.json."
+        )
+    with open(cfg_path, "r") as f:
+        config = json.load(f)
+    config = validate_config(config)
+    config["_config_path"] = str(cfg_path)  # provenance for logging
+    return config
+
+
+def get_output_root(config: dict) -> Path:
+    """Resolve the output root directory for this run.
+
+    Returns project_root / config['output_dir'] (default 'output'), as an
+    ABSOLUTE Path. A non-default output_dir lets an external development site
+    (e.g. MIMIC) run the full pipeline into its own tree (e.g. 'output_mimic')
+    without touching the primary site's 'output/'. Leaving output_dir at the
+    default reproduces the original single-site paths exactly.
+
+    Guard: an external_dev_site run is refused if it would write to the default
+    'output' tree, so a dev-site run can never clobber the primary outputs.
+    """
+    project_root = Path(__file__).resolve().parent.parent  # code/ -> repo root
+    out_name = config.get("output_dir", "output")
+    if config.get("external_dev_site") and out_name == "output":
+        raise ValueError(
+            "external_dev_site=true but output_dir is the default 'output'.\n"
+            "  Set a distinct output_dir (e.g. \"output_mimic\") in this config so "
+            "the development run does not overwrite the primary site's outputs."
+        )
+    return project_root / out_name
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +323,49 @@ def get_tables_path(
         tables_path, file_type, hospitalization_ids, filtered_dir, config,
         patient_ids=patient_ids,
     )
+
+
+# ── Net ultrafiltration over the CRRT course (shared by 02 Table 1 + 03 figs) ──
+# Net UF is a persisting machine SETTING (a rate, mL/hr), so the volume removed
+# over an inter-record interval = rate * dt. Integrating across the whole course
+# (rather than reading the first-3h initiation snapshot, where net UF is routinely
+# 0 during the hemodynamic ramp-up) gives the clinically meaningful net-UF burden.
+# ONE definition lives here so Table 1 (02) and the trajectory/intensity figures
+# (03) cannot diverge.
+
+def integrate_persisting_rate(records, group_col, time_col, rate_col,
+                              max_h: float = 720.0, max_gap: float = 6.0):
+    """Cumulative integral of a PERSISTING rate series via gap-capped left-Riemann
+    sums. `records` has one row per measurement with [group_col, time_col (hours
+    from the anchor), rate_col]. dt = gap to the next record within the group,
+    CAPPED at `max_gap` h (an uncapped gap would accrue a stale rate across an
+    off-CRRT pause). Returns the sorted rows with added `dt` and `cum` (running
+    integral). Reserve for quantities that persist between records (rates,
+    settings), NEVER point measurements (labs)."""
+    d = records.dropna(subset=[rate_col]).copy()
+    d = d[(d[time_col] >= 0) & (d[time_col] <= max_h)].sort_values([group_col, time_col])
+    if d.empty:
+        d["dt"] = pd.Series(dtype=float)
+        d["cum"] = pd.Series(dtype=float)
+        return d
+    t_next = d.groupby(group_col)[time_col].shift(-1)
+    d["dt"] = (t_next - d[time_col]).clip(upper=max_gap).fillna(0.0)
+    d["_inc"] = d[rate_col] * d["dt"]
+    d["cum"] = d.groupby(group_col)["_inc"].cumsum()
+    return d.drop(columns="_inc")
+
+
+def course_average_intensity(records, group_col, time_col, rate_col,
+                             max_h: float = 720.0, max_gap: float = 6.0):
+    """Per-group time-weighted mean of a persisting rate over the course =
+    total integral / total time on therapy. Returns a DataFrame
+    [group_col, total, hours_on, intensity]. For net UF with rate in mL/kg/hr,
+    `total` is mL/kg and `intensity` is the course-average mL/kg/hr."""
+    d = integrate_persisting_rate(records, group_col, time_col, rate_col, max_h, max_gap)
+    cols = [group_col, "total", "hours_on", "intensity"]
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(group_col).agg(total=("cum", "last"), hours_on=("dt", "sum")).reset_index()
+    g = g[g["hours_on"] > 0].copy()
+    g["intensity"] = g["total"] / g["hours_on"]
+    return g[cols]

@@ -6,16 +6,19 @@ Multi-site analysis of Continuous Renal Replacement Therapy (CRRT) for Acute Kid
 
 ## Objectives
 
-1. **Descriptive epidemiology** of CRRT for AKI across CLIF consortium hospitals:
-   - Frequency of CRRT (denominator: all ICU admissions without ESRD)
-   - Pre-CRRT clinical state (BMP, lactate, vasopressors, IMV, location)
-   - Treatment details (CRRT mode, settings, dose, duration)
-   - Outcomes (in-hospital mortality, LOS, IMV duration)
+This is a **descriptive-led CLIF-value study**: the headline is CRRT descriptive epidemiology and risk-standardized mortality, with a point-treatment causal analysis of CRRT dose as one rigorous section.
 
-2. **Causal inference** — effect of CRRT dose on 30-day mortality:
-   - Point-treatment analysis (PSM, IPTW via Super Learner)
-   - Continuous dose-response (natural spline Cox, generalized propensity score)
-   - Time-varying marginal structural models (12h and 24h intervals)
+1. **Descriptive epidemiology** of CRRT for AKI across CLIF consortium hospitals:
+   - Incidence/frequency of CRRT (denominator: all ICU admissions without ESRD — a population denominator registries cannot compute)
+   - Pre-CRRT clinical state (BMP, lactate, vasopressors, IMV, location) and 30-day longitudinal trajectories
+   - Treatment details (CRRT mode, settings, delivered dose, net ultrafiltration, duration)
+   - Outcomes (30-day and in-hospital mortality, LOS, IMV duration)
+
+2. **Risk-standardized mortality (SMR)** — observed vs case-mix-expected 30-day mortality per site, against a reference model developed on an external CLIF dataset (MIMIC-IV); the CRRTnet-style "practice varies but risk-adjusted mortality does not" benchmark.
+
+3. **Causal inference** — effect of CRRT dose on 30-day mortality:
+   - Point-treatment analysis (PSM with Fine-Gray competing risk; IPTW via Super Learner + cause-specific Cox)
+   - Continuous dose-response (natural spline Cox, generalized propensity score) — sensitivity
    - Hypothesis-generating subgroup analysis (9 clinically motivated subgroups)
 
 ## Required CLIF Tables
@@ -32,14 +35,14 @@ Multi-site analysis of Continuous Renal Replacement Therapy (CRRT) for Acute Kid
 | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `peep_set`, `resp_rate_set`, `tidal_volume_set` | - |
 | **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm` (+ settings columns if `has_crrt_settings=true`) | - |
 | **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code`, `present_on_admission` | - |
-| **clif_microbiology_culture** | `hospitalization_id`, `collected_dttm`, `result_category` | - |
+| **clif_microbiology_culture** | `hospitalization_id`, `collected_dttm`, `result_category` | *(optional)* used for the sepsis (ASE) flag in Table 1; if absent the pipeline sets the sepsis flag to NA and continues |
 
 See `config/clif_data_requirements.yaml` for the full column and category specification.
 
 ## Prerequisites
 
 - **Python 3.11+**
-- **R 4.x** (for causal inference scripts 05-06b)
+- **R 4.x** (for causal inference scripts 05 / 05b)
 - **UV package manager** ([install here](https://docs.astral.sh/uv/))
 - Access to CLIF 2.1.0 data tables at your site
 
@@ -59,7 +62,7 @@ cp config/config_template.json config/config.json
 # 3. Install dependencies
 uv sync
 
-# 4. Run the full pipeline (descriptive 00-03, causal 04-06b)
+# 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
 bash run_pipeline.sh
 ```
 
@@ -77,11 +80,11 @@ copy config\config_template.json config\config.json
 :: 3. Install dependencies
 uv sync
 
-:: 4. Run the full pipeline (descriptive 00-03, causal 04-06b)
+:: 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
 run_pipeline.bat
 ```
 
-> **Note:** The pipeline scripts run all steps sequentially: Python scripts 00-04 followed by R scripts 05-06b. R scripts are invoked with `--no-init-file` to avoid conflicts with user `.Rprofile` settings. CRAN mirror defaults to `https://cloud.r-project.org` if not configured.
+> **Note:** `run_pipeline.sh` runs all steps sequentially: Python scripts `00 01 02 03 03b 06 04` followed by R scripts `05 05b`. R scripts are invoked with `--no-init-file` to avoid conflicts with user `.Rprofile` settings; CRAN mirror defaults to `https://cloud.r-project.org` if not configured. Use `bash run_pipeline.sh --descriptive-only` to run just the descriptive + SMR deliverable (`00 01 02 03 03b 06`) and skip the causal R stack. The multi-site dashboard/manuscript scripts (`07`, `08`) are **coordinator-only** — run at the pooling site after collecting every site's `output/final/`, not by individual sites.
 
 ### R Packages
 
@@ -142,27 +145,37 @@ Builds a wide longitudinal dataset merging labs, vitals, medications, respirator
 **Outputs:** `output/intermediate/wide_df.parquet`
 
 #### Step 02: Table 1 (`02_construct_crrt_tableone.py`)
-Generates Table 1 with demographics, SOFA scores, labs, vasopressors, respiratory settings, and CRRT details across time windows (baseline -12h to +3h, 72h post-CRRT, discharge) stratified by survival.
+Builds the per-encounter analytic cohort (`tableone_analysis_df.parquet`) and generates Table 1 of baseline characteristics (demographics, SOFA total and **non-renal SOFA**, nearest-measured baseline labs, vasopressors, IMV, net UF, outcomes) at CRRT initiation (−12h to +3h), **stratified by initial delivered-dose band** (<20 / 20–30 / >30 mL/kg/hr). Computes SOFA via `sofa_calculator.py` and a sepsis (ASE) flag.
 
 **Outputs:**
+- `output/intermediate/tableone_analysis_df.parquet`
 - `output/final/crrt_epi/{site}_table1_crrt.csv`
 - `output/final/crrt_epi/{site}_table1_crrt.html`
-- `output/final/crrt_epi/{site}_table1_crrt_long.csv`
 
-#### Step 03: Visualizations (`03_crrt_visualizations.py`)
-Generates clinical trajectory figures for the first 7 days post-CRRT: dose over time, lab distributions, MAP, respiratory support, and patient state (stacked area plot).
+#### Step 03: CRRT Epidemiology (`03_crrt_epidemiology.py`)
+Comprehensive per-site descriptive epidemiology: (A) CRRT incidence/utilization by ICU population and co-indication, (B) practice variation + dose-band quality, (C) distribution figures (incidence, delivered dose, net-UF intensity Murugan bands, mortality-vs-UF), and (D) 30-day longitudinal trajectories (delivered dose, **net ultrafiltration: rate over time + cumulative volume + course-average intensity**, labs, vasopressor/NEE, IMV-state, CRRT-state). Net UF is summarized over the whole course (the first-3h initiation snapshot was retired); MAP and respiratory trajectories were cut.
 
-**Outputs:** `output/final/crrt_epi/graphs/{site}_*.png` (figures) + `{site}_*.csv` (aggregate data)
+**Outputs:** `output/final/crrt_epi/{site}_crrt_incidence.csv`, `{site}_crrt_practice_quality.csv`, and `output/final/crrt_epi/graphs/{site}_*.png` (+ aggregate `*.csv`)
 
-### Causal Inference (Steps 04-06b)
+#### Step 03b: Risk-Standardized Mortality (`03b_crrt_epi_smr.py`)
+Computes the per-site standardized mortality ratio (SMR = observed / case-mix-expected 30-day deaths) on the **same analytic cohort as Table 1**, applying a frozen reference model (`config/smr_reference_model.json`, developed on MIMIC-IV) shipped with the repo. Covariates: age, sex, SOFA, baseline lactate, Charlson index. Reports the SMR with an exact-Poisson (Byar) CI plus transfer calibration. **Sites need only the tracked model JSON — no MIMIC data.**
+
+**Outputs:** `output/final/crrt_epi/{site}_smr.csv`, `{site}_smr_calibration.csv`
+
+#### Step 06: Low-Dose Characterization (`06_low_dose_characterization.py`)
+Descriptive characterization of the very-low-dose CRRT subcohort (delivered dose 10–15 mL/kg/hr): dose-band tally + very-low-vs-rest baseline comparison. Requires `has_crrt_settings=true`.
+
+**Outputs:** `output/final/low_dose/{site}_low_dose_{counts,long,table}.csv`
+
+### Causal Inference (Steps 04 / 05 / 05b)
 
 > These steps require the descriptive pipeline (steps 00-03) to have completed first.
 
-#### Step 04: Competing Risk DataFrame & Causal CONSORT (`04_build_msm_competing_risk_df.py`)
+#### Step 04: Competing Risk DataFrame & Causal CONSORT (`04_build_causal_df.py`)
 Builds a wide competing-risk DataFrame (58 columns) with labs, SOFA scores, oxygenation, vasopressors, IMV, and Charlson Comorbidity Index at t=0/12/24h windows. Includes sensitivity columns for 24h/48h interval analyses. Generates a missingness heatmap and a CONSORT flow diagram showing cohort narrowing from descriptive analysis through causal eligibility criteria.
 
 **Outputs:**
-- `output/intermediate/msm_competing_risk_df.parquet`
+- `output/intermediate/causal_df.parquet`
 - `output/final/crrt_epi/graphs/{site}_missingness_heatmap.png`
 - `output/final/psm_iptw/{site}_causal_consort_diagram.{png,pdf}`
 
@@ -186,64 +199,54 @@ Also generates a target trial emulation specification table and a 24h exclusion 
 
 **Outputs:** `output/final/psm_iptw/` — dose-response plots, combined 3-panel figure, GPS balance diagnostics, target trial CSV, dose decile CSV
 
-#### Step 06: Time-Varying MSM (`06_time_varying_MSM.R`)
-Time-varying marginal structural model for CRRT dose using 12h intervals. Models dose trajectories as treatment strategies with inverse-probability-of-treatment weighting.
-
-**Outputs:** `output/final/msm/time_varying/` — dose histograms, balance tables, CIF curves, cause-specific Cox results, ESS diagnostics, Table 1/S1 CSVs, CIF data CSV
-
-#### Step 06b: MSM Sensitivity (`06b_time_varying_MSM_sensitivity.R`)
-Sensitivity analysis using 24h intervals with 48h eligibility filter (survived >=48h, CRRT >=48h, has dialysate in 0-48h window).
-
-**Outputs:** `output/final/msm/time_varying_sensitivity/` — same structure as primary MSM
+> **Archived:** the time-varying marginal structural models (`06_time_varying_MSM.R` / `06b_time_varying_MSM_sensitivity.R`) and the NCT06021288 trial-emulation script (`05c_low_dose_emulation.R`) were cut from the manuscript and moved to `archive/code/`. They are recoverable via the `msm-v1` / `low-dose-emulation-v1` git tags but are no longer part of the pipeline.
 
 ## Output Structure
 
+All of `output/` is gitignored (regenerable). For multi-site pooling, each site delivers its `output/final/` tree, collected under `output/multi_site/<SITE>/final/`.
+
 ```
 output/
-├── intermediate/                    # Intermediate parquet files (not committed)
+├── intermediate/                    # Intermediate parquet files
 │   ├── outcomes_df.parquet
 │   ├── index_crrt_df.parquet
 │   ├── crrt_initiation.parquet
 │   ├── wide_df.parquet
-│   ├── tableone_analysis_df.parquet
-│   └── msm_competing_risk_df.parquet
+│   ├── tableone_analysis_df.parquet # analytic cohort (Table 1 + SMR source)
+│   └── causal_df.parquet
+│
+├── smr/                             # SMR cohort parquet (03b; row-level)
 │
 └── final/                           # All files are site-prefixed (e.g., UCMC_*)
-    ├── crrt_epi/                    # Descriptive epidemiology
+    ├── crrt_epi/                    # Descriptive epidemiology + SMR
     │   ├── {site}_strobe_counts.csv
-    │   ├── {site}_table1_crrt.csv
-    │   ├── {site}_table1_crrt.html
-    │   ├── {site}_table1_crrt_long.csv
-    │   ├── {site}_missingness_summary.csv
-    │   ├── {site}_crrt_settings_*.csv
-    │   └── graphs/                  # Site-prefixed PNGs + CSVs
+    │   ├── {site}_table1_crrt.{csv,html}
+    │   ├── {site}_crrt_incidence.csv
+    │   ├── {site}_crrt_practice_quality.csv
+    │   ├── {site}_smr.csv                 # 03b
+    │   ├── {site}_smr_calibration.csv     # 03b
+    │   └── graphs/                  # trajectory + distribution CSVs/PNGs
     │
-    ├── psm_iptw/                    # Point-treatment causal analysis
-    │   ├── {site}_Table1_unadjusted.{html,csv}
-    │   ├── {site}_TableS1_matched.{html,csv}
-    │   ├── {site}_TableS2_IPTW.{html,csv}
-    │   ├── {site}_IPTW_pooled_results.csv
-    │   ├── {site}_ModelComparison_PSMvsIPTW.csv
-    │   ├── {site}_subgroup_analysis_results.csv
-    │   ├── {site}_PSM_CIF_data.csv  # CIF curve data for multi-site combining
-    │   ├── {site}_IPTW_CIF_data.csv # CIF curve data for multi-site combining
-    │   ├── {site}_dose_response_*.csv
-    │   ├── {site}_evalue_sensitivity.csv
-    │   └── {site}_*.png             # PS overlap, love plots, CIF curves, forest plots
+    ├── low_dose/                    # Very-low-dose subcohort (06)
+    │   └── {site}_low_dose_{counts,long,table}.csv
     │
-    └── msm/                         # Time-varying MSM analysis
-        ├── msm_output_guide.md
-        ├── msm_sensitivity_findings.md
-        ├── time_varying/            # Primary (12h intervals)
-        │   ├── {site}_CRRT_30cutoff_Table1_unadjusted.{html,csv}
-        │   ├── {site}_CRRT_30cutoff_TableS1_MSM_IPTW.{html,csv}
-        │   ├── {site}_CRRT_30cutoff_MSM_CIF_data.csv
-        │   ├── {site}_CRRT_30cutoff_MSM_*.csv
-        │   └── {site}_CRRT_30cutoff_*.png
-        └── time_varying_sensitivity/ # Sensitivity (24h intervals)
-            ├── (same structure as time_varying/)
-            └── ...
+    ├── diagnostics/                 # Internal QC (00/04): missingness, settings
+    │
+    └── psm_iptw/                    # Point-treatment causal analysis (04/05/05b)
+        ├── {site}_table2_unadjusted_balance.{html,csv}
+        ├── {site}_TableS1_matched.{html,csv}
+        ├── {site}_TableS2_IPTW.{html,csv}
+        ├── {site}_IPTW_pooled_results.csv
+        ├── {site}_fg_psm_pooled_results.csv
+        ├── {site}_subgroup_analysis_results.csv
+        ├── {site}_PSM_CIF_data.csv  # CIF curve data for pooling (Fig: PSM CIF death)
+        ├── {site}_dose_decile_mortality.csv, {site}_dose_response_rcs.csv, {site}_gps_dose_response.csv
+        ├── {site}_evalue_sensitivity.csv
+        ├── {site}_causal_consort_diagram.{png,pdf}   # 04
+        └── {site}_*.png             # PS overlap, love plots, CIF curves, forest plots
 ```
+
+> The MIMIC SMR-reference **development** tree lives separately in `output_mimic/` (dev/coordinator-only, gitignored). The pooled multi-site dashboard + manuscript artifacts (`output/multi_site/`) are produced by the coordinator scripts `07`/`08`.
 
 ## Key Modules
 
