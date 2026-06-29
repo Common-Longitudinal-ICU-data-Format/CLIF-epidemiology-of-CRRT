@@ -652,7 +652,7 @@ _row_binary("Female (%)", "_female")
 _row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
 # Severity and labs at CRRT initiation
 _row_cont("SOFA Score", "sofa_total", 0)
-_row_cont("SOFA Score, non-renal", "sofa_nonrenal", 0)
+_row_cont("SOFA Score, Non-Renal", "sofa_nonrenal", 0)
 _row_cont("Creatinine (mg/dL)", "creatinine_t1", 2)
 _row_cont("BUN (mg/dL)", "bun_t1", 0)
 _row_cont("Lactate (mmol/L)", "lactate_t1", 1)
