@@ -189,10 +189,12 @@ print("Step 3: Computing sepsis flags …")
 from clifpy.utils.ase import compute_ase  # noqa: E402
 
 hosp_ids = outcomes_df["hospitalization_id"].unique().tolist()
-# Use filtered config if pre-filtering was applied, otherwise original
+# Use filtered config if pre-filtering was applied, otherwise the SELECTED
+# config (honors CLIF_CONFIG, so a MIMIC run uses MIMIC's tables for ASE - not
+# a hardcoded config.json, which would point at the primary site).
 _ase_config_path = Path(TABLES_PATH) / "config.json"
 if not _ase_config_path.exists():
-    _ase_config_path = project_root / "config" / "config.json"
+    _ase_config_path = config.get("_config_path", str(project_root / "config" / "config.json"))
 sepsis_raw = compute_ase(
     hospitalization_ids=hosp_ids,
     config_path=str(_ase_config_path),
