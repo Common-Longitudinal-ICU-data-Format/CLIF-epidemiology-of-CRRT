@@ -1184,7 +1184,7 @@ def draw_box(x, y, w, h, text, fontsize=11, weight="normal"):
     return x + w / 2, y
 
 
-ax.text(0.5, 0.98, "CRRT Causal Cohort Selection",
+ax.text(0.5, 0.98, "CRRT Cohort Selection",
         ha="center", va="center", fontsize=16, fontweight="bold")
 
 top_y = 0.90 - box_h
