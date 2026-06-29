@@ -1204,7 +1204,7 @@ rows = [
      "remaining_n": n_with_weight,
      "excluded_label": f"Excluded: Missing weight\nn = {n_no_esrd - n_with_weight:,}",
      "excluded_n": n_no_esrd - n_with_weight},
-    {"remaining_label": "Remaining hospitalizations\nWith required baseline labs",
+    {"remaining_label": "Descriptive analytic cohort\n(Table 1 + descriptive analyses)",
      "remaining_n": n_with_labs,
      "excluded_label": f"Excluded: Missing required labs\nn = {n_with_settings - n_with_labs:,}",
      "excluded_n": n_with_settings - n_with_labs},
@@ -1214,7 +1214,7 @@ excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_shor
 if n_excluded_scuf > 0:
     excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
 rows.append({
-    "remaining_label": "Causal analysis cohort",
+    "remaining_label": "Causal analysis cohort\n(complete-case, dichotomized dose)",
     "remaining_n": n_causal,
     "excluded_label": excl_short_label,
     "excluded_n": n_excluded_short + n_excluded_scuf,
