@@ -149,8 +149,8 @@ required_vars <- c(
   # SOFA (kept in data for descriptive use; NOT used in models)
   "sofa_total_0", "sofa_total_24",
   # New time-varying covariates at t=0 and t=24
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
-  "oxygenation_index_24", "norepinephrine_equivalent_24", "imv_status_24",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_24", "norepinephrine_equivalent_24", "imv_status_24",
   # CCI components (baseline only)
   cci_vars
 )
@@ -235,7 +235,7 @@ cat("\n")
 
 # NOTE: 24h exclusion (died or off CRRT within 24h) now handled in Python step 04.
 
-# MICE imputation for remaining missingness (oxygenation index only)
+# MICE imputation for remaining missingness (pf_sf_ratio only)
 miss_counts <- colSums(is.na(df[, model_vars]))
 vars_with_na <- names(miss_counts[miss_counts > 0])
 n_incomplete <- sum(!complete.cases(df[, model_vars]))
@@ -353,12 +353,12 @@ sample_chars <- data.frame(
   crrt_dose_24_48_min = min(df_complete$crrt_dose_24_48, na.rm = TRUE),
   crrt_dose_24_48_max = max(df_complete$crrt_dose_24_48, na.rm = TRUE),
 
-  # Oxygenation Index (time t=0)
-  oxygenation_index_mean   = mean(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_sd     = sd(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_median = median(df_complete$oxygenation_index_0, na.rm = TRUE),
-  oxygenation_index_q25    = quantile(df_complete$oxygenation_index_0, 0.25, na.rm = TRUE),
-  oxygenation_index_q75    = quantile(df_complete$oxygenation_index_0, 0.75, na.rm = TRUE),
+  # P/F or S/F ratio (time t=0)
+  pf_sf_ratio_mean   = mean(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_sd     = sd(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_median = median(df_complete$pf_sf_ratio_0, na.rm = TRUE),
+  pf_sf_ratio_q25    = quantile(df_complete$pf_sf_ratio_0, 0.25, na.rm = TRUE),
+  pf_sf_ratio_q75    = quantile(df_complete$pf_sf_ratio_0, 0.75, na.rm = TRUE),
 
   # Norepinephrine Equivalent (time t=0)
   norepi_eq_mean   = mean(df_complete$norepinephrine_equivalent_0, na.rm = TRUE),
@@ -521,7 +521,7 @@ complete_case_vars <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "sofa_total_0", "crrt_dose_ml_kg_hr_0",
   "lactate_0", "bicarbonate_0", "potassium_0",
-  "oxygenation_index_0", "norepinephrine_equivalent_0", "imv_status_0",
+  "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
   cci_vars,
   "time_to_event_90d", "outcome"
 )
@@ -649,7 +649,7 @@ vars_table1 <- c(
   "race_category",
   "sofa_total_0",
   "creatinine_0",
-  "oxygenation_index_0",
+  "pf_sf_ratio_0",
   "norepinephrine_equivalent_0",
   "imv_status_0",
   "lactate_0",
@@ -671,7 +671,7 @@ table1_type <- list(
   race_category               ~ "categorical",
   sofa_total_0                ~ "continuous",
   creatinine_0                ~ "continuous",
-  oxygenation_index_0         ~ "continuous",
+  pf_sf_ratio_0         ~ "continuous",
   norepinephrine_equivalent_0 ~ "continuous",
   imv_status_0                ~ "dichotomous",
   lactate_0                   ~ "continuous",
@@ -696,7 +696,7 @@ table1_label <- list(
   race_category                ~ "Race",
   sofa_total_0                 ~ "SOFA Score",
   creatinine_0                 ~ "Creatinine at CRRT Start (mg/dL)",
-  oxygenation_index_0          ~ "Oxygenation Index (P/F or S/F)",
+  pf_sf_ratio_0          ~ "P/F or S/F Ratio",
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
   imv_status_0                 ~ "On IMV (%)",
   lactate_0                    ~ "Lactate at CRRT Start (mmol/L)",
@@ -827,7 +827,7 @@ df_msm_long <- bind_rows(
       lactate = lactate_0,
       bicarbonate = bicarbonate_0,
       potassium = potassium_0,
-      oxygenation_index = oxygenation_index_0,
+      pf_sf_ratio = pf_sf_ratio_0,
       norepinephrine_equivalent = norepinephrine_equivalent_0,
       imv_status = imv_status_0,
       # SOFA (descriptive only, not used in models)
@@ -847,7 +847,7 @@ df_msm_long <- bind_rows(
       lactate = lactate_24,
       bicarbonate = bicarbonate_24,
       potassium = potassium_24,
-      oxygenation_index = oxygenation_index_24,
+      pf_sf_ratio = pf_sf_ratio_24,
       norepinephrine_equivalent = norepinephrine_equivalent_24,
       imv_status = imv_status_24,
       sofa_total = sofa_total_24,
@@ -883,7 +883,7 @@ baseline_terms <- c(
 # NOTE: sofa_total deliberately excluded from model covariates
 tv_terms <- c(
   "lactate", "bicarbonate", "potassium",
-  "oxygenation_index", "norepinephrine_equivalent", "imv_status"
+  "pf_sf_ratio", "norepinephrine_equivalent", "imv_status"
 )
 
 # Dynamic filter: drop baseline terms with <2 unique values at this site
@@ -1084,7 +1084,7 @@ pretty_names_msm <- c(
   lactate                   = "Lactate",
   bicarbonate               = "Bicarbonate",
   potassium                 = "Potassium",
-  oxygenation_index         = "Oxygenation Index",
+  pf_sf_ratio         = "P/F or S/F Ratio",
   norepinephrine_equivalent = "NE Equivalent",
   imv_status                = "IMV Status",
   A_lag                     = "Prior Dose Group",
@@ -1346,7 +1346,7 @@ df_msm_tableS1 <- df_out_msm %>%
     crrt_group,
     age_at_admission, sex_category, weight_kg, race_category, ethnicity_category,
     sofa_total_0,
-    oxygenation_index_0, norepinephrine_equivalent_0, imv_status_0,
+    pf_sf_ratio_0, norepinephrine_equivalent_0, imv_status_0,
     lactate_0, bicarbonate_0, potassium_0,
     crrt_mode_category,
     all_of(cci_vars),
@@ -1369,7 +1369,7 @@ tableS1_type <- list(
   race_category               ~ "categorical",
   ethnicity_category          ~ "categorical",
   sofa_total_0                ~ "continuous",
-  oxygenation_index_0         ~ "continuous",
+  pf_sf_ratio_0         ~ "continuous",
   norepinephrine_equivalent_0 ~ "continuous",
   imv_status_0                ~ "dichotomous",
   lactate_0                   ~ "continuous",
@@ -1409,7 +1409,7 @@ tableS1_label <- list(
   race_category                ~ "Race",
   ethnicity_category           ~ "Ethnicity",
   sofa_total_0                 ~ "SOFA Score at CRRT Start",
-  oxygenation_index_0          ~ "Oxygenation Index (P/F or S/F)",
+  pf_sf_ratio_0          ~ "P/F or S/F Ratio",
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
   imv_status_0                 ~ "On IMV (%)",
   lactate_0                    ~ "Lactate at CRRT Start (mmol/L)",

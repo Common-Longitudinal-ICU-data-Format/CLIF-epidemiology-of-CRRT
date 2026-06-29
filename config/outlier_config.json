@@ -24,6 +24,7 @@
     "dobutamine": [0 , 40],
 
     "lactate": [0, 40],
+    "pf_sf_ratio": [0, 500],
 
     "blood_flow_rate": [150, 5000],
     "pre_filter_replacement_fluid_rate": [0, 20000],
