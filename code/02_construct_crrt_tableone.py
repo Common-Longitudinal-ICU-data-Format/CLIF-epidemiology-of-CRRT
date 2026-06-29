@@ -195,38 +195,52 @@ hosp_ids = outcomes_df["hospitalization_id"].unique().tolist()
 _ase_config_path = Path(TABLES_PATH) / "config.json"
 if not _ase_config_path.exists():
     _ase_config_path = config.get("_config_path", str(project_root / "config" / "config.json"))
-sepsis_raw = compute_ase(
-    hospitalization_ids=hosp_ids,
-    config_path=str(_ase_config_path),
-    apply_rit=True,
-    include_lactate=True,
-    verbose=True,
-)
-
-# Identify encounters with sepsis onset within ±72h of CRRT initiation
-sepsis_pos = sepsis_raw[sepsis_raw["sepsis"] == 1].copy()
-sepsis_pos = sepsis_pos.merge(eb_map, on="hospitalization_id", how="inner")
-sepsis_pos = sepsis_pos.merge(
-    crrt_initiation[["encounter_block", "crrt_initiation_time"]],
-    on="encounter_block",
-    how="inner",
-)
-
+# ASE needs microbiology_culture; degrade gracefully if a site lacks it (e.g.
+# MIMIC) - sepsis_within_window is a Table-1 covariate only, NOT an SMR
+# covariate, so a missing-table failure here must not sink the whole build.
 ebs_with_sepsis: set = set()
-onset_col = "ase_onset_w_lactate_dttm"
-if onset_col in sepsis_pos.columns and len(sepsis_pos) > 0:
-    sepsis_pos["onset_dttm"] = pd.to_datetime(sepsis_pos[onset_col], utc=True)
-    crrt_utc = sepsis_pos["crrt_initiation_time"].dt.tz_convert("UTC")
-    hours_diff = (sepsis_pos["onset_dttm"] - crrt_utc).dt.total_seconds() / 3600
-    ebs_with_sepsis = set(sepsis_pos.loc[hours_diff.abs() <= 72, "encounter_block"])
+_sepsis_ok = True
+try:
+    sepsis_raw = compute_ase(
+        hospitalization_ids=hosp_ids,
+        config_path=str(_ase_config_path),
+        apply_rit=True,
+        include_lactate=True,
+        verbose=True,
+    )
+    # Identify encounters with sepsis onset within ±72h of CRRT initiation
+    sepsis_pos = sepsis_raw[sepsis_raw["sepsis"] == 1].copy()
+    sepsis_pos = sepsis_pos.merge(eb_map, on="hospitalization_id", how="inner")
+    sepsis_pos = sepsis_pos.merge(
+        crrt_initiation[["encounter_block", "crrt_initiation_time"]],
+        on="encounter_block",
+        how="inner",
+    )
+    onset_col = "ase_onset_w_lactate_dttm"
+    if onset_col in sepsis_pos.columns and len(sepsis_pos) > 0:
+        sepsis_pos["onset_dttm"] = pd.to_datetime(sepsis_pos[onset_col], utc=True)
+        crrt_utc = sepsis_pos["crrt_initiation_time"].dt.tz_convert("UTC")
+        hours_diff = (sepsis_pos["onset_dttm"] - crrt_utc).dt.total_seconds() / 3600
+        ebs_with_sepsis = set(sepsis_pos.loc[hours_diff.abs() <= 72, "encounter_block"])
+    del sepsis_raw, sepsis_pos
+except Exception as _e:
+    _sepsis_ok = False
+    print(f"  WARNING: sepsis/ASE unavailable ({type(_e).__name__}: {_e}).")
+    print("           Setting sepsis_within_window = NA (site likely lacks "
+          "microbiology_culture). Table-1 covariate only; the SMR does not use it.")
 
-sepsis_flag_df = pd.DataFrame({
-    "encounter_block": crrt_initiation["encounter_block"],
-    "sepsis_within_window": crrt_initiation["encounter_block"].isin(ebs_with_sepsis),
-})
-del sepsis_raw, sepsis_pos
+if _sepsis_ok:
+    sepsis_flag_df = pd.DataFrame({
+        "encounter_block": crrt_initiation["encounter_block"],
+        "sepsis_within_window": crrt_initiation["encounter_block"].isin(ebs_with_sepsis),
+    })
+    print(f"  Sepsis within ±72h: {sepsis_flag_df['sepsis_within_window'].sum()}/{len(sepsis_flag_df)}")
+else:
+    sepsis_flag_df = pd.DataFrame({
+        "encounter_block": crrt_initiation["encounter_block"],
+        "sepsis_within_window": pd.array([pd.NA] * len(crrt_initiation), dtype="boolean"),
+    })
 gc.collect()
-print(f"  Sepsis within ±72h: {sepsis_flag_df['sepsis_within_window'].sum()}/{len(sepsis_flag_df)}")
 
 
 # ===================================================================
