@@ -7,29 +7,29 @@
     "lactate",
     "cci_score"
   ],
-  "intercept": -2.8547307752187048,
+  "intercept": -3.682996258772492,
   "coef": {
-    "age": 0.02026644453818696,
-    "female": 0.060001785026340355,
-    "sofa_total": 0.11162647351961631,
-    "lactate": 0.08861914732991892,
-    "cci_score": 0.034581555229710445
+    "age": 0.027865977694181258,
+    "female": 0.05488375109462681,
+    "sofa_total": 0.1256159492464428,
+    "lactate": 0.14704859498449938,
+    "cci_score": 0.02210874159762212
   },
   "impute_medians": {
-    "age": 63.0,
+    "age": 64.0,
     "female": 0.0,
     "sofa_total": 10.0,
-    "lactate": 2.1,
+    "lactate": 2.4,
     "cci_score": 4.0
   },
-  "dev_n": 1705,
-  "dev_auc": 0.653,
-  "dev_auc_optimism_corrected": 0.651,
+  "dev_n": 2748,
+  "dev_auc": 0.717,
+  "dev_auc_optimism_corrected": 0.715,
   "vif": {
-    "age": 1.04,
+    "age": 1.03,
     "female": 1.0,
-    "sofa_total": 1.07,
-    "lactate": 1.04,
+    "sofa_total": 1.09,
+    "lactate": 1.07,
     "cci_score": 1.01
   }
 }
