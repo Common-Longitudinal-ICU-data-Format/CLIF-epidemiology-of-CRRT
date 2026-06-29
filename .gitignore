@@ -53,6 +53,7 @@ context7.json
 __pycache__/
 code/output/
 /output
+/output_mimic
 /output_old
 config/config_mimic.json
 config/config_ucmc.json
