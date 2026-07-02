@@ -1102,15 +1102,24 @@ def build_dose_by_ibw() -> None:
     fig.savefig(GRAPHS / f"{SITE_NAME}_dose_by_ibw.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # Pooling exports: full IBW-dose distribution (same shapes/edges as actual)
-    # + an aggregate paired-comparison summary (counts + medians, poolable).
+    # Pooling exports: IBW-dose distribution + actual-dose distribution ON THE
+    # SAME PAIRED (height-available) SUBSET so the cross-site pooled overlay
+    # (08 build_pooled_dose_ibw) compares the two weight bases apples-to-apples
+    # (identical denominator), exactly as this per-site figure does. Shared fixed
+    # edges/bands across both files + all sites so bins are summable. Plus an
+    # aggregate paired-comparison summary (counts + medians, poolable).
+    _ibw_bands = [("<15 (very low)", 0, 15), ("15-30 (low)", 15, 30),
+                  (">=30 (high)", 30, None), ("10-15 (RCT very-low)", 10, 15),
+                  ("20-30 (KDIGO band)", 20, 30)]
+    _ibw_edges = np.arange(0, 102.5, 2.5)
     _export_distribution(
         b, "initial_crrt_dose_ibw_ml_kg_hr",
-        hist_edges=np.arange(0, 102.5, 2.5),
-        bands=[("<15 (very low)", 0, 15), ("15-30 (low)", 15, 30),
-               (">=30 (high)", 30, None), ("10-15 (RCT very-low)", 10, 15),
-               ("20-30 (KDIGO band)", 20, 30)],
+        hist_edges=_ibw_edges, bands=_ibw_bands,
         fname=f"{SITE_NAME}_dose_distribution_ibw.csv")
+    _export_distribution(
+        a, "initial_crrt_dose_actual_paired_ml_kg_hr",
+        hist_edges=_ibw_edges, bands=_ibw_bands,
+        fname=f"{SITE_NAME}_dose_distribution_actual_paired.csv")
     comp = [
         ("n_paired", n), ("median_dose_actual", round(float(a.median()), 4)),
         ("median_dose_ibw", round(float(b.median()), 4)),
