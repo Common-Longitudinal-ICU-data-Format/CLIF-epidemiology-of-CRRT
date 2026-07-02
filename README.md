@@ -81,7 +81,7 @@ copy config\config_template.json config\config.json
 uv sync
 
 :: 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
-run_pipeline.bat
+.\run_pipeline.bat
 ```
 
 > **Note:** `run_pipeline.sh` runs all steps sequentially: Python scripts `00 01 02 03 03b 06 04` followed by R scripts `05 05b`. R scripts are invoked with `--no-init-file` to avoid conflicts with user `.Rprofile` settings; CRAN mirror defaults to `https://cloud.r-project.org` if not configured. Use `bash run_pipeline.sh --descriptive-only` to run just the descriptive + SMR deliverable (`00 01 02 03 03b 06`) and skip the causal R stack. The multi-site dashboard/manuscript scripts (`07`, `08`) are **coordinator-only** — run at the pooling site after collecting every site's `output/final/`, not by individual sites.
