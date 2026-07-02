@@ -92,6 +92,37 @@ The R scripts auto-install missing CRAN packages on first run. Key dependencies 
 
 `tidyverse`, `arrow`, `survival`, `cmprsk`, `MatchIt`, `WeightIt`, `cobalt`, `SuperLearner`, `randomForest`, `xgboost`, `gam`, `EValue`, `survminer`, `survey`, `mice`, `gtsummary`, `patchwork`, `splines`
 
+### Windows workstations (managed / locked-down)
+
+On managed Windows machines, R packages auto-installed mid-run can be blocked by **Windows Application Control / Smart App Control** while *loading* their DLLs, e.g.:
+
+```
+unable to load shared object '...\R\win-library\4.5\utf8\libs\x64\utf8.dll':
+  LoadLibrary failure: An Application Control policy has blocked this file.
+```
+
+Fix it with a **one-time setup** before running the pipeline (installs packages, then strips the "Mark of the Web" that triggers the block):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_r.ps1
+```
+
+Or do the two steps by hand once: install the packages in R/RStudio, then
+`Get-ChildItem "$env:LOCALAPPDATA\R\win-library" -Recurse -File | Unblock-File`.
+
+After that, `.\run_pipeline.bat` runs end to end.
+
+### Running the R (causal) scripts manually
+
+The causal stack is just two scripts — you can always run them by hand from the project root (this is the most transparent way to see any error, and mirrors exactly what the pipeline does):
+
+```
+Rscript --no-init-file code/05_PSM_IPTW_CRRT_dose.R
+Rscript --no-init-file code/05b_dose_response_analysis.R
+```
+
+They read `output/intermediate/causal_df.parquet` (produced by `04_build_causal_df.py`) and write to `output/final/psm_iptw/`. So the minimal site workflow is: `run_pipeline.(sh|bat) --descriptive-only` for the descriptive + SMR deliverable, then run these two R scripts for the causal results. On a machine where R packages are already installed and loadable, `run_pipeline` full mode does all of this in one command.
+
 ## Configuration
 
 Edit `config/config.json` (copied from `config/config_template.json`):

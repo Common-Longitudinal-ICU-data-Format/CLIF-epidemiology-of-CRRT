@@ -79,8 +79,11 @@ echo.
 echo === Causal inference (R) ===
 echo.
 
-set R_LIBS_USER=%USERPROFILE%\R\win-library\4.5
-mkdir "%R_LIBS_USER%" 2>nul
+:: NOTE: do NOT override R_LIBS_USER here. On modern Windows the default user
+:: library is %LOCALAPPDATA%\R\win-library, which is where install.packages/
+:: setup_r.ps1 put the packages. Forcing %USERPROFILE%\R\win-library points R
+:: at an empty folder and every library() fails ("no package called ...").
+:: Leaving it unset makes the pipeline use the same library as a manual Rscript run.
 
 set R_FAILED=
 for %%S in (
