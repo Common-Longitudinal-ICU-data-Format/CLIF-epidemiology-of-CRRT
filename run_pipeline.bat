@@ -24,18 +24,9 @@ if not exist "%SCRIPT_DIR%config\config.json" (
     exit /b 1
 )
 
-:: Set up logging
-if not exist "%SCRIPT_DIR%output\final" mkdir "%SCRIPT_DIR%output\final"
-for /f "tokens=*" %%i in ('python -c "import json; print(json.load(open(r'%SCRIPT_DIR%config\config.json'))['site_name'])" 2^>nul') do set SITE_NAME=%%i
-if "%SITE_NAME%"=="" set SITE_NAME=unknown
-for /f "tokens=2 delims==" %%a in ('wmic os get localdatetime /value') do set dt=%%a
-set TIMESTAMP=%dt:~0,8%_%dt:~8,6%
-set LOG_FILE=%SCRIPT_DIR%output\final\%SITE_NAME%_pipeline_%TIMESTAMP%.log
-
-echo === CRRT Epidemiology Pipeline === > "%LOG_FILE%"
-echo   Started: %date% %time% >> "%LOG_FILE%"
-echo   Site: %SITE_NAME% >> "%LOG_FILE%"
-echo   Log: %LOG_FILE% >> "%LOG_FILE%"
+:: Site name (via the project's uv env, not bare python)
+set SITE_NAME=unknown
+for /f "usebackq delims=" %%i in (`uv run python -c "import json; print(json.load(open(r'%SCRIPT_DIR%config\config.json'))['site_name'])" 2^>nul`) do set "SITE_NAME=%%i"
 
 echo === CRRT Epidemiology Pipeline ===
 echo   Started: %date% %time%
@@ -45,17 +36,16 @@ if "%DESCRIPTIVE_ONLY%"=="true" (
 ) else (
     echo   Mode: FULL ^(descriptive + causal data prep + R stack^)
 )
-echo   Log: %LOG_FILE%
+echo   Tip: to also save a log, run:  .\run_pipeline.bat 2^>^&1 ^| Tee-Object output\final\%SITE_NAME%_run.log
 echo.
 
 :: Scripts use relative paths like ..\config\config.json, so run from code\
 cd /d "%SCRIPT_DIR%code"
 
 echo === Descriptive + SMR data prep (Python) ===
-echo === Descriptive + SMR data prep (Python) === >> "%LOG_FILE%"
 echo.
 
-:: Common descriptive steps (both modes)
+:: Common descriptive steps (both modes) — output streams live to the console
 for %%S in (
     00_cohort.py
     01_create_wide_df.py
@@ -65,15 +55,12 @@ for %%S in (
     06_low_dose_characterization.py
 ) do (
     echo --- Running %%~nS ---
-    echo --- Running %%~nS --- >> "%LOG_FILE%"
-    uv run python "%%S" >> "%LOG_FILE%" 2>&1
+    uv run python "%%S"
     if errorlevel 1 (
-        echo ERROR: %%~nS failed. See log: %LOG_FILE%
-        echo ERROR: %%~nS failed. >> "%LOG_FILE%"
+        echo ERROR: %%~nS failed.
         exit /b 1
     )
     echo --- %%~nS complete ---
-    echo --- %%~nS complete --- >> "%LOG_FILE%"
     echo.
 )
 
@@ -81,18 +68,15 @@ if "%DESCRIPTIVE_ONLY%"=="true" goto :done
 
 :: Causal data prep (full mode only)
 echo --- Running 04_build_causal_df ---
-echo --- Running 04_build_causal_df --- >> "%LOG_FILE%"
-uv run python "04_build_causal_df.py" >> "%LOG_FILE%" 2>&1
+uv run python "04_build_causal_df.py"
 if errorlevel 1 (
-    echo ERROR: 04_build_causal_df failed. See log: %LOG_FILE%
-    echo ERROR: 04_build_causal_df failed. >> "%LOG_FILE%"
+    echo ERROR: 04_build_causal_df failed.
     exit /b 1
 )
 echo --- 04_build_causal_df complete ---
 echo.
 
 echo === Causal inference (R) ===
-echo === Causal inference (R) === >> "%LOG_FILE%"
 echo.
 
 set R_LIBS_USER=%USERPROFILE%\R\win-library\4.5
@@ -104,15 +88,12 @@ for %%S in (
     05b_dose_response_analysis.R
 ) do (
     echo --- Running %%~nS ---
-    echo --- Running %%~nS --- >> "%LOG_FILE%"
-    Rscript --no-init-file "%SCRIPT_DIR%code\%%S" >> "%LOG_FILE%" 2>&1
+    Rscript --no-init-file "%SCRIPT_DIR%code\%%S"
     if errorlevel 1 (
         echo --- %%~nS FAILED ---
-        echo --- %%~nS FAILED --- >> "%LOG_FILE%"
         set "R_FAILED=!R_FAILED! %%S"
     ) else (
         echo --- %%~nS complete ---
-        echo --- %%~nS complete --- >> "%LOG_FILE%"
     )
     echo.
 )
@@ -121,24 +102,11 @@ for %%S in (
 echo === Pipeline complete ===
 echo   Finished: %date% %time%
 echo   Results: output\final\
-echo   Log: %LOG_FILE%
-echo === Pipeline complete === >> "%LOG_FILE%"
-echo   Finished: %date% %time% >> "%LOG_FILE%"
 
 if defined R_FAILED (
     echo.
     echo === WARNING: Some R scripts failed ===
     echo   Failed scripts:%R_FAILED%
-    echo.
-    echo   To re-run manually from the project root directory:
-    echo.
-    for %%F in (%R_FAILED%) do (
-        echo     Rscript --no-init-file code\%%F
-    )
-    echo.
-    echo   Required R scripts and their outputs:
-    echo     05_PSM_IPTW_CRRT_dose.R        -^> output\final\psm_iptw\
-    echo     05b_dose_response_analysis.R    -^> output\final\psm_iptw\ (dose-response)
-    echo.
-    echo   Check the log for error details: %LOG_FILE%
+    echo   To re-run manually from the project root:
+    for %%F in (%R_FAILED%) do echo     Rscript --no-init-file code\%%F
 )
