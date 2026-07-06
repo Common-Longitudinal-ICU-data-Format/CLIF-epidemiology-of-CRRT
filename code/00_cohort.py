@@ -299,8 +299,10 @@ adult_encounters = adult_encounters[
 # Filter for admission years (configurable, defaults: start=2018, end=None).
 # Either bound may be null to leave that side open (MIMIC sets both null = no
 # year filter); guard both so a null start does not zero out the cohort.
-year_start = config["admission_year_start"]
-year_end = config["admission_year_end"]
+# year_start = config["admission_year_start"]
+# year_end = config["admission_year_end"]
+year_start = 2018
+year_end = 2024
 year_mask = pd.Series(True, index=adult_encounters.index)
 if year_start is not None:
     year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year >= year_start)
@@ -1863,29 +1865,23 @@ print(f"   - Using last_vital_dttm: {num_using_last_vital:,}")
 # ============================================================================
 print("\n5. Calculating mortality outcomes...")
 
-# Bring in discharge_dttm for the in-hospital death check
+# In-hospital death — CANONICAL definition (single source of truth).
+# Matches 02_construct_crrt_tableone exactly: disposition-based (died = expired/
+# hospice), capped at deaths occurring > 90 days after CRRT initiation.
+# final_outcome_dttm already uses death_dttm with a last_vital_dttm proxy when the
+# death timestamp is missing, so the 90-day gap is well-defined for all deaths.
+# (Replaces the earlier vitals-window definition, which disagreed with 02 and left
+#  00's outcomes_df out of sync with the mortality reported in Table 1 / practice_quality.)
 death_info = death_info.merge(
-    hosp_los[['encounter_block', 'discharge_dttm']].drop_duplicates('encounter_block'),
+    crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
     on='encounter_block', how='left',
 )
-
-# In-hospital death: died AND final_outcome_dttm between first vital and
-# max(last_vital, discharge). We use the max because:
-#   - Vitals often stop being charted shortly before death (median ~0.6h gap),
-#     so death_dttm > last_vital_dttm is normal clinical workflow.
-#   - In some cases last_vital_dttm > discharge_dttm (vitals charted after
-#     discharge timestamp due to data entry timing).
-# Using max(last_vital, discharge) captures both patterns.
-# NOTE: this fix (commit 97374c9) was reverted by fb012ef (dropped MSM work);
-# restored 2026-07-06. Without it in_hosp_death undercounts by ~250 deaths (55.6% vs 67.6%).
-death_info['_hosp_end'] = death_info[['last_vital_dttm', 'discharge_dttm']].max(axis=1)
-death_info['in_hosp_death'] = (
-    (death_info['died'] == 1) &
-    (death_info['final_outcome_dttm'].notna()) &
-    (death_info['final_outcome_dttm'] >= death_info['first_vital_dttm']) &
-    (death_info['final_outcome_dttm'] <= death_info['_hosp_end'])
-).astype(int)
-death_info = death_info.drop(columns=['_hosp_end'])
+death_info['in_hosp_death'] = (death_info['died'] == 1).astype(int)
+_death_gap_days = (
+    (death_info['final_outcome_dttm'] - death_info['crrt_initiation_time']).dt.total_seconds() / 86400
+)
+death_info.loc[_death_gap_days > 90, 'in_hosp_death'] = 0
+death_info = death_info.drop(columns=['crrt_initiation_time'])
 
 # 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
 death_info['death_30d'] = (
@@ -1907,7 +1903,7 @@ outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
 ).merge(
-    death_info.drop(columns=['discharge_dttm'], errors='ignore'), on='encounter_block', how='left'
+    death_info, on='encounter_block', how='left'
 )
 
 # Deduplicate to one row per encounter_block (stitched encounters have multiple hospitalization_ids)
