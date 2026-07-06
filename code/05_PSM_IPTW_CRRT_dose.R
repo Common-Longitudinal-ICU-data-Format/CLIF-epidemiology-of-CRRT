@@ -688,6 +688,14 @@ if (length(drop_vars) > 0) {
   table1_label <- table1_label[!sapply(table1_label, function(f) all.vars(f)[1] %in% drop_vars)]
 }
 
+# Force count-like continuous vars (SOFA total/non-renal, Charlson) to whole
+# numbers so SOFA total and SOFA non-renal agree — gtsummary otherwise
+# auto-picks 1 decimal for non-renal and 0 for total.
+whole_number_vars <- intersect(
+  c("sofa_total_0", "sofa_nonrenal_0", "cci_score"), vars_table1)
+table1_digits <- lapply(
+  whole_number_vars, function(v) as.formula(paste0(v, " ~ 0")))
+
 table1 <- df_tte_table1 %>%
   select(crrt_group, all_of(vars_table1)
          ) %>%
@@ -699,6 +707,7 @@ table1 <- df_tte_table1 %>%
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
     ),
+    digits = table1_digits,
     label = table1_label
   ) %>%
   add_overall() %>%
@@ -751,6 +760,12 @@ table1 <- table1 %>%
     smd = ifelse(row_type == "label", smd, NA_character_))) %>%
   modify_header(smd ~ "**SMD**") %>%
   modify_column_unhide(smd)
+
+# Offer the reader a conventional interpretation threshold for the SMD column.
+table1 <- tryCatch(
+  table1 %>% modify_footnote(
+    smd ~ "|SMD| > 0.10 conventionally indicates a meaningful between-group difference."),
+  error = function(e) { cat("  Note: SMD footnote skipped (", conditionMessage(e), ")\n"); table1 })
 
 # Save the unadjusted balance table (causal cohort, by dose group).
 # Manuscript Table 2 (the full-cohort descriptive baseline is manuscript
@@ -920,6 +935,7 @@ tableS1 <- df_tte_tableS1 %>%
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
     ),
+    digits = table1_digits,
     label = table1_label
   ) %>%
   add_overall() %>%
@@ -1437,6 +1453,7 @@ tableS2 <- tbl_svysummary(
     all_continuous() ~ "{median} ({p25}, {p75})",
     all_categorical() ~ "{n} ({p}%)"
   ),
+  digits = table1_digits,
   label = table1_label
 ) %>%
   add_overall() %>%
