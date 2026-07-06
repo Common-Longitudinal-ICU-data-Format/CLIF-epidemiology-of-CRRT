@@ -411,10 +411,10 @@ wide_df = wide_df.sort_values(['hospitalization_id', 'event_dttm']).reset_index(
 
 # Apply CRRT outlier handling (same ranges as outlier_config.json)
 crrt_outlier_ranges = {
-    "crrt_blood_flow_rate": (150, 5000),
-    "crrt_dialysate_flow_rate": (0, 20000),
-    "crrt_pre_filter_replacement_fluid_rate": (0, 20000),
-    "crrt_post_filter_replacement_fluid_rate": (0, 20000),
+    "crrt_blood_flow_rate": (150, 500),
+    "crrt_dialysate_flow_rate": (0, 12000),
+    "crrt_pre_filter_replacement_fluid_rate": (0, 12000),
+    "crrt_post_filter_replacement_fluid_rate": (0, 12000),
 }
 for col, (lo, hi) in crrt_outlier_ranges.items():
     if col in wide_df.columns:

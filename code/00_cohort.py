@@ -483,11 +483,11 @@ if has_crrt_settings:
 
     # CRRT parameters to validate and plot
     crrt_params = {
-        'blood_flow_rate': {'expected_range': [150, 5000], 'unit': 'mL/min'},
-        'dialysate_flow_rate': {'expected_range': [0, 20000], 'unit': 'mL/hr'},
-        'pre_filter_replacement_fluid_rate': {'expected_range': [0, 20000], 'unit': 'mL/hr'},
-        'post_filter_replacement_fluid_rate': {'expected_range': [0, 20000], 'unit': 'mL/hr'},
-        'ultrafiltration_out': {'expected_range': [0, 20000], 'unit': 'mL/hr'}
+        'blood_flow_rate': {'expected_range': [150, 500], 'unit': 'mL/min'},
+        'dialysate_flow_rate': {'expected_range': [0, 12000], 'unit': 'mL/hr'},
+        'pre_filter_replacement_fluid_rate': {'expected_range': [0, 12000], 'unit': 'mL/hr'},
+        'post_filter_replacement_fluid_rate': {'expected_range': [0, 12000], 'unit': 'mL/hr'},
+        'ultrafiltration_out': {'expected_range': [0, 500], 'unit': 'mL/hr'}
     }
 
     # Check if means are within expected ranges
@@ -945,8 +945,11 @@ strobe_counts['3_hospitalizations_with_esrd'] = len(hosp_ids_with_esrd)
 strobe_counts['3_encounter_blocks_with_esrd'] = len(blocks_with_esrd)
 
 
-# Filter out hospitalizations with ESRD
-cohort_df = cohort_df[~cohort_df['hospitalization_id'].isin(hosp_ids_with_esrd)].copy()
+# Filter out ESRD at encounter_block grain (H2): if ANY hospitalization in a
+# stitched block has an ESRD code, the whole block is an ESRD patient and is
+# excluded — otherwise the sibling hospitalization leaks back into the non-ESRD
+# denominator. (Was hospitalization_id-grain via hosp_ids_with_esrd.)
+cohort_df = cohort_df[~cohort_df['encounter_block'].isin(blocks_with_esrd)].copy()
 cohort_hosp_ids = set(cohort_df['hospitalization_id'].unique())
 cohort_blocks = set(cohort_df['encounter_block'].unique())
 # Create cohort subset excluding hospitalizations with ESRD
@@ -1860,13 +1863,29 @@ print(f"   - Using last_vital_dttm: {num_using_last_vital:,}")
 # ============================================================================
 print("\n5. Calculating mortality outcomes...")
 
-# In-hospital death: died AND final_outcome_dttm is between first and last vital
+# Bring in discharge_dttm for the in-hospital death check
+death_info = death_info.merge(
+    hosp_los[['encounter_block', 'discharge_dttm']].drop_duplicates('encounter_block'),
+    on='encounter_block', how='left',
+)
+
+# In-hospital death: died AND final_outcome_dttm between first vital and
+# max(last_vital, discharge). We use the max because:
+#   - Vitals often stop being charted shortly before death (median ~0.6h gap),
+#     so death_dttm > last_vital_dttm is normal clinical workflow.
+#   - In some cases last_vital_dttm > discharge_dttm (vitals charted after
+#     discharge timestamp due to data entry timing).
+# Using max(last_vital, discharge) captures both patterns.
+# NOTE: this fix (commit 97374c9) was reverted by fb012ef (dropped MSM work);
+# restored 2026-07-06. Without it in_hosp_death undercounts by ~250 deaths (55.6% vs 67.6%).
+death_info['_hosp_end'] = death_info[['last_vital_dttm', 'discharge_dttm']].max(axis=1)
 death_info['in_hosp_death'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
     (death_info['final_outcome_dttm'] >= death_info['first_vital_dttm']) &
-    (death_info['final_outcome_dttm'] <= death_info['last_vital_dttm'])
+    (death_info['final_outcome_dttm'] <= death_info['_hosp_end'])
 ).astype(int)
+death_info = death_info.drop(columns=['_hosp_end'])
 
 # 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
 death_info['death_30d'] = (
@@ -1888,7 +1907,7 @@ outcomes_df = cohort_df[['hospitalization_id', 'encounter_block']].merge(
 ).merge(
     hosp_los[['encounter_block', 'hosp_los_days', 'discharge_dttm']], on='encounter_block', how='left'
 ).merge(
-    death_info, on='encounter_block', how='left'
+    death_info.drop(columns=['discharge_dttm'], errors='ignore'), on='encounter_block', how='left'
 )
 
 # Deduplicate to one row per encounter_block (stitched encounters have multiple hospitalization_ids)
