@@ -692,7 +692,7 @@ table1 <- df_tte_table1 %>%
   modify_header(label ~ "**Characteristic**") %>%
   modify_spanning_header(c("stat_1","stat_2") ~ "**CRRT dose group**") %>%
   modify_caption(
-    "**Table 1. Baseline Characteristics of the Cohort by CRRT Dose Group**")
+    "**Baseline Characteristics by CRRT Dose Group (Unadjusted)**")
 
 table1 <- table1 %>%
   collapse_binary_in_gtsummary(
@@ -902,8 +902,7 @@ tableS1 <- df_tte_tableS1 %>%
     c("stat_1","stat_2") ~ "**CRRT dose group**"
   ) %>%
   modify_caption(
-    "**Table S1.
-    Baseline Characteristics of the Propensity Score-Matched Cohort**"
+    "**Baseline Characteristics of the Propensity Score-Matched Cohort**"
   )
 
 # Collapse Sex row
@@ -1420,8 +1419,7 @@ tableS2 <- tbl_svysummary(
     c("stat_1","stat_2") ~ "**CRRT dose group**"
   ) %>%
   modify_caption(
-    "**Table S2.
-    Weighted Baseline Characteristics After IPTW (Super Learner PS)**")
+    "**Weighted Baseline Characteristics After IPTW (Super Learner PS)**")
 
   # Collapse Sex row
   tableS2 <- tableS2 %>%
