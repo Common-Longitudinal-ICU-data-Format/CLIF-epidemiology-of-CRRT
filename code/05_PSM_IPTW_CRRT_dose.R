@@ -266,6 +266,33 @@ df_complete <- sanitize_numeric(df_complete)
 imp_list <- lapply(imp_list, sanitize_numeric)
 cat("NaN/Inf check complete.\n\n")
 
+# ---- Impute descriptive-only baseline labs for the balance tables ----
+# creatinine_0/bun_0/phosphate_0/sofa_nonrenal_0 are shown in Table 2/S1/S2 but
+# are NOT model covariates, so the model MICE above leaves their missingness,
+# which surfaces as "Unknown" rows. Impute them in a SEPARATE pmm pass predicted
+# by the already-complete model covariates (and each other) so the tables are
+# complete and consistent — WITHOUT perturbing the model-covariate imputation
+# (the causal PSM/IPTW/bootstrap inputs are unchanged).
+display_impute_vars <- intersect(
+  c("creatinine_0", "bun_0", "phosphate_0", "sofa_nonrenal_0"), names(df))
+if (length(display_impute_vars) > 0) {
+  disp_predictors <- intersect(
+    c("age_at_admission", "sex_category", "sofa_total_0", "lactate_0",
+      "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
+      "imv_status_0", "crrt_dose_median_3h"), names(df_complete))
+  impute_display <- function(d) {
+    if (!any(is.na(d[, display_impute_vars]))) return(d)
+    dd <- d[, unique(c(display_impute_vars, disp_predictors)), drop = FALSE]
+    m2 <- mice(dd, m = 1, method = "pmm", seed = 42, maxit = 5, printFlag = FALSE)
+    d[, display_impute_vars] <- complete(m2, 1)[, display_impute_vars]
+    d
+  }
+  df_complete <- impute_display(df_complete)
+  imp_list <- lapply(imp_list, impute_display)
+  cat("Imputed descriptive labs for tables:",
+      paste(display_impute_vars, collapse = ", "), "\n\n")
+}
+
 cat("Analysis sample:", nrow(df_complete), "of", nrow(df), "\n\n")
 
 # Check for sufficient data
