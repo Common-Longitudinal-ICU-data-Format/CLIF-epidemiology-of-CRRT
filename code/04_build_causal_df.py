@@ -32,7 +32,7 @@ import pyarrow.parquet as pq
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
-from pipeline_helpers import load_config, load_intermediate, get_tables_path  # noqa: E402
+from pipeline_helpers import load_config, load_intermediate, get_tables_path, compute_cci  # noqa: E402
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
@@ -112,6 +112,9 @@ _baseline_lab_map = {
     "lab_lactate": "lactate_0",
     "lab_bicarbonate": "bicarbonate_0",
     "lab_potassium": "potassium_0",
+    # Added for Table 2 <-> Table 1 row alignment (descriptive, not model covariates)
+    "lab_bun": "bun_0",
+    "lab_phosphate": "phosphate_0",
 }
 _wide_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
 _lab_present = [c for c in _baseline_lab_map if c in _wide_avail]
@@ -143,15 +146,24 @@ _n_lac = int(result["lactate_0"].notna().sum()) if "lactate_0" in result.columns
 print(f"  nearest-measured baseline labs attached "
       f"(lactate_0 measured in-window: {_n_lac}/{len(result)}; remainder -> MICE in 05)")
 
-# SOFA at t=0 (from tableone — unchanged; sofa_total_0 is excluded from the
-# causal models, used only for descriptive sample_characteristics)
+# SOFA at t=0 (from tableone — sofa_total_0 is excluded from the causal models,
+# used only for descriptive sample_characteristics). Also pull the renal
+# sub-score so we can report non-renal SOFA (= total - renal) in Table 2, to
+# match Table 1 (02:559-561); renal failure is the cohort's defining organ.
+_sofa_cols = ["encounter_block", "sofa_total"]
+if "sofa_renal" in tableone_df.columns:
+    _sofa_cols.append("sofa_renal")
 result = result.merge(
-    tableone_df[["encounter_block", "sofa_total"]].rename(
-        columns={"sofa_total": "sofa_total_0"}
+    tableone_df[_sofa_cols].rename(
+        columns={"sofa_total": "sofa_total_0", "sofa_renal": "sofa_renal_0"}
     ),
     on="encounter_block", how="left",
 )
-print(f"  SOFA attached")
+if "sofa_renal_0" in result.columns:
+    result["sofa_nonrenal_0"] = result["sofa_total_0"] - result["sofa_renal_0"]
+else:
+    result["sofa_nonrenal_0"] = np.nan
+print(f"  SOFA attached (total + non-renal)")
 
 # ===================================================================
 # STEP 4: CRRT dose — at initiation, 0-12h mean, 12-24h mean
@@ -761,11 +773,9 @@ del extra_df
 gc.collect()
 
 # ===================================================================
-# STEP 8: CCI components (17 binary columns from clifpy)
+# STEP 8: CCI components + weighted total (from clifpy, via shared helper)
 # ===================================================================
-print("Step 8: Computing CCI components from hospital_diagnosis (POA only) …")
-
-import clifpy
+print("Step 8: Computing CCI from hospital_diagnosis (POA only) …")
 
 # Load processed hospital_diagnosis (POA normalized, codes cleaned in script 00)
 diag_path = INTERMEDIATE_DIR / "hospital_diagnosis_df.parquet"
@@ -791,63 +801,37 @@ else:
         ).fillna(0).astype('int8')
     diag_df["diagnosis_code"] = diag_df["diagnosis_code"].astype(str).str.replace(".", "", regex=False)
 
-# Filter to our cohort and present-on-admission only
+# Shared helper: filters to cohort + POA, runs clifpy.calculate_cci, returns
+# 17 cci_ component columns + cci_score keyed by hospitalization_id.
 hosp_ids = set(eb_map["hospitalization_id"].astype(str).unique())
-diag_df["hospitalization_id"] = diag_df["hospitalization_id"].astype(str)
-diag_df = diag_df[
-    (diag_df["hospitalization_id"].isin(hosp_ids))
-    & (diag_df["poa_present"] == 1)
-].copy()
-print(f"  {len(diag_df)} POA diagnosis rows for cohort")
+cci_by_hosp = compute_cci(diag_df, hosp_ids)
+cci_component_cols = [c for c in cci_by_hosp.columns
+                      if c.startswith("cci_") and c != "cci_score"]
+cci_value_cols = cci_component_cols + ["cci_score"]
 
-# Calculate CCI using clifpy (returns 17 condition columns + cci_score)
-cci_result = clifpy.calculate_cci(diag_df, hierarchy=True)
-
-if isinstance(cci_result, pl.DataFrame):
-    cci_result = cci_result.to_pandas()
-
-# Map hospitalization_id → encounter_block
-cci_result["hospitalization_id"] = cci_result["hospitalization_id"].astype(str)
+# Map hospitalization_id -> encounter_block, then collapse to one row per block
+# (max = comorbidity present / worst-case score across any constituent hosp;
+# a no-op when the block maps 1:1 to a hospitalization, and fan-out-safe otherwise).
 eb_map_str = eb_map.copy()
 eb_map_str["hospitalization_id"] = eb_map_str["hospitalization_id"].astype(str)
-cci_result = cci_result.merge(eb_map_str, on="hospitalization_id", how="inner")
+cci_by_block = (
+    cci_by_hosp.merge(eb_map_str, on="hospitalization_id", how="inner")
+    .groupby("encounter_block")[cci_value_cols].max()
+    .reset_index()
+)
 
-# Add cci_ prefix to all 17 condition columns (keep names as clifpy returns them)
-clifpy_condition_cols = [
-    "myocardial_infarction", "congestive_heart_failure",
-    "peripheral_vascular_disease", "cerebrovascular_disease",
-    "dementia", "chronic_pulmonary_disease",
-    "connective_tissue_disease", "peptic_ulcer_disease",
-    "mild_liver_disease", "diabetes_uncomplicated",
-    "diabetes_with_complications", "hemiplegia",
-    "renal_disease", "cancer",
-    "moderate_severe_liver_disease", "metastatic_solid_tumor",
-    "aids",
-]
-cci_rename = {c: f"cci_{c}" for c in clifpy_condition_cols if c in cci_result.columns}
-cci_result = cci_result.rename(columns=cci_rename)
-
-# Final CCI columns = encounter_block + all cci_ prefixed condition cols
-cci_cols = ["encounter_block"] + [f"cci_{c}" for c in clifpy_condition_cols
-                                   if f"cci_{c}" in cci_result.columns]
-
-cci_final = cci_result[cci_cols].copy()
-
-# Ensure binary int
-for c in cci_cols[1:]:
-    cci_final[c] = cci_final[c].fillna(0).astype(int)
-
-result = result.merge(cci_final, on="encounter_block", how="left")
+result = result.merge(cci_by_block, on="encounter_block", how="left")
 
 # Fill CCI = 0 for encounters with no POA diagnosis records
-for c in cci_cols[1:]:
+for c in cci_value_cols:
     result[c] = result[c].fillna(0).astype(int)
 
-n_any_cci = (result[cci_cols[1:]].sum(axis=1) > 0).sum()
-print(f"  CCI: {n_any_cci}/{len(result)} encounters have at least one CCI condition")
-print(f"  CCI columns: {cci_cols[1:]}")
+n_any_cci = (result[cci_component_cols].sum(axis=1) > 0).sum()
+print(f"  CCI: {n_any_cci}/{len(result)} encounters have >=1 condition; "
+      f"median cci_score = {result['cci_score'].median():.0f}")
+print(f"  CCI columns: {cci_value_cols}")
 
-del diag_df, cci_result
+del diag_df, cci_by_hosp, cci_by_block
 gc.collect()
 
 # ===================================================================
@@ -984,10 +968,13 @@ final_cols = [
     "crrt_duration_days",
     "imv_duration_days",
     "creatinine_0",
+    "bun_0",
     "lactate_0",
     "bicarbonate_0",
     "potassium_0",
+    "phosphate_0",
     "sofa_total_0",
+    "sofa_nonrenal_0",
     "lactate_12",
     "bicarbonate_12",
     "potassium_12",
@@ -1019,6 +1006,7 @@ final_cols = [
     "cci_moderate_severe_liver_disease",
     "cci_metastatic_solid_tumor",
     "cci_aids",
+    "cci_score",
     # --- Sensitivity analysis columns (24h/48h windows) ---
     "crrt_dose_0_24",
     "crrt_dose_24_48",

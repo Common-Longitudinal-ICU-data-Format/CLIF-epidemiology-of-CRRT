@@ -37,7 +37,7 @@ import json  # noqa: E402
 
 from pipeline_helpers import (  # noqa: E402
     load_config, load_intermediate, get_tables_path, course_average_intensity,
-    get_output_root,
+    get_output_root, compute_cci,
 )
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
@@ -520,6 +520,25 @@ if _uf_intensity_by_eb is not None:
     # Course-average net UF intensity (mL/kg/hr) — NOT the first-3h snapshot.
     t1["net_uf_intensity"] = t1["encounter_block"].map(_uf_intensity_by_eb)
 
+# Charlson Comorbidity Index (total): computed on the full descriptive cohort
+# via the shared helper (same clifpy/POA path as the causal cohort in 04), so
+# Table 1 carries a comorbidity summary parallel to Table 2. Encounters with no
+# POA diagnosis get cci_score = 0 (matches 04).
+_diag_path = INTERMEDIATE_DIR / "hospital_diagnosis_df.parquet"
+if _diag_path.exists():
+    _cci = compute_cci(pd.read_parquet(_diag_path), cohort_hosp_ids)
+    _ebm = eb_map.copy()
+    _ebm["hospitalization_id"] = _ebm["hospitalization_id"].astype(str)
+    _cci_by_block = (
+        _cci.merge(_ebm, on="hospitalization_id", how="inner")
+        .groupby("encounter_block")["cci_score"].max()
+    )
+    t1["cci_score"] = t1["encounter_block"].map(_cci_by_block).fillna(0).astype(int)
+    print(f"  Charlson attached: median cci_score = {t1['cci_score'].median():.0f}")
+else:
+    t1["cci_score"] = pd.NA
+    print("  Charlson: hospital_diagnosis_df.parquet not found — cci_score set NA")
+
 # Nearest-measured baseline labs ({x}_t1) were computed once above and persisted
 # into analysis_df (tz-correct, single definition shared with the SMR builder
 # 03b), so they flow into t1 through the merge - no recomputation here.
@@ -638,6 +657,7 @@ def _row_multi(label, col, level_order):
 _row_cont("Age at Admission (years)", "age_at_admission", 0)
 _row_binary("Female (%)", "_female")
 _row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
+_row_cont("Charlson Comorbidity Index (total)", "cci_score", 0)
 # Severity and labs at CRRT initiation
 _row_cont("SOFA Score", "sofa_total", 0)
 _row_cont("SOFA Score, Non-Renal", "sofa_nonrenal", 0)

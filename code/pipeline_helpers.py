@@ -221,6 +221,74 @@ def safe_load_clif_table(clif, table_name, tables_path=None, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Charlson Comorbidity Index (shared by 02 Table 1 + 04 causal cohort)
+# ---------------------------------------------------------------------------
+# clifpy.calculate_cci returns these 17 binary condition columns (plain names)
+# plus a weighted `cci_score` total.
+_CCI_CONDITION_COLS = [
+    "myocardial_infarction", "congestive_heart_failure",
+    "peripheral_vascular_disease", "cerebrovascular_disease",
+    "dementia", "chronic_pulmonary_disease",
+    "connective_tissue_disease", "peptic_ulcer_disease",
+    "mild_liver_disease", "diabetes_uncomplicated",
+    "diabetes_with_complications", "hemiplegia",
+    "renal_disease", "cancer",
+    "moderate_severe_liver_disease", "metastatic_solid_tumor",
+    "aids",
+]
+
+
+def compute_cci(diag_df: pd.DataFrame, hosp_ids) -> pd.DataFrame:
+    """Charlson Comorbidity Index from a processed hospital_diagnosis frame.
+
+    `diag_df` is the POA-normalized hospital_diagnosis produced by 00_cohort.py
+    (`hospitalization_id`, `poa_present` in {0,1}, cleaned `diagnosis_code`).
+    Filters to `hosp_ids` and present-on-admission rows, runs
+    `clifpy.calculate_cci(hierarchy=True)`, and returns a pandas DataFrame keyed
+    by `hospitalization_id` (str) with:
+      - 17 `cci_`-prefixed binary component columns (int 0/1)
+      - `cci_score`: the weighted Charlson total (int)
+
+    Only hospitalizations with >=1 POA diagnosis appear; callers should
+    left-merge against their cohort and fillna(0). Single source of truth so
+    Table 1 (02) and the causal cohort (04) compute CCI identically.
+    """
+    import clifpy
+
+    hosp_ids = {str(h) for h in hosp_ids}
+    d = diag_df.copy()
+    d["hospitalization_id"] = d["hospitalization_id"].astype(str)
+    if "poa_present" in d.columns:
+        d = d[(d["hospitalization_id"].isin(hosp_ids)) & (d["poa_present"] == 1)].copy()
+    else:
+        d = d[d["hospitalization_id"].isin(hosp_ids)].copy()
+
+    cci = clifpy.calculate_cci(d, hierarchy=True)
+    try:
+        import polars as pl
+        if isinstance(cci, pl.DataFrame):
+            cci = cci.to_pandas()
+    except ImportError:
+        pass
+
+    cci["hospitalization_id"] = cci["hospitalization_id"].astype(str)
+    rename = {c: f"cci_{c}" for c in _CCI_CONDITION_COLS if c in cci.columns}
+    cci = cci.rename(columns=rename)
+    comp_cols = [f"cci_{c}" for c in _CCI_CONDITION_COLS if f"cci_{c}" in cci.columns]
+    for c in comp_cols:
+        cci[c] = cci[c].fillna(0).astype(int)
+
+    if "cci_score" not in cci.columns:
+        raise KeyError(
+            "clifpy.calculate_cci did not return 'cci_score'; "
+            "expected a weighted Charlson total column."
+        )
+    cci["cci_score"] = cci["cci_score"].fillna(0).astype(int)
+
+    return cci[["hospitalization_id"] + comp_cols + ["cci_score"]]
+
+
+# ---------------------------------------------------------------------------
 # CLIF table pre-filtering for SOFA/ASE
 # ---------------------------------------------------------------------------
 _CLIF_TABLES_FOR_SOFA_ASE = [
