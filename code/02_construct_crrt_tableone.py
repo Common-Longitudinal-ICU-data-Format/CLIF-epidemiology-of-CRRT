@@ -670,7 +670,7 @@ _row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
 _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
-_row_cont("CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+_row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
 if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
@@ -699,11 +699,11 @@ html_path = FINAL_DIR / f"{SITE_NAME}_table1_crrt.html"
 with open(html_path, "w", encoding="utf-8") as _f:
     _f.write(
         "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-        "<title>Table 1 - CRRT cohort by dose band</title>"
+        "<title>Baseline Characteristics by CRRT Dose Band</title>"
         "<style>body{font-family:Arial,sans-serif;margin:20px}"
         "table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
         "th{background:#1e417c;color:#fff}</style></head><body>"
-        f"<h2>Table 1: Baseline Characteristics by CRRT Dose Band - {SITE_NAME}</h2>"
+        f"<h2>Baseline Characteristics by CRRT Dose Band - {SITE_NAME}</h2>"
         "<p><em>Continuous: median (Q1, Q3); categorical: n (%). Labs and severity "
         "measured at or nearest CRRT initiation (-12 to +3 h); age at hospital admission. "
         "p-value across the three dose bands (Kruskal-Wallis / chi-square).</em></p>"

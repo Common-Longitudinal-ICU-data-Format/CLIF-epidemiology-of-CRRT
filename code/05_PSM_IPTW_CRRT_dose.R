@@ -495,7 +495,7 @@ df_tte_table1 <- df_tte_bin %>%
     race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
@@ -622,7 +622,7 @@ table1_label <- list(
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
   pf_sf_ratio_0                ~ "P/F or S/F Ratio",
   imv_status_0                 ~ "On IMV (%)",
-  crrt_dose_median_3h          ~ "CRRT Dose (mL/kg/hr)",
+  crrt_dose_median_3h          ~ "Initial CRRT Dose (mL/kg/hr)",
   crrt_mode_category           ~ "CRRT Modality",
   outcome_3cat                 ~ "30-day Outcome"
 )
@@ -866,7 +866,7 @@ df_tte_tableS1 <- df_match %>%
     race_category = factor(race_category),
 
     # ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     # ---- Three-category outcome
     outcome_3cat = factor(
@@ -1377,7 +1377,7 @@ df_tte_tableS2 <- df_tte_sl %>%
     race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
