@@ -62,7 +62,7 @@ if (is.null(getOption("repos")) || getOption("repos")["CRAN"] == "@CRAN@") {
 required_packages <- c("tidyverse", "readr", "arrow", "gtsummary", "cmprsk",
                        "survival", "jsonlite", "MatchIt", "WeightIt", "broom",
                        "cobalt", "EValue", "SuperLearner", "randomForest",
-                       "xgboost","gam","survminer", "survey", "mice")
+                       "xgboost","gam","survminer", "survey", "mice", "smd")
 new_packages <- required_packages[!(required_packages %in% installed.packages()
                                     [,"Package"])]
 if(length(new_packages)) install.packages(new_packages)
@@ -265,6 +265,33 @@ cat("Checking for NaN/Inf values after imputation...\n")
 df_complete <- sanitize_numeric(df_complete)
 imp_list <- lapply(imp_list, sanitize_numeric)
 cat("NaN/Inf check complete.\n\n")
+
+# ---- Impute descriptive-only baseline labs for the balance tables ----
+# creatinine_0/bun_0/phosphate_0/sofa_nonrenal_0 are shown in Table 2/S1/S2 but
+# are NOT model covariates, so the model MICE above leaves their missingness,
+# which surfaces as "Unknown" rows. Impute them in a SEPARATE pmm pass predicted
+# by the already-complete model covariates (and each other) so the tables are
+# complete and consistent — WITHOUT perturbing the model-covariate imputation
+# (the causal PSM/IPTW/bootstrap inputs are unchanged).
+display_impute_vars <- intersect(
+  c("creatinine_0", "bun_0", "phosphate_0", "sofa_nonrenal_0"), names(df))
+if (length(display_impute_vars) > 0) {
+  disp_predictors <- intersect(
+    c("age_at_admission", "sex_category", "sofa_total_0", "lactate_0",
+      "bicarbonate_0", "potassium_0", "norepinephrine_equivalent_0",
+      "imv_status_0", "crrt_dose_median_3h"), names(df_complete))
+  impute_display <- function(d) {
+    if (!any(is.na(d[, display_impute_vars]))) return(d)
+    dd <- d[, unique(c(display_impute_vars, disp_predictors)), drop = FALSE]
+    m2 <- mice(dd, m = 1, method = "pmm", seed = 42, maxit = 5, printFlag = FALSE)
+    d[, display_impute_vars] <- complete(m2, 1)[, display_impute_vars]
+    d
+  }
+  df_complete <- impute_display(df_complete)
+  imp_list <- lapply(imp_list, impute_display)
+  cat("Imputed descriptive labs for tables:",
+      paste(display_impute_vars, collapse = ", "), "\n\n")
+}
 
 cat("Analysis sample:", nrow(df_complete), "of", nrow(df), "\n\n")
 
@@ -495,7 +522,7 @@ df_tte_table1 <- df_tte_bin %>%
     race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
@@ -556,74 +583,88 @@ collapse_binary_in_gtsummary <- function(tbl, variable, keep_level, label) {
 }
 
 #### Include covariates
+# Row set + order aligned with Table 1 (02) so Table 2 and Tables S1/S2 (which
+# reuse this same spec) mirror the descriptive baseline. Post-baseline durations
+# and weight dropped; BUN / phosphate / non-renal SOFA / Charlson total added;
+# the 17 CCI components collapse to a single cci_score total. pf_sf_ratio_0 is
+# kept (a model covariate; T2-only vs T1). Net UF is Table 1 only (CRRT-course
+# descriptor). The cci_vars vector is unchanged and still drives the models and
+# love plots — only the TABLE display collapses to the total.
 vars_table1 <- c(
   "age_at_admission",
   "sex_category",
-  "weight_kg",
   "race_category",
+  "cci_score",
   "sofa_total_0",
+  "sofa_nonrenal_0",
   "creatinine_0",
-  "pf_sf_ratio_0",
-  "norepinephrine_equivalent_0",
-  "imv_status_0",
+  "bun_0",
   "lactate_0",
   "bicarbonate_0",
   "potassium_0",
-  "crrt_mode_category",
-  "crrt_duration_days",
-  "imv_duration_days",
+  "phosphate_0",
+  "norepinephrine_equivalent_0",
+  "pf_sf_ratio_0",
+  "imv_status_0",
   "crrt_dose_median_3h",
-  cci_vars,
+  "crrt_mode_category",
   "outcome_3cat"
 )
 
-# Build type list (CCI vars auto-detected as dichotomous from 0/1 integers)
+# Build type list (cci_score is the continuous Charlson total; components dropped)
 table1_type <- list(
   age_at_admission            ~ "continuous",
   sex_category                ~ "categorical",
-  weight_kg                   ~ "continuous",
   race_category               ~ "categorical",
+  cci_score                   ~ "continuous",
   sofa_total_0                ~ "continuous",
+  sofa_nonrenal_0             ~ "continuous",
   creatinine_0                ~ "continuous",
-  pf_sf_ratio_0         ~ "continuous",
-  norepinephrine_equivalent_0 ~ "continuous",
-  imv_status_0                ~ "dichotomous",
+  bun_0                       ~ "continuous",
   lactate_0                   ~ "continuous",
   bicarbonate_0               ~ "continuous",
   potassium_0                 ~ "continuous",
-  crrt_mode_category          ~ "categorical",
-  crrt_duration_days          ~ "continuous",
-  imv_duration_days           ~ "continuous",
-  crrt_dose_median_3h        ~ "continuous"
+  phosphate_0                 ~ "continuous",
+  norepinephrine_equivalent_0 ~ "continuous",
+  pf_sf_ratio_0               ~ "continuous",
+  imv_status_0                ~ "dichotomous",
+  crrt_dose_median_3h         ~ "continuous",
+  crrt_mode_category          ~ "categorical"
 )
-for (v in cci_vars) {
-  table1_type[[length(table1_type) + 1]] <- as.formula(
-    paste0(v, ' ~ "dichotomous"'))
-}
 
-# Build label list
+# Build label list (harmonized with Table 1 in 02 so the tables read identically)
 table1_label <- list(
   age_at_admission             ~ "Age at Admission (years)",
   sex_category                 ~ "Female (%)",
-  weight_kg                    ~ "Weight (kg)",
   race_category                ~ "Race",
+  cci_score                    ~ "Charlson Comorbidity Index (total)",
   sofa_total_0                 ~ "SOFA Score",
-  creatinine_0                 ~ "Creatinine at CRRT Start (mg/dL)",
-  pf_sf_ratio_0          ~ "P/F or S/F Ratio",
+  sofa_nonrenal_0              ~ "SOFA Score, Non-Renal",
+  creatinine_0                 ~ "Creatinine (mg/dL)",
+  bun_0                        ~ "BUN (mg/dL)",
+  lactate_0                    ~ "Lactate (mmol/L)",
+  bicarbonate_0                ~ "Bicarbonate (mEq/L)",
+  potassium_0                  ~ "Potassium (mEq/L)",
+  phosphate_0                  ~ "Phosphate (mg/dL)",
   norepinephrine_equivalent_0  ~ "NE Equivalent (mcg/kg/min)",
+  pf_sf_ratio_0                ~ "P/F or S/F Ratio",
   imv_status_0                 ~ "On IMV (%)",
-  lactate_0                    ~ "Lactate at CRRT Start (mmol/L)",
-  bicarbonate_0                ~ "Bicarbonate at CRRT Start (mEq/L)",
-  potassium_0                  ~ "Potassium at CRRT Start (mEq/L)",
+  crrt_dose_median_3h          ~ "Initial CRRT Dose (mL/kg/hr)",
   crrt_mode_category           ~ "CRRT Modality",
-  crrt_duration_days           ~ "Duration of CRRT (Days)",
-  imv_duration_days            ~ "Duration of IMV (Days)",
-  crrt_dose_median_3h          ~ "CRRT Dose, median first 3h (mL/kg/hr)",
   outcome_3cat                 ~ "30-day Outcome"
 )
-for (v in cci_vars) {
-  table1_label[[length(table1_label) + 1]] <- as.formula(
-    paste0(v, ' ~ "', cci_labels[v], '"'))
+
+# Defensive: keep only spec entries whose variable is actually in the data, so a
+# site that runs 05 before re-running 04 under the aligned schema (no bun_0 /
+# phosphate_0 / sofa_nonrenal_0 / cci_score yet) degrades gracefully instead of
+# erroring in all_of(). No-op once 04 has been re-run.
+.present_vars <- vars_table1 %in% names(df_tte_table1)
+if (any(!.present_vars)) {
+  cat("  Note: Table 2 vars absent from data, dropping:",
+      paste(vars_table1[!.present_vars], collapse = ", "), "\n")
+  vars_table1 <- vars_table1[.present_vars]
+  table1_type  <- table1_type[sapply(table1_type,  function(f) all.vars(f)[1] %in% vars_table1)]
+  table1_label <- table1_label[sapply(table1_label, function(f) all.vars(f)[1] %in% vars_table1)]
 }
 
 # Auto-detect all dichotomous variables and set value=1 for gtsummary
@@ -647,6 +688,14 @@ if (length(drop_vars) > 0) {
   table1_label <- table1_label[!sapply(table1_label, function(f) all.vars(f)[1] %in% drop_vars)]
 }
 
+# Force count-like continuous vars (SOFA total/non-renal, Charlson) to whole
+# numbers so SOFA total and SOFA non-renal agree — gtsummary otherwise
+# auto-picks 1 decimal for non-renal and 0 for total.
+whole_number_vars <- intersect(
+  c("sofa_total_0", "sofa_nonrenal_0", "cci_score"), vars_table1)
+table1_digits <- lapply(
+  whole_number_vars, function(v) as.formula(paste0(v, " ~ 0")))
+
 table1 <- df_tte_table1 %>%
   select(crrt_group, all_of(vars_table1)
          ) %>%
@@ -658,6 +707,7 @@ table1 <- df_tte_table1 %>%
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
     ),
+    digits = table1_digits,
     label = table1_label
   ) %>%
   add_overall() %>%
@@ -678,7 +728,7 @@ table1 <- df_tte_table1 %>%
   modify_header(label ~ "**Characteristic**") %>%
   modify_spanning_header(c("stat_1","stat_2") ~ "**CRRT dose group**") %>%
   modify_caption(
-    "**Table 1. Baseline Characteristics of the Cohort by CRRT Dose Group**")
+    "**Baseline Characteristics by CRRT Dose Group (Unadjusted)**")
 
 table1 <- table1 %>%
   collapse_binary_in_gtsummary(
@@ -686,6 +736,36 @@ table1 <- table1 %>%
     keep_level = "female",
     label      = "Female (%)"
   )
+
+# --- Unadjusted standardized mean difference (SMD) column ---
+# The poolable balance metric for the manuscript Table 2: per-site p-values
+# (above) are kept, but a single pooled p is not defensible across federated
+# sites, so the pooled Table 2 (report_core) shows an N-weighted mean of these
+# per-site SMDs instead. Computed with smd::smd on the same causal cohort;
+# excludes the treatment-defining dose and the outcome. One value per variable,
+# placed on that variable's label row.
+.smd_vars <- setdiff(vars_table1, c("crrt_dose_median_3h", "outcome_3cat"))
+.smd_tbl <- do.call(rbind, lapply(.smd_vars, function(v) {
+  x <- df_tte_table1[[v]]; ok <- !is.na(x)
+  val <- tryCatch(
+    smd::smd(x[ok], df_tte_table1$crrt_group[ok], std.error = FALSE)$estimate,
+    error = function(e) NA_real_)
+  data.frame(variable = v,
+             smd = ifelse(is.na(val), NA_character_, formatC(val, format = "f", digits = 2)),
+             stringsAsFactors = FALSE)
+}))
+table1 <- table1 %>%
+  modify_table_body(~ dplyr::mutate(
+    dplyr::left_join(.x, .smd_tbl, by = "variable"),
+    smd = ifelse(row_type == "label", smd, NA_character_))) %>%
+  modify_header(smd ~ "**SMD**") %>%
+  modify_column_unhide(smd)
+
+# Offer the reader a conventional interpretation threshold for the SMD column.
+table1 <- tryCatch(
+  table1 %>% modify_footnote(
+    smd ~ "|SMD| > 0.10 conventionally indicates a meaningful between-group difference."),
+  error = function(e) { cat("  Note: SMD footnote skipped (", conditionMessage(e), ")\n"); table1 })
 
 # Save the unadjusted balance table (causal cohort, by dose group).
 # Manuscript Table 2 (the full-cohort descriptive baseline is manuscript
@@ -828,7 +908,7 @@ df_tte_tableS1 <- df_match %>%
     race_category = factor(race_category),
 
     # ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     # ---- Three-category outcome
     outcome_3cat = factor(
@@ -855,6 +935,7 @@ tableS1 <- df_tte_tableS1 %>%
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
     ),
+    digits = table1_digits,
     label = table1_label
   ) %>%
   add_overall() %>%
@@ -864,8 +945,7 @@ tableS1 <- df_tte_tableS1 %>%
     c("stat_1","stat_2") ~ "**CRRT dose group**"
   ) %>%
   modify_caption(
-    "**Table S1.
-    Baseline Characteristics of the Propensity Score-Matched Cohort**"
+    "**Baseline Characteristics of the Propensity Score-Matched Cohort**"
   )
 
 # Collapse Sex row
@@ -1340,7 +1420,7 @@ df_tte_tableS2 <- df_tte_sl %>%
     race_category = factor(race_category),
 
     #### ---- Clean CRRT modality labels
-    crrt_mode_category = factor(crrt_mode_category),
+    crrt_mode_category = factor(toupper(as.character(crrt_mode_category))),
 
     #### ---- Three-category outcome
     outcome_3cat = factor(
@@ -1373,6 +1453,7 @@ tableS2 <- tbl_svysummary(
     all_continuous() ~ "{median} ({p25}, {p75})",
     all_categorical() ~ "{n} ({p}%)"
   ),
+  digits = table1_digits,
   label = table1_label
 ) %>%
   add_overall() %>%
@@ -1382,8 +1463,7 @@ tableS2 <- tbl_svysummary(
     c("stat_1","stat_2") ~ "**CRRT dose group**"
   ) %>%
   modify_caption(
-    "**Table S2.
-    Weighted Baseline Characteristics After IPTW (Super Learner PS)**")
+    "**Weighted Baseline Characteristics After IPTW (Super Learner PS)**")
 
   # Collapse Sex row
   tableS2 <- tableS2 %>%
