@@ -998,11 +998,33 @@ print(f"Number of hospitalizations without recorded weight: {len(hosp_without_we
 
 clif.vitals.df = None ## clear from memory
 
+# Demographic completeness — enforced at the same step as weight. Age is already
+# guaranteed non-null by the adult filter (age >= 18 & not-null) above; here we
+# additionally require a recorded sex, since age and sex are required by the
+# downstream causal models. sex_category lives in clif.patient; map it to
+# hospitalizations via patient_id (from all_encounters).
+try:
+    _pat_sex = clif.patient.df[['patient_id', 'sex_category']].drop_duplicates('patient_id')
+    _hosp_pat = all_encounters[['hospitalization_id', 'patient_id']].drop_duplicates('hospitalization_id')
+    _sex_map = _hosp_pat.merge(_pat_sex, on='patient_id', how='left')
+    _sx = _sex_map['sex_category'].astype('string').str.strip().str.lower()
+    hosp_missing_sex = set(
+        _sex_map.loc[_sx.isna() | _sx.isin(['', 'nan', 'none']), 'hospitalization_id']
+    ) & cohort_hosp_ids
+except Exception as _e:  # patient table absent/renamed → skip, do not crash cohort
+    print(f"   Warning: could not evaluate sex completeness ({_e}); skipping sex drop")
+    hosp_missing_sex = set()
+print(f"Number of hospitalizations without recorded sex: {len(hosp_missing_sex)}")
+strobe_counts['4_hospitalizations_missing_weight'] = len(hosp_without_weight)
+strobe_counts['4_hospitalizations_missing_sex'] = len(hosp_missing_sex)
+
 
 # In[27]:
 
 
-cohort_df = cohort_df[~cohort_df['hospitalization_id'].isin(hosp_without_weight)].copy()
+# Drop hospitalizations missing weight OR sex (age already enforced upstream)
+hosp_incomplete_demo = hosp_without_weight | hosp_missing_sex
+cohort_df = cohort_df[~cohort_df['hospitalization_id'].isin(hosp_incomplete_demo)].copy()
 cohort_hosp_ids = set(cohort_df['hospitalization_id'].unique())
 cohort_blocks = set(cohort_df['encounter_block'].unique())
 
@@ -1456,11 +1478,11 @@ def create_consort_diagram_straight_flow(
     })
     current_parent_n = n_no_esrd
 
-    # 3. Missing weight
+    # 3. Missing weight or sex (demographic completeness; age enforced upstream)
     steps.append({
         'name': 'Weight', 'parent_n': current_parent_n, 'remaining_n': n_with_weight,
-        'remaining_label': "With documented weight",
-        'excluded_n': max(current_parent_n - n_with_weight, 0), 'excluded_label': "Excluded: Missing weight"
+        'remaining_label': "With documented weight and sex",
+        'excluded_n': max(current_parent_n - n_with_weight, 0), 'excluded_label': "Excluded: Missing weight or sex"
     })
     current_parent_n = n_with_weight
 
