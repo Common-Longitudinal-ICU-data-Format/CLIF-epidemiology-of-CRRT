@@ -62,7 +62,7 @@ print(f"Current directory: {os.getcwd()}")
 
 
 # Load configuration (honors CLIF_CONFIG; defaults to config/config.json)
-from pipeline_helpers import load_config, safe_load_clif_table, get_output_root
+from pipeline_helpers import load_config, safe_load_clif_table, get_output_root, STUDY_YEAR_START, STUDY_YEAR_END
 config = load_config()
 SITE_NAME = config["site_name"]
 
@@ -296,13 +296,10 @@ adult_encounters = adult_encounters[
     (adult_encounters['age_at_admission'] >= 18) & (adult_encounters['age_at_admission'].notna())
 ]
 
-# Filter for admission years (configurable, defaults: start=2018, end=None).
-# Either bound may be null to leave that side open (MIMIC sets both null = no
-# year filter); guard both so a null start does not zero out the cohort.
-# year_start = config["admission_year_start"]
-# year_end = config["admission_year_end"]
-year_start = 2018
-year_end = 2024
+# Filter for admission years — fixed study window (2018–2024), PI-approved.
+# Single source of truth: pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END.
+year_start = STUDY_YEAR_START
+year_end = STUDY_YEAR_END
 year_mask = pd.Series(True, index=adult_encounters.index)
 if year_start is not None:
     year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year >= year_start)
@@ -1919,6 +1916,31 @@ print(f"   Records with ICU LOS: {outcomes_df['icu_los_days'].notna().sum():,}")
 print(f"   Records with Hospital LOS: {outcomes_df['hosp_los_days'].notna().sum():,}")
 print(f"   In-hospital mortality rate: {outcomes_df['in_hosp_death'].mean()*100:.1f}%")
 print(f"   30-day mortality rate: {outcomes_df['death_30d'].mean()*100:.1f}%")
+
+# ── Diagnostic: CRRT encounter_blocks by CRRT-initiation year (window 2018–2024) ──
+_by_year = (
+    outcomes_df[['encounter_block']]
+    .merge(crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
+           on='encounter_block', how='left')
+    .assign(init_year=lambda d: d['crrt_initiation_time'].dt.year)
+    .dropna(subset=['init_year'])
+    .astype({'init_year': 'int'})
+    .groupby('init_year')['encounter_block'].nunique()
+    .reindex(range(STUDY_YEAR_START, STUDY_YEAR_END + 1), fill_value=0)
+    .rename_axis('init_year').reset_index(name='n_encounter_blocks')
+)
+_by_year.to_csv(f'{OUT}/final/diagnostics/{SITE_NAME}_crrt_by_year.csv', index=False)
+print(f"\n   CRRT encounter_blocks by initiation year → output/final/diagnostics/{SITE_NAME}_crrt_by_year.csv")
+print(_by_year.to_string(index=False))
+_figy, _axy = plt.subplots(figsize=(7, 4))
+_axy.bar(_by_year['init_year'].astype(str), _by_year['n_encounter_blocks'], color='#4C78A8')
+for _i, _v in enumerate(_by_year['n_encounter_blocks']):
+    _axy.text(_i, _v, str(int(_v)), ha='center', va='bottom', fontsize=9)
+_axy.set_xlabel('CRRT initiation year'); _axy.set_ylabel('CRRT encounter_blocks')
+_axy.set_title(f'{SITE_NAME}: CRRT encounter_blocks by initiation year')
+_figy.tight_layout()
+_figy.savefig(f'{OUT}/final/diagnostics/graphs/{SITE_NAME}_crrt_by_year.png', dpi=150, bbox_inches='tight')
+plt.close(_figy)
 
 # Display summary statistics
 print("\n" + "="*60)

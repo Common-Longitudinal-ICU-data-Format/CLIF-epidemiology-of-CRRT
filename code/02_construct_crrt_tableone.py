@@ -135,23 +135,11 @@ outcomes_df = outcomes_df.merge(
     how="left",
 )
 
-# Redefine in-hospital mortality within this script:
-#   died = discharge_category == 'expired' or 'hospice'
-#   If expired but no death_dttm, use last_vital_dttm as proxy for timing
-#   Cap: deaths > 90 days after CRRT initiation are excluded
-old_deaths = int(outcomes_df["in_hosp_death"].sum())
-mask_expired = outcomes_df["discharge_category"].isin(["expired", "hospice"])
-mask_no_death_dttm = mask_expired & outcomes_df["death_dttm"].isna()
-outcomes_df.loc[mask_no_death_dttm, "death_dttm"] = outcomes_df.loc[mask_no_death_dttm, "last_vital_dttm"]
-outcomes_df["in_hosp_death"] = mask_expired.astype(int)
-
-# 90-day cap: if death occurred > 90 days after CRRT initiation, exclude
-death_gap = (outcomes_df["death_dttm"] - outcomes_df["crrt_initiation_time"]).dt.total_seconds() / 86400
-mask_beyond_90d = death_gap > 90
-outcomes_df.loc[mask_beyond_90d, "in_hosp_death"] = 0
-new_deaths = int(outcomes_df["in_hosp_death"].sum())
-capped = int(mask_beyond_90d.sum())
-print(f"  Mortality redefined: {old_deaths} → {new_deaths} in-hospital deaths ({capped} capped at 90d)")
+# In-hospital mortality (in_hosp_death) is now defined canonically upstream in
+# 00_cohort.py — disposition-based (expired/hospice), capped at 90 days post-CRRT.
+# outcomes_df already carries that flag; no recompute here (removes the old
+# 00-vs-02 split so every deliverable reports the same number).
+print(f"  In-hospital deaths (canonical, from 00_cohort): {int(outcomes_df['in_hosp_death'].sum())}")
 
 
 # ===================================================================

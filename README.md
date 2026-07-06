@@ -33,7 +33,7 @@ This is a **descriptive-led CLIF-value study**: the headline is CRRT descriptive
 | **clif_medication_admin_continuous** | `hospitalization_id`, `admin_dttm`, `med_name`, `med_category`, `med_dose`, `med_dose_unit` | norepinephrine, epinephrine, phenylephrine, vasopressin, dopamine, angiotensin, dobutamine, milrinone, isoproterenol |
 | **clif_medication_admin_intermittent** | `hospitalization_id`, `admin_dttm`, `med_category` | - |
 | **clif_respiratory_support** | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `peep_set`, `resp_rate_set`, `tidal_volume_set` | - |
-| **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm` (+ settings columns if `has_crrt_settings=true`) | - |
+| **clif_crrt_therapy** | `hospitalization_id`, `recorded_dttm`, `crrt_mode_category`, `blood_flow_rate`, `dialysate_flow_rate`, `pre_/post_filter_replacement_fluid_rate`, `ultrafiltration_out` | - |
 | **clif_hospital_diagnosis** | `hospitalization_id`, `diagnosis_code`, `present_on_admission` | - |
 | **clif_microbiology_culture** | `hospitalization_id`, `collected_dttm`, `result_category` | *(optional)* used for the sepsis (ASE) flag in Table 1; if absent the pipeline sets the sepsis flag to NA and continues |
 
@@ -134,9 +134,8 @@ Edit `config/config.json` (copied from `config/config_template.json`):
     "file_type": "parquet",
     "timezone": "US/Central",
     "project_root": "/path/to/CLIF-epidemiology-of-CRRT",
-    "has_crrt_settings": true,
-    "admission_year_start": 2018,
-    "admission_year_end": null
+    "output_dir": "output",
+    "external_dev_site": false
 }
 ```
 
@@ -147,14 +146,12 @@ Edit `config/config.json` (copied from `config/config_template.json`):
 | `file_type` | File format of CLIF tables: `"parquet"`, `"csv"`, or `"fst"` |
 | `timezone` | Timezone for your data (e.g., `"US/Central"`, `"US/Eastern"`) |
 | `project_root` | Absolute path to this repository's root directory |
-| `has_crrt_settings` | Set to `true` if your `clif_crrt_therapy` table includes flow rate and mode columns. Set to `false` if it only has `hospitalization_id` and `recorded_dttm`. |
-| `admission_year_start` | (Optional) Filter to admissions on or after this year |
-| `admission_year_end` | (Optional) Filter to admissions before this year. `null` for no upper bound. |
+| `output_dir` | (Optional, default `"output"`) Output directory name — leave as `"output"` for a primary site. |
+| `external_dev_site` | (Optional, default `false`) Set `true` only for a non-primary development site (e.g., MIMIC); it must also set a distinct `output_dir` so it doesn't overwrite the primary site's outputs. |
 
-### `has_crrt_settings` Details
-
-- **`true`** (default): Your CRRT table has `crrt_mode_category`, `blood_flow_rate`, `dialysate_flow_rate`, `pre_filter_replacement_fluid_rate`, `post_filter_replacement_fluid_rate`, `ultrafiltration_out`. The pipeline will compute CRRT dose, generate dose visualizations, and include per-mode statistics in Table 1.
-- **`false`**: Your CRRT table only has `hospitalization_id` and `recorded_dttm`. The pipeline will skip dose calculations, dose visualizations, and CRRT settings rows in Table 1. CRRT initiation is defined as the first `crrt_therapy` record.
+> **Study window:** the admission window is fixed at **2018–2024** for all sites (defined in `pipeline_helpers.STUDY_YEAR_START` / `STUDY_YEAR_END`) — no longer a config option.
+>
+> **CRRT settings required:** every site's `clif_crrt_therapy` must include mode + flow-rate columns (`crrt_mode_category`, `blood_flow_rate`, `dialysate_flow_rate`, `pre_/post_filter_replacement_fluid_rate`, `ultrafiltration_out`). The pipeline computes CRRT dose, dose figures, and per-mode Table 1 stats from these.
 
 ## Pipeline Steps
 
@@ -194,7 +191,7 @@ Computes the per-site standardized mortality ratio (SMR = observed / case-mix-ex
 **Outputs:** `output/final/crrt_epi/{site}_smr.csv`, `{site}_smr_calibration.csv`
 
 #### Step 06: Low-Dose Characterization (`06_low_dose_characterization.py`)
-Descriptive characterization of the very-low-dose CRRT subcohort (delivered dose 10–15 mL/kg/hr): dose-band tally + very-low-vs-rest baseline comparison. Requires `has_crrt_settings=true`.
+Descriptive characterization of the very-low-dose CRRT subcohort (delivered dose 10–15 mL/kg/hr): dose-band tally + very-low-vs-rest baseline comparison.
 
 **Outputs:** `output/final/low_dose/{site}_low_dose_{counts,long,table}.csv`
 

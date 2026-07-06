@@ -86,6 +86,13 @@ echo.
 :: Leaving it unset makes the pipeline use the same library as a manual Rscript run.
 
 set R_FAILED=
+where Rscript >nul 2>nul
+if errorlevel 1 (
+    echo   Rscript not found on PATH -- the R ^(causal^) steps did NOT run.
+    echo   Install R 4.x with Rscript on PATH, then run the R files manually ^(see summary below^).
+    set "R_FAILED=05_PSM_IPTW_CRRT_dose.R 05b_dose_response_analysis.R"
+    goto :after_r
+)
 for %%S in (
     05_PSM_IPTW_CRRT_dose.R
     05b_dose_response_analysis.R
@@ -100,6 +107,7 @@ for %%S in (
     )
     echo.
 )
+:after_r
 
 :done
 echo === Pipeline complete ===
@@ -108,8 +116,11 @@ echo   Results: output\final\
 
 if defined R_FAILED (
     echo.
-    echo === WARNING: Some R scripts failed ===
-    echo   Failed scripts:%R_FAILED%
-    echo   To re-run manually from the project root:
+    echo === The R ^(causal^) steps did not complete ===
+    echo   Run the R files manually from the project root:
     for %%F in (%R_FAILED%) do echo     Rscript --no-init-file code\%%F
+    echo.
+    echo   Tip ^(managed Windows^): if you see "Application Control has blocked this file",
+    echo   run  .\setup_r.ps1  once to install packages + unblock the DLLs, then retry.
+    echo   R outputs: output\final\psm_iptw\
 )

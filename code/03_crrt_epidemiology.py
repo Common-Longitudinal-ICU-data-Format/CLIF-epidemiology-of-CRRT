@@ -74,7 +74,7 @@ matplotlib.rcParams.update({
 
 from pipeline_helpers import (
     load_config, safe_load_clif_table, integrate_persisting_rate,
-    course_average_intensity,
+    course_average_intensity, STUDY_YEAR_START, STUDY_YEAR_END,
 )
 
 warnings.filterwarnings("ignore")
@@ -85,8 +85,8 @@ config = load_config()
 SITE_NAME = config["site_name"]
 TABLES_PATH = config["tables_path"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
-YEAR_START = config.get("admission_year_start", 2018)
-YEAR_END = config.get("admission_year_end", None)
+YEAR_START = STUDY_YEAR_START
+YEAR_END = STUDY_YEAR_END
 
 INTER = Path("../output/intermediate")
 OUT = Path("../output/final/crrt_epi")

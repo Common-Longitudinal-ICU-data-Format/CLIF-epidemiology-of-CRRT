@@ -91,22 +91,33 @@ if [ ${#R_STEPS[@]} -gt 0 ]; then
         module load R 2>/dev/null || true
     fi
 
-    echo "=== Causal inference (R) ==="
-    echo ""
-    for step in "${R_STEPS[@]}"; do
-        name=$(basename "$step" .R)
-        STEP_START=$SECONDS
-        echo "--- Running $name ---"
-        if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
-            elapsed=$(( SECONDS - STEP_START ))
-            echo "--- $name complete (${elapsed}s) ---"
-        else
-            elapsed=$(( SECONDS - STEP_START ))
-            echo "--- $name FAILED (${elapsed}s) ---"
-            R_FAILED+=("$step")
-        fi
+    if ! command -v Rscript &>/dev/null; then
+        echo "=== Causal inference (R) — NOT RUN ==="
+        echo "  Rscript was not found on PATH, so the R (causal) steps were skipped."
+        echo "  Install R 4.x (with Rscript on PATH), then run them manually from the project root:"
+        for step in "${R_STEPS[@]}"; do
+            echo "    Rscript --no-init-file code/$step"
+        done
         echo ""
-    done
+        R_FAILED=("${R_STEPS[@]}")
+    else
+        echo "=== Causal inference (R) ==="
+        echo ""
+        for step in "${R_STEPS[@]}"; do
+            name=$(basename "$step" .R)
+            STEP_START=$SECONDS
+            echo "--- Running $name ---"
+            if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
+                elapsed=$(( SECONDS - STEP_START ))
+                echo "--- $name complete (${elapsed}s) ---"
+            else
+                elapsed=$(( SECONDS - STEP_START ))
+                echo "--- $name FAILED (${elapsed}s) ---"
+                R_FAILED+=("$step")
+            fi
+            echo ""
+        done
+    fi
 fi
 
 total_elapsed=$(( SECONDS - PIPELINE_START ))

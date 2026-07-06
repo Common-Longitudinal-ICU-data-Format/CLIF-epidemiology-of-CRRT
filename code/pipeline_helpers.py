@@ -41,13 +41,17 @@ _PIPELINE_ORDER = (
 
 _VALID_FILE_TYPES = {"parquet", "csv", "fst"}
 
+# Fixed study window across all sites (PI-approved 2018–2024). Single source of
+# truth — imported by 00_cohort.py (cohort filter) and 03 (denominator filter).
+STUDY_YEAR_START = 2018
+STUDY_YEAR_END = 2024
+
 _REQUIRED_CONFIG_FIELDS = {
     "site_name": str,
     "tables_path": str,
     "file_type": str,
     "timezone": str,
     "project_root": str,
-    "has_crrt_settings": bool,
 }
 
 
@@ -87,18 +91,6 @@ def validate_config(config: dict) -> dict:
             f"Config field 'file_type' must be one of {sorted(_VALID_FILE_TYPES)}, "
             f"got '{config['file_type']}'."
         )
-
-    # --- Optional fields with defaults ---
-    config.setdefault("admission_year_start", 2018)
-    config.setdefault("admission_year_end", None)
-
-    for field in ("admission_year_start", "admission_year_end"):
-        val = config[field]
-        if val is not None and not isinstance(val, int):
-            raise TypeError(
-                f"Config field '{field}' must be an integer or null, "
-                f"got {type(val).__name__}."
-            )
 
     # --- Output isolation (optional) ---
     # output_dir lets an external development site (e.g. MIMIC) run the full

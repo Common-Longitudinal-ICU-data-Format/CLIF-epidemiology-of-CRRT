@@ -4,7 +4,6 @@
     "file_type": "parquet",
     "timezone": "US/Central",
     "project_root": "/path/to/CLIF-epidemiology-of-CRRT",
-    "has_crrt_settings": true,
     "output_dir": "output",
     "external_dev_site": false
 }
