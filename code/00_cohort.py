@@ -1373,8 +1373,11 @@ aki_diagnoses['diagnosis_code'].value_counts()
 # In[41]:
 
 
-# Filter ADT data to only include hospitalizations in all_ids
-adt_final_stitched = adt_stitched[adt_stitched['hospitalization_id'].isin(cohort_df['hospitalization_id'])].copy()
+# Filter ADT to the cohort at ENCOUNTER_BLOCK grain (not hospitalization_id): a
+# stitched block's ICU stay may live in a sibling hospitalization, so the ICU
+# check must see the whole block — otherwise stitched episodes are wrongly
+# flagged "no ICU stay" (matches the encounter_block grain used everywhere else).
+adt_final_stitched = adt_stitched[adt_stitched['encounter_block'].isin(cohort_df['encounter_block'])].copy()
 adt_final_stitched = adt_final_stitched.sort_values(by=['encounter_block', 'in_dttm'])
 desired_order = ['hospitalization_id', 'encounter_block', 'hospital_id', 'in_dttm', 'out_dttm']
 remaining_cols = [col for col in adt_final_stitched.columns if col not in desired_order]
