@@ -1406,6 +1406,49 @@ crrt_non_icu_df = crrt_non_icu_df[desired_order + remaining_cols]
 adt_df_non_icu_hosps = adt_stitched[adt_stitched['encounter_block'].isin(non_icu_hosps)]
 adt_df_non_icu_hosps.to_csv(f'{OUT}/intermediate/adt_df_non_icu_hosps.csv', index=False)
 
+# ── Where was CRRT started? location_category at crrt_initiation_time ──
+# adt_final_stitched is cohort ADT at encounter_block grain; the start location is
+# the last ADT segment the patient entered at/before CRRT initiation. Saved per
+# encounter (reusable) + a diagnostic summary for the overall cohort and the
+# no-ICU subgroup.
+_loc = adt_final_stitched.merge(
+    crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
+    on='encounter_block', how='inner')
+_before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['encounter_block', 'in_dttm'])
+crrt_start_location = (
+    crrt_initiation[['encounter_block']].drop_duplicates()
+    .merge(_before.groupby('encounter_block').tail(1)[['encounter_block', 'location_category']],
+           on='encounter_block', how='left')
+    .rename(columns={'location_category': 'crrt_start_location'}))
+crrt_start_location['crrt_start_location'] = crrt_start_location['crrt_start_location'].fillna('unknown')
+crrt_start_location['no_icu_group'] = crrt_start_location['encounter_block'].isin(non_icu_hosps)
+crrt_start_location.to_parquet(f'{OUT}/intermediate/crrt_start_location.parquet', index=False)
+
+def _crrt_start_summary(df, label):
+    out = df['crrt_start_location'].value_counts().rename_axis('crrt_start_location').reset_index(name='n')
+    out['pct'] = (out['n'] / max(len(df), 1) * 100).round(1)
+    out.insert(0, 'group', label)
+    return out
+
+crrt_start_summary = pd.concat([
+    _crrt_start_summary(crrt_start_location, 'overall_cohort'),
+    _crrt_start_summary(crrt_start_location[crrt_start_location['no_icu_group']], 'no_icu'),
+], ignore_index=True)
+crrt_start_summary.to_csv(f'{OUT}/final/diagnostics/{SITE_NAME}_crrt_start_location.csv', index=False)
+print("\n=== Where CRRT was started (location_category at initiation) ===")
+print(crrt_start_summary.to_string(index=False))
+
+# Non-ICU CRRT diagnostics: location-trajectory Sankey + admission-timing histogram.
+# Reuses the in-memory ADT frame (no re-read); also runnable standalone via
+# `python code/sankey_non_icu.py <output_dir>`. Guarded so a plotting issue can't
+# fail the pipeline.
+if len(non_icu_hosps) > 0:
+    try:
+        from sankey_non_icu import generate as _generate_non_icu_figs
+        _generate_non_icu_figs(adt_df_non_icu_hosps, SITE_NAME, f"{OUT}/final/diagnostics/graphs")
+    except Exception as _e:
+        print(f"  (non-ICU Sankey/histogram skipped: {_e})")
+
 
 # # Strobe
 
