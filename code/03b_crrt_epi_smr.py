@@ -10,7 +10,7 @@ Every site runs this:
     CLIF_CONFIG=config/config_mimic.json uv run python 03b_crrt_epi_smr.py  # MIMIC
 
 COHORT (harmonized 2026-06-29): the SMR uses the SAME analytic CRRT cohort as
-Table 1 — `output[_root]/intermediate/tableone_analysis_df.parquet`, built by
+Table 1 — `output[_root]/intermediate_phi/tableone_analysis_df.parquet`, built by
 00->01->02 (adult >=18, continuous CRRT mode, ESRD-excluded, with required
 baseline data). There is **no minimum-CRRT-duration filter**: a mortality-
 standardization model must not exclude patients who died early in CRRT (that
@@ -19,10 +19,10 @@ equals the Table-1 N exactly. (Previously 03b re-derived a hospitalization-level
 cohort with a >=24h span filter; that drift from plan §4.2 is removed.)
 
 It (1) assembles the per-site SMR cohort (covariates + outcome) and writes
-output[_root]/smr/{SITE}_smr_cohort.parquet (gitignored, row-level), then (2) if
+output[_root]/intermediate_phi/{SITE}_smr_cohort.parquet (row-level PHI), then (2) if
 the frozen reference model config/smr_reference_model.json is present, applies it
 to compute observed/expected, the SMR with exact-Poisson (Byar) 95% CI, and AUC,
-and writes the per-site exchange CSV output[_root]/final/crrt_epi/{SITE}_smr.csv
+and writes the per-site exchange CSV output[_root]/final_no_phi/crrt_epi/{SITE}_smr.csv
 (which 07/08 pool into the anonymized cross-site forest + dashboard).
 
 Covariates (5, parsimonious linear): age, female, SOFA total, baseline lactate,
@@ -57,10 +57,9 @@ print(f"=== 03b CRRT SMR | site={SITE} ===")
 print(f"    tables_path: {TABLES_PATH}")
 
 OUTPUT_ROOT = get_output_root(config)            # honors config['output_dir']
-INTER = OUTPUT_ROOT / "intermediate"
-OUT = OUTPUT_ROOT / "smr"
-OUT.mkdir(parents=True, exist_ok=True)
-EPI_OUT = OUTPUT_ROOT / "final" / "crrt_epi"
+INTER = OUTPUT_ROOT / "intermediate_phi"
+INTER.mkdir(parents=True, exist_ok=True)
+EPI_OUT = OUTPUT_ROOT / "final_no_phi" / "crrt_epi"
 EPI_OUT.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = Path("../config/smr_reference_model.json")
 
@@ -219,7 +218,7 @@ cohort = base.merge(cci, on="encounter_block", how="left")
 # Blocks with no diagnosis records -> cci_score NA; left to the frozen-median
 # imputation in the apply step (consistent with how other missing covariates
 # are handled, and with the reference fitter).
-cohort_path = OUT / f"{SITE}_smr_cohort.parquet"
+cohort_path = INTER / f"{SITE}_smr_cohort.parquet"
 cohort.to_parquet(cohort_path, index=False)
 print(f"\nWROTE {cohort_path}  (n={len(cohort):,}, 30d mort {pct(int(cohort['died_30d'].sum()), len(cohort))})")
 
@@ -227,7 +226,7 @@ print(f"\nWROTE {cohort_path}  (n={len(cohort):,}, 30d mort {pct(int(cohort['die
 if not MODEL_PATH.exists():
     print(f"\nNo reference model at {MODEL_PATH}. Cohort built only.")
     print("  Run smr_fit_reference.py on the development site (MIMIC) to create it,")
-    print("  then re-run 03b at each site to emit output/final/crrt_epi/{SITE}_smr.csv.")
+    print("  then re-run 03b at each site to emit output/final_no_phi/crrt_epi/{SITE}_smr.csv.")
 else:
     from sklearn.metrics import roc_auc_score
     model = json.loads(MODEL_PATH.read_text())

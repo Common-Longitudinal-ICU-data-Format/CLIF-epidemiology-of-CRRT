@@ -69,7 +69,7 @@ if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final/psm_iptw"
+output_dir <- "output/final_no_phi/psm_iptw"
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")
@@ -122,7 +122,7 @@ cat("Site:", SITE_NAME, "\n")
 cat("Timezone:", config$timezone, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate/causal_df.parquet"
+data_path <- "output/intermediate_phi/causal_df.parquet"
 if (!file.exists(data_path)) {
   stop("File '", data_path, "' not found.")
 }

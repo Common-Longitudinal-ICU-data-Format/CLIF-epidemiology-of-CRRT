@@ -10,8 +10,8 @@
 #   Section 4: Combined three-panel figure
 #   Section 5: Target trial emulation specification table
 #
-# Input:  output/intermediate/causal_df.parquet
-# Output: output/final/psm_iptw/{SITE}_dose_*.{csv,png,pdf}
+# Input:  output/intermediate_phi/causal_df.parquet
+# Output: output/final_no_phi/psm_iptw/{SITE}_dose_*.{csv,png,pdf}
 #
 # Usage:
 #   cd /path/to/CLIF-epidemiology-of-CRRT
@@ -66,7 +66,7 @@ if (length(new_packages)) {
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Output directory ----
-output_dir <- "output/final/psm_iptw"
+output_dir <- "output/final_no_phi/psm_iptw"
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
 ## ---- D. Load configuration ----
@@ -75,7 +75,7 @@ SITE_NAME <- config$site_name
 cat("Site:", SITE_NAME, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate/causal_df.parquet"
+data_path <- "output/intermediate_phi/causal_df.parquet"
 if (!file.exists(data_path)) stop("File not found: ", data_path)
 df <- arrow::read_parquet(data_path)
 cat("Loaded:", nrow(df), "rows x", ncol(df), "columns\n")
@@ -766,7 +766,7 @@ cat(paste(rep("=", 80), collapse = ""), "\n\n")
 # analysis re-fits the linear dose model on the full descriptive cohort.
 
 # Load the full cohort (N=2,136) from tableone_analysis_df
-tbl_path <- "output/intermediate/tableone_analysis_df.parquet"
+tbl_path <- "output/intermediate_phi/tableone_analysis_df.parquet"
 if (!file.exists(tbl_path)) {
   cat("  SKIPPED: tableone_analysis_df.parquet not found.\n\n")
 } else {

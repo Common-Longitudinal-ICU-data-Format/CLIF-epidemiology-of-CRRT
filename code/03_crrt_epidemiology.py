@@ -17,14 +17,14 @@ Products:
      Stratified: overall, among ventilated (any IMV), among vasopressor-exposed,
      and by ICU location_type (subtype). This is a UTILIZATION rate and is
      deliberately distinct from the post-exclusion analytic cohort.
-        -> output/final/crrt_epi/{SITE}_crrt_incidence.csv
+        -> output/final_no_phi/crrt_epi/{SITE}_crrt_incidence.csv
 
   B. PRACTICE VARIATION + TIER-A QUALITY (analytic CRRT cohort)
      From the analytic cohort (index_crrt_df + tableone_analysis_df): CRRT dose
      vs the <20 / 20-30 / >30 mL/kg/hr bands, modality mix, blood flow,
      time-to-initiation, acid-base correction, duration, mortality. (Net UF is
      summarized over the whole course in D, not from the initiation snapshot.)
-        -> output/final/crrt_epi/{SITE}_crrt_practice_quality.csv  (long format)
+        -> output/final_no_phi/crrt_epi/{SITE}_crrt_practice_quality.csv  (long format)
 
   C. DISTRIBUTION FIGURES (analytic cohort): incidence by context / ICU subtype,
      and the CRRT dose distribution (<20 / 20-30 / >30 bands).
@@ -88,8 +88,8 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 YEAR_START = STUDY_YEAR_START
 YEAR_END = STUDY_YEAR_END
 
-INTER = Path("../output/intermediate")
-OUT = Path("../output/final/crrt_epi")
+INTER = Path("../output/intermediate_phi")
+OUT = Path("../output/final_no_phi/crrt_epi")
 OUT.mkdir(parents=True, exist_ok=True)
 GRAPHS = OUT / "graphs"
 GRAPHS.mkdir(parents=True, exist_ok=True)
@@ -309,7 +309,7 @@ def build_practice_quality() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ── Part C: per-site figures (output/final/crrt_epi/graphs/) ────────────────
+# ── Part C: per-site figures (output/final_no_phi/crrt_epi/graphs/) ────────────────
 def _pretty_icu(stratum: str) -> str:
     """ICU subtype stratum label -> human-readable (medical_icu -> Medical ICU)."""
     s = stratum.replace("ICU subtype: ", "").replace("_", " ").strip().title()

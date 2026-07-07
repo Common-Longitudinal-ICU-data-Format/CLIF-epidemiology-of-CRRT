@@ -2,10 +2,10 @@
 Construct the CRRT analytic cohort DataFrame and Table 1.
 
 Outputs:
-  - output/intermediate/tableone_analysis_df.parquet - per-encounter analytic
+  - output/intermediate_phi/tableone_analysis_df.parquet - per-encounter analytic
     cohort: baseline characteristics at CRRT initiation (-12h to +3h), outcomes,
     SOFA at initiation, sepsis flag, and post-CRRT window labs (consumed by 03).
-  - output/final/{SITE}_table1_crrt.{csv,html} - Table 1 of baseline
+  - output/final_no_phi/{SITE}_table1_crrt.{csv,html} - Table 1 of baseline
     characteristics stratified by the initial (median-first-3h) CRRT dose band
     (<20 / 20-30 / >30 mL/kg/hr; the 20-30 band brackets the KDIGO target), in
     gtsummary shape consumed by the dashboard (07) and manuscript builder (08).
@@ -47,8 +47,8 @@ from sofa_calculator import compute_sofa_polars  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
-INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate"
-FINAL_DIR = OUTPUT_ROOT / "final" / "crrt_epi"
+INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
+FINAL_DIR = OUTPUT_ROOT / "final_no_phi" / "crrt_epi"
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_NAME = config["site_name"]

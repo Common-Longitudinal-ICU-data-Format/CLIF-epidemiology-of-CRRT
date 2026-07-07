@@ -42,8 +42,8 @@ print(f"File Type: {file_type}")
 PROJECT_ROOT = Path(config['project_root'])
 UTILS_DIR = PROJECT_ROOT / "utils"
 OUTPUT_DIR = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
-OUTPUT_FINAL_DIR = OUTPUT_DIR / "final"
-OUTPUT_INTERMEDIATE_DIR = OUTPUT_DIR / "intermediate"
+OUTPUT_FINAL_DIR = OUTPUT_DIR / "final_no_phi"
+OUTPUT_INTERMEDIATE_DIR = OUTPUT_DIR / "intermediate_phi"
 
 # Load config - fix path to work from any directory
 script_dir = Path(__file__).parent

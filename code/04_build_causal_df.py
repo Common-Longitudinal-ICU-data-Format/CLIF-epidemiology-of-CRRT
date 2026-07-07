@@ -37,8 +37,8 @@ config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
-INTERMEDIATE_DIR = project_root / "output" / "intermediate"
-OUTPUT_DIR = project_root / "output" / "intermediate"
+INTERMEDIATE_DIR = project_root / "output" / "intermediate_phi"
+OUTPUT_DIR = project_root / "output" / "intermediate_phi"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TABLES_PATH = config["tables_path"]
@@ -1041,7 +1041,7 @@ print(f"\nSaved patient-level missingness: {diag_path}")
 print(f"  Patients with any missing covariate: {(diag_missing['total_missing'] > 0).sum()}/{len(diag_missing)}")
 
 # --- Aggregate missingness summary (safe to share) — internal QC, lives under diagnostics/ ---
-DIAG_DIR = project_root / "output" / "final" / "diagnostics"
+DIAG_DIR = project_root / "output" / "final_no_phi" / "diagnostics"
 DIAG_GRAPHS = DIAG_DIR / "graphs"
 DIAG_GRAPHS.mkdir(parents=True, exist_ok=True)
 
@@ -1118,7 +1118,7 @@ print("\nStep 11: Generating causal CONSORT flow diagram …")
 from matplotlib.patches import FancyBboxPatch
 
 # --- Load STROBE counts from descriptive cohort (step 00) ---
-strobe = pd.read_csv(project_root / "output" / "final" / "crrt_epi" / f"{SITE}_strobe_counts.csv")
+strobe = pd.read_csv(project_root / "output" / "final_no_phi" / "crrt_epi" / f"{SITE}_strobe_counts.csv")
 strobe_dict = dict(zip(strobe["counter"], strobe["value"]))
 
 n_total_hosp = int(strobe_dict.get("1b_after_stitching", strobe_dict.get("1_adult_hospitalizations", 0)))
@@ -1231,7 +1231,7 @@ for i, row in enumerate(rows):
                     xytext=(x_main_center, arrow_vertical_center),
                     arrowprops=arrow_props, annotation_clip=False)
 
-CONSORT_DIR = project_root / "output" / "final" / "psm_iptw"
+CONSORT_DIR = project_root / "output" / "final_no_phi" / "psm_iptw"
 CONSORT_DIR.mkdir(parents=True, exist_ok=True)
 out_png = CONSORT_DIR / f"{SITE}_causal_consort_diagram.png"
 out_pdf = CONSORT_DIR / f"{SITE}_causal_consort_diagram.pdf"

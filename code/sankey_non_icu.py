@@ -1,7 +1,7 @@
 """
 Sankey of ADT location trajectories for the CRRT encounter_blocks flagged as
 "no ICU stay" (00_cohort.py). Reads the pipeline's saved
-`{output}/intermediate/adt_df_non_icu_hosps.csv` — aggregate location flows only.
+`{output}/intermediate_phi/adt_df_non_icu_hosps.csv` — aggregate location flows only.
 
 Usage:  uv run python code/sankey_non_icu.py output_nu    # or output_ucmc
 """
@@ -233,13 +233,13 @@ def main():
     OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output")
     if not OUT.is_absolute():
         OUT = Path(__file__).resolve().parent.parent / OUT
-    logs = sorted(OUT.glob("final/*_pipeline_*.log"))
+    logs = sorted(OUT.glob("final_no_phi/*_pipeline_*.log"))
     site = logs[-1].name.split("_pipeline_")[0] if logs else OUT.name.replace("output_", "").upper()
-    f = OUT / "intermediate" / "adt_df_non_icu_hosps.csv"
+    f = OUT / "intermediate_phi" / "adt_df_non_icu_hosps.csv"
     if not f.exists():
         print(f"[{site}] {f} not found — no no-ICU CRRT encounters to plot.")
         return
-    generate(pd.read_csv(f), site, OUT / "final" / "diagnostics" / "graphs")
+    generate(pd.read_csv(f), site, OUT / "final_no_phi" / "diagnostics" / "graphs")
 
 
 if __name__ == "__main__":
