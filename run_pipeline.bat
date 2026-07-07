@@ -4,6 +4,21 @@ setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set SCRIPT_DIR=%~dp0
 
+:: ── Auto-log (parity with run_pipeline.sh): on first entry, re-run through
+::    PowerShell Tee-Object so output goes to BOTH the console AND a timestamped
+::    log file (wmic-free). The "__teed" sentinel prevents infinite recursion. ──
+if /i not "%~1"=="__teed" (
+    if not exist "%SCRIPT_DIR%output\final_no_phi" mkdir "%SCRIPT_DIR%output\final_no_phi"
+    set "SITE_NAME=unknown"
+    for /f "usebackq delims=" %%i in (`uv run python -c "import json; print(json.load(open(r'%SCRIPT_DIR%config\config.json'))['site_name'])" 2^>nul`) do set "SITE_NAME=%%i"
+    for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%t"
+    set "LOG=%SCRIPT_DIR%output\final_no_phi\!SITE_NAME!_pipeline_!TS!.log"
+    echo === Logging to: !LOG! ===
+    powershell -NoProfile -Command "& '%~f0' __teed %* 2>&1 | Tee-Object -FilePath '!LOG!'"
+    exit /b !errorlevel!
+)
+shift
+
 :: ── Mode parsing: --descriptive-only runs the descriptive + SMR deliverable
 ::    (00 01 02 03 03b 06) and skips the causal stack (04 + the R scripts). ──
 set DESCRIPTIVE_ONLY=false
@@ -36,7 +51,6 @@ if "%DESCRIPTIVE_ONLY%"=="true" (
 ) else (
     echo   Mode: FULL ^(descriptive + causal data prep + R stack^)
 )
-echo   Tip: to also save a log, run:  .\run_pipeline.bat 2^>^&1 ^| Tee-Object output\final\%SITE_NAME%_run.log
 echo.
 
 :: Scripts use relative paths like ..\config\config.json, so run from code\
@@ -80,8 +94,8 @@ echo === Causal inference (R) ===
 echo.
 
 :: NOTE: do NOT override R_LIBS_USER here. On modern Windows the default user
-:: library is %LOCALAPPDATA%\R\win-library, which is where install.packages/
-:: setup_r.ps1 put the packages. Forcing %USERPROFILE%\R\win-library points R
+:: library is %LOCALAPPDATA%\R\win-library, which is where install.packages
+:: puts the packages. Forcing %USERPROFILE%\R\win-library points R
 :: at an empty folder and every library() fails ("no package called ...").
 :: Leaving it unset makes the pipeline use the same library as a manual Rscript run.
 
@@ -89,7 +103,8 @@ set R_FAILED=
 where Rscript >nul 2>nul
 if errorlevel 1 (
     echo   Rscript not found on PATH -- the R ^(causal^) steps did NOT run.
-    echo   Install R 4.x with Rscript on PATH, then run the R files manually ^(see summary below^).
+    echo   This is expected when Python ^(uv^) and R live in different environments.
+    echo   Run the causal step manually in RStudio ^(see summary below^).
     set "R_FAILED=05_PSM_IPTW_CRRT_dose.R 05b_dose_response_analysis.R"
     goto :after_r
 )
@@ -112,15 +127,15 @@ for %%S in (
 :done
 echo === Pipeline complete ===
 echo   Finished: %date% %time%
-echo   Results: output\final\
+echo   Results: output\final_no_phi\
 
 if defined R_FAILED (
     echo.
     echo === The R ^(causal^) steps did not complete ===
-    echo   Run the R files manually from the project root:
-    for %%F in (%R_FAILED%) do echo     Rscript --no-init-file code\%%F
+    echo   Run them manually in RStudio ^(the scripts self-locate config.json^):
+    echo     1. Open this project folder in RStudio, then run:  renv::restore^(^)
+    echo     2. Open  code\05_PSM_IPTW_CRRT_dose.R  and click Source.
+    echo     3. Open  code\05b_dose_response_analysis.R  and click Source.
     echo.
-    echo   Tip ^(managed Windows^): if you see "Application Control has blocked this file",
-    echo   run  .\setup_r.ps1  once to install packages + unblock the DLLs, then retry.
-    echo   R outputs: output\final\psm_iptw\
+    echo   R outputs: output\final_no_phi\psm_iptw\
 )

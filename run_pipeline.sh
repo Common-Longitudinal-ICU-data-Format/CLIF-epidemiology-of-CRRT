@@ -25,7 +25,7 @@ for arg in "$@"; do
 done
 
 # Set up logging — capture all output to a timestamped log file + console
-LOG_DIR="$SCRIPT_DIR/output/final"
+LOG_DIR="$SCRIPT_DIR/output/final_no_phi"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SITE_NAME=$(python3 -c "import json; print(json.load(open('$SCRIPT_DIR/config/config.json'))['site_name'])" 2>/dev/null || echo "unknown")
@@ -94,10 +94,12 @@ if [ ${#R_STEPS[@]} -gt 0 ]; then
     if ! command -v Rscript &>/dev/null; then
         echo "=== Causal inference (R) — NOT RUN ==="
         echo "  Rscript was not found on PATH, so the R (causal) steps were skipped."
-        echo "  Install R 4.x (with Rscript on PATH), then run them manually from the project root:"
-        for step in "${R_STEPS[@]}"; do
-            echo "    Rscript --no-init-file code/$step"
-        done
+        echo "  This is expected when Python (uv) and R live in different environments."
+        echo "  Run the causal step manually in RStudio (it self-locates config.json):"
+        echo "    1. Open this project folder in RStudio, then run:  renv::restore()"
+        echo "    2. Open  code/05_PSM_IPTW_CRRT_dose.R  and click Source."
+        echo "    3. Open  code/05b_dose_response_analysis.R  and click Source."
+        echo "  Outputs land in  output/final_no_phi/psm_iptw/"
         echo ""
         R_FAILED=("${R_STEPS[@]}")
     else
@@ -127,7 +129,7 @@ total_sec=$(( total_elapsed % 60 ))
 echo "=== Pipeline complete ==="
 echo "  Finished: $(date)"
 echo "  Total time: ${total_min}m ${total_sec}s"
-echo "  Results: output/final/"
+echo "  Results: output/final_no_phi/"
 echo "  Log: $LOG_FILE"
 
 if [ ${#R_FAILED[@]} -gt 0 ]; then
@@ -138,15 +140,11 @@ if [ ${#R_FAILED[@]} -gt 0 ]; then
         echo "    - $f"
     done
     echo ""
-    echo "  To re-run manually from the project root directory:"
+    echo "  Re-run them manually in RStudio (the scripts self-locate config.json):"
+    echo "    1. Open this project folder in RStudio, then run:  renv::restore()"
+    echo "    2. Open  code/05_PSM_IPTW_CRRT_dose.R  and click Source."
+    echo "    3. Open  code/05b_dose_response_analysis.R  and click Source."
     echo ""
-    for f in "${R_FAILED[@]}"; do
-        echo "    Rscript --no-init-file code/$f"
-    done
-    echo ""
-    echo "  Required R scripts and their outputs:"
-    echo "    05_PSM_IPTW_CRRT_dose.R        -> output/final/psm_iptw/"
-    echo "    05b_dose_response_analysis.R    -> output/final/psm_iptw/ (dose-response)"
-    echo ""
+    echo "  Outputs land in  output/final_no_phi/psm_iptw/"
     echo "  Check the log for error details: $LOG_FILE"
 fi
