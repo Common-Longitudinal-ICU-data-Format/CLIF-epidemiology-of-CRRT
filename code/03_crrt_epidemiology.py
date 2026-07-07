@@ -617,6 +617,13 @@ def build_trajectories(w: pd.DataFrame) -> None:
     # Number-at-risk style context line shared across the "over time" figures:
     # proportion of the cohort still alive and on CRRT each day.
     census = _crrt_census(w)
+    # Federated exchange: export the per-day census (n alive-and-on-CRRT + the
+    # constant baseline denominator n_base) so 08 can pool a consortium
+    # number-at-risk line onto the pooled trajectory figures. pct is per-site;
+    # pooling recomputes it as (Sum n) / (Sum n_base) across sites.
+    if census is not None and not census.empty:
+        census.assign(n_base=w["encounter_block"].nunique()).to_csv(
+            GRAPHS / f"{SITE_NAME}_crrt_census.csv", index=False)
 
     # (D1) CRRT dose over time
     if HAS_CRRT_SETTINGS and "crrt_mode_category" in w.columns:
