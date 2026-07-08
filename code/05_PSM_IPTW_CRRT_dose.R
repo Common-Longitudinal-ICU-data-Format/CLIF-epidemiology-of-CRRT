@@ -837,21 +837,21 @@ pretty_names_loveplot <- c(
 )
 
 ## ---- B. Love Plot (SMD + variance ratio) ----
-plot_loveplot_psm <- love.plot(
-  m.out,
-  stat = c("m", "v"),
-  grid = TRUE,
-  var.names = pretty_names_loveplot,
-  title = "Covariate Balance: PSM",
-  threshold = c(m = .25, v = 1.25)
-)
+lp_m <- love.plot(m.out, stat = "mean.diffs",
+                  var.names = pretty_names_loveplot,
+                  threshold = c(m = .25),
+                  title = "Covariate Balance: PSM (SMD)", grid = TRUE)
 
-grid::grid.draw(plot_loveplot_psm)
+lp_v <- love.plot(m.out, stat = "variance.ratios",
+                  var.names = pretty_names_loveplot,
+                  threshold = c(v = 1.25),
+                  title = "Covariate Balance: PSM (Variance Ratio)", grid = TRUE)
 
-png(file.path(output_dir, paste0(SITE_NAME, "_psm_loveplot.png")),
-    width = 8, height = 7, units = "in", res = 300)
-grid::grid.draw(plot_loveplot_psm)
-dev.off()
+plot_loveplot_psm <- patchwork::wrap_plots(lp_m, lp_v, ncol = 2)
+
+print(plot_loveplot_psm)
+ggsave(file.path(output_dir, paste0(SITE_NAME, "_psm_loveplot.png")),
+       plot_loveplot_psm, width = 10, height = 7, dpi = 300)
 
 cat("Saved Love plot for PSM as PNG\n")
 
@@ -1280,35 +1280,29 @@ cat("Saved CIF for discharge as PNG\n")
 set.seed(42)
 
 # Make SL copy of df_tte_bin to avoid overwriting the PSM path
-df_tte_sl <- df_tte_bin
+df_tte_sl <- df_tte_bin %>%
+  mutate(sex_category = dplyr::case_when(
+    tolower(as.character(sex_category)) %in% c("male","female") ~
+      tolower(as.character(sex_category)),
+    TRUE ~ NA_character_)) %>%
+  tidyr::drop_na(sex_category) %>%
+  droplevels()
+ref_label <- paste0("<", dose_cutoff)
+df_tte_sl$crrt_high <- relevel(df_tte_sl$crrt_high, ref = ref_label)
+
+df_tte_sl$crrt_high <- relevel(df_tte_sl$crrt_high, ref = ref_label)
+df_tte_sl$id <- seq_len(nrow(df_tte_sl))
 
 # IPTW using Super Learner for propensity score estimation
 # Falls back to GLM if SuperLearner fails (e.g., variable length errors at some sites)
+# refit propensity weights on the recoded data
+set.seed(42)
 w_sl <- tryCatch(
-  weightit(
-    psm_formula,
-    data = df_tte_sl,
-    method = "super",
-    SL.library = c("SL.glm", "SL.gam", "SL.randomForest"),
-    estimand = "ATE",
-    stabilize = TRUE
-  ),
-  error = function(e) {
-    cat("\n*** WARNING: SuperLearner failed:", conditionMessage(e), "\n")
-    cat("*** Falling back to GLM propensity scores\n\n")
-    weightit(
-      psm_formula,
-      data = df_tte_sl,
-      method = "glm",
-      estimand = "ATE",
-      stabilize = TRUE
-    )
-  }
-)
-cat("Propensity score method used:", ifelse(inherits(w_sl, "weightit"),
-    w_sl$method, "unknown"), "\n")
-
-# attach SL weights + PS
+  weightit(psm_formula, data = df_tte_sl, method = "super",
+           SL.library = c("SL.glm","SL.gam","SL.randomForest"),
+           estimand = "ATE", stabilize = TRUE),
+  error = function(e) weightit(psm_formula, data = df_tte_sl,
+                               method = "glm", estimand = "ATE", stabilize = TRUE))
 df_tte_sl$w  <- w_sl$weights
 df_tte_sl$ps <- w_sl$ps
 
@@ -1523,21 +1517,13 @@ cox_rhs <- paste(c("crrt_high", model_covariates), collapse = " + ")
 # Death cause-specific hazard (event code 2)
 fit_cs_death <- coxph(
   as.formula(paste("Surv(time_to_event_30d, outcome == 2) ~", cox_rhs)),
-  data = df_tte_sl,
-  weights = w,          # IPTW (ATE) from SuperLearner
-  robust = TRUE,
-  cluster = id
-)
+  data = df_tte_sl, weights = w, robust = TRUE, cluster = id)
 summary(fit_cs_death)
 
 # Discharge cause-specific hazard (event code 1)
 fit_cs_disch <- coxph(
   as.formula(paste("Surv(time_to_event_30d, outcome == 1) ~", cox_rhs)),
-  data = df_tte_sl,
-  weights = w,
-  robust = TRUE,
-  cluster = id
-)
+  data = df_tte_sl, weights = w, robust = TRUE, cluster = id)
 summary(fit_cs_disch)
 
 #### ---- II. Extract IPTW Cox cause-specific HR results (full covariates) ----
@@ -1584,6 +1570,8 @@ cat("Saved full IPTW Cause-Specific Cox results.\n")
 # residuals natively — we rely on csHR/SHR concordance + cs-Cox PH passing
 # as the FG PH check, per Austin, Lee, & Fine 2017).
 
+# verify the offending column is gone, then test PH
+stopifnot(!("sex_categoryunknown" %in% names(coef(fit_cs_disch))))
 zph_death_iptw <- cox.zph(fit_cs_death)
 zph_disch_iptw <- cox.zph(fit_cs_disch)
 
@@ -1672,6 +1660,15 @@ cat("\nPooling IPTW Cox models across", N_IMP, "MICE imputations...\n")
 # Reuse same SL weights (fitted on imputation 1) — standard pragmatic approach
 imp_sl_list <- lapply(seq_len(N_IMP), function(m) {
   d <- imp_list[[m]]
+  
+  # SAME sex de-separation as df_tte_sl, so row count matches w_sl (1266)
+  d <- d %>%
+    mutate(sex_category = dplyr::case_when(
+      tolower(as.character(sex_category)) %in% c("male","female") ~
+        tolower(as.character(sex_category)),
+      TRUE ~ NA_character_)) %>%
+    tidyr::drop_na(sex_category)
+  
   d$crrt_high <- ifelse(d$crrt_dose_median_3h >= dose_cutoff, 1L, 0L)
   d$crrt_high <- factor(d$crrt_high, levels = c(0, 1),
                         labels = c(paste0("<", dose_cutoff),

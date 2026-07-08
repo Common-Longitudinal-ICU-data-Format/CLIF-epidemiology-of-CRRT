@@ -97,6 +97,7 @@ copy config\config_template.json config\config.json
 
 :: 3. Install dependencies
 uv sync
+Rscript -e "renv::restore(prompt = FALSE)"
 
 :: 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
 .\run_pipeline.bat

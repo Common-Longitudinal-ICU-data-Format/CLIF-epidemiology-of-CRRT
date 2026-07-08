@@ -108,12 +108,16 @@ if errorlevel 1 (
     set "R_FAILED=05_PSM_IPTW_CRRT_dose.R 05b_dose_response_analysis.R"
     goto :after_r
 )
+:: R scripts self-locate their config; run from project root so .Rprofile's
+:: source("renv/activate.R") resolves (renv lives at root, not in code\).
+cd /d "%SCRIPT_DIR%"
+
 for %%S in (
     05_PSM_IPTW_CRRT_dose.R
     05b_dose_response_analysis.R
 ) do (
     echo --- Running %%~nS ---
-    Rscript --no-init-file "%SCRIPT_DIR%code\%%S"
+    Rscript "%SCRIPT_DIR%code\%%S"
     if errorlevel 1 (
         echo --- %%~nS FAILED ---
         set "R_FAILED=!R_FAILED! %%S"
