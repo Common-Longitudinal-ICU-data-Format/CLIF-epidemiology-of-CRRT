@@ -93,12 +93,6 @@ echo.
 echo === Causal inference (R) ===
 echo.
 
-:: NOTE: do NOT override R_LIBS_USER here. On modern Windows the default user
-:: library is %LOCALAPPDATA%\R\win-library, which is where install.packages
-:: puts the packages. Forcing %USERPROFILE%\R\win-library points R
-:: at an empty folder and every library() fails ("no package called ...").
-:: Leaving it unset makes the pipeline use the same library as a manual Rscript run.
-
 set R_FAILED=
 where Rscript >nul 2>nul
 if errorlevel 1 (
@@ -108,12 +102,19 @@ if errorlevel 1 (
     set "R_FAILED=05_PSM_IPTW_CRRT_dose.R 05b_dose_response_analysis.R"
     goto :after_r
 )
+:: Run R from the project root (NOT code\) so the project .Rprofile's
+:: source("renv/activate.R") resolves and the pinned renv library is used.
+:: Do NOT pass --no-init-file (it would skip .Rprofile and thus renv).
+cd /d "%SCRIPT_DIR%"
+echo --- Ensuring pinned R packages (renv::restore) ---
+Rscript -e "renv::restore(prompt = FALSE)"
+echo.
 for %%S in (
     05_PSM_IPTW_CRRT_dose.R
     05b_dose_response_analysis.R
 ) do (
     echo --- Running %%~nS ---
-    Rscript --no-init-file "%SCRIPT_DIR%code\%%S"
+    Rscript "%SCRIPT_DIR%code\%%S"
     if errorlevel 1 (
         echo --- %%~nS FAILED ---
         set "R_FAILED=!R_FAILED! %%S"

@@ -75,8 +75,9 @@ cd CLIF-epidemiology-of-CRRT
 cp config/config_template.json config/config.json
 # Edit config/config.json with your site settings (see Configuration below)
 
-# 3. Install dependencies
+# 3. Install dependencies (Python via uv, R via renv)
 uv sync
+Rscript -e "renv::restore(prompt = FALSE)"   # pinned R packages (skip if no R)
 
 # 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
 bash run_pipeline.sh
@@ -95,8 +96,9 @@ cd CLIF-epidemiology-of-CRRT
 copy config\config_template.json config\config.json
 :: Edit config\config.json with your site settings (see Configuration below)
 
-:: 3. Install dependencies
+:: 3. Install dependencies (Python via uv, R via renv)
 uv sync
+Rscript -e "renv::restore(prompt = FALSE)"   :: pinned R packages (skip if no R)
 
 :: 4. Run the full pipeline (descriptive + SMR 00-03b + 06, causal 04-05b)
 .\run_pipeline.bat
@@ -104,7 +106,7 @@ uv sync
 :: then code\05b_dose_response_analysis.R manually in RStudio.
 ```
 
-> **Note:** `run_pipeline.sh` runs all steps sequentially: Python scripts `00 01 02 03 03b 06 04` followed by R scripts `05 05b`. R scripts are invoked with `--no-init-file` to avoid conflicts with user `.Rprofile` settings; CRAN mirror defaults to `https://cloud.r-project.org` if not configured. Use `bash run_pipeline.sh --descriptive-only` to run just the descriptive + SMR deliverable (`00 01 02 03 03b 06`) and skip the causal R stack. The multi-site dashboard/manuscript scripts (`07`, `08`) are **coordinator-only** — run at the pooling site after collecting every site's `output/final_no_phi/`, not by individual sites.
+> **Note:** `run_pipeline.sh` runs all steps sequentially: Python scripts `00 01 02 03 03b 06 04` followed by R scripts `05 05b`. R scripts run from the project root so the project `.Rprofile` activates the pinned `renv` library (the pipeline runs `renv::restore()` first); CRAN mirror defaults to `https://cloud.r-project.org` if not configured. Use `bash run_pipeline.sh --descriptive-only` to run just the descriptive + SMR deliverable (`00 01 02 03 03b 06`) and skip the causal R stack. The multi-site dashboard/manuscript scripts (`07`, `08`) are **coordinator-only** — run at the pooling site after collecting every site's `output/final_no_phi/`, not by individual sites.
 
 ### R Packages (`renv`)
 

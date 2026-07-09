@@ -105,11 +105,18 @@ if [ ${#R_STEPS[@]} -gt 0 ]; then
     else
         echo "=== Causal inference (R) ==="
         echo ""
+        # Run R from the project root (NOT code/) so the project .Rprofile's
+        # source("renv/activate.R") resolves and the pinned renv library is used.
+        # Do NOT pass --no-init-file (it would skip .Rprofile and thus renv).
+        cd "$SCRIPT_DIR"
+        echo "--- Ensuring pinned R packages (renv::restore) ---"
+        Rscript -e 'renv::restore(prompt = FALSE)' || echo "  (renv::restore had issues — see above)"
+        echo ""
         for step in "${R_STEPS[@]}"; do
             name=$(basename "$step" .R)
             STEP_START=$SECONDS
             echo "--- Running $name ---"
-            if Rscript --no-init-file "$SCRIPT_DIR/code/$step"; then
+            if Rscript "$SCRIPT_DIR/code/$step"; then
                 elapsed=$(( SECONDS - STEP_START ))
                 echo "--- $name complete (${elapsed}s) ---"
             else

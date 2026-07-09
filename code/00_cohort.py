@@ -1013,13 +1013,16 @@ try:
     _hosp_pat = all_encounters[['hospitalization_id', 'patient_id']].drop_duplicates('hospitalization_id')
     _sex_map = _hosp_pat.merge(_pat_sex, on='patient_id', how='left')
     _sx = _sex_map['sex_category'].astype('string').str.strip().str.lower()
+    # Drop any sex that is not usable as a binary model covariate: missing AND
+    # non-male/female values ("unknown"/"other"). Otherwise these survive to 05
+    # as a `sex_categoryunknown` dummy that breaks the cause-specific Cox PH test.
     hosp_missing_sex = set(
-        _sex_map.loc[_sx.isna() | _sx.isin(['', 'nan', 'none']), 'hospitalization_id']
+        _sex_map.loc[_sx.isna() | ~_sx.isin(['male', 'female']), 'hospitalization_id']
     ) & cohort_hosp_ids
 except Exception as _e:  # patient table absent/renamed → skip, do not crash cohort
     print(f"   Warning: could not evaluate sex completeness ({_e}); skipping sex drop")
     hosp_missing_sex = set()
-print(f"Number of hospitalizations without recorded sex: {len(hosp_missing_sex)}")
+print(f"Number of hospitalizations without usable (male/female) sex: {len(hosp_missing_sex)}")
 strobe_counts['4_hospitalizations_missing_weight'] = len(hosp_without_weight)
 strobe_counts['4_hospitalizations_missing_sex'] = len(hosp_missing_sex)
 
