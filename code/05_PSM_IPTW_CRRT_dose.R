@@ -1000,23 +1000,33 @@ dr_formula <- as.formula(
 X_dr <- model.matrix(dr_formula, data = df_match)[, -1, drop = FALSE]
 colnames(X_dr) <- make.names(colnames(X_dr))  # SL.gam compatibility
 
-fg_death_psm_dr <- cmprsk::crr(
-  ftime   = df_match$time_to_event_30d,
-  fstatus = df_match$outcome,
-  cov1    = X_dr,
-  failcode = 2,
-  cencode  = 0
-)
+# At small / less-diverse sites the matched cohort can leave a covariate constant
+# or collinear (e.g. a rare CCI comorbidity that is all-zero after matching),
+# making X_dr rank-deficient — cmprsk::crr then fails with
+# "Lapack routine dgesv: system is exactly singular". Skip the doubly-robust
+# model in that case rather than crash the whole script: PSM matching + the
+# treatment-only Fine-Gray (fg_*_psm) and the IPTW models still estimate the
+# treatment effect. Clean sites are unaffected (the fits succeed as before).
+.fit_dr_crr <- function(failcode_val) tryCatch(
+  cmprsk::crr(ftime = df_match$time_to_event_30d, fstatus = df_match$outcome,
+              cov1 = X_dr, failcode = failcode_val, cencode = 0),
+  error = function(e) {
+    cat("  *** DR Fine-Gray fit failed:", conditionMessage(e), "\n"); NULL
+  })
 
-fg_disch_psm_dr <- cmprsk::crr(
-  ftime   = df_match$time_to_event_30d,
-  fstatus = df_match$outcome,
-  cov1    = X_dr,
-  failcode = 1,
-  cencode  = 0
-)
-summary(fg_death_psm_dr)
-summary(fg_disch_psm_dr)
+fg_death_psm_dr <- .fit_dr_crr(2)
+fg_disch_psm_dr <- .fit_dr_crr(1)
+dr_ok <- !is.null(fg_death_psm_dr) && !is.null(fg_disch_psm_dr)
+
+if (dr_ok) {
+  summary(fg_death_psm_dr)
+  summary(fg_disch_psm_dr)
+} else {
+  cat("\n  DR (doubly-robust) PSM Fine-Gray SKIPPED — singular design matrix in the",
+      "matched cohort (a covariate is constant/collinear after matching).\n",
+      "  Omitting fg_psm_dr_results + pooled PSM-FG outputs; treatment-only FG and",
+      "IPTW are unaffected.\n\n")
+}
 
 # Save doubly robust Fine Gray summary
 extract_fg <- function(fg_model, outcome_label) {
@@ -1034,17 +1044,21 @@ extract_fg <- function(fg_model, outcome_label) {
   )
 }
 
-fg_results <- bind_rows(
-  extract_fg(fg_death_psm_dr, "Death"),
-  extract_fg(fg_disch_psm_dr, "Discharge")
-)
-
-write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME, "_fg_psm_dr_results.csv")),
-          row.names = FALSE)
-cat("Saved Fine Gray DR model results\n")
+if (dr_ok) {
+  fg_results <- bind_rows(
+    extract_fg(fg_death_psm_dr, "Death"),
+    extract_fg(fg_disch_psm_dr, "Discharge")
+  )
+  write.csv(fg_results, file.path(output_dir, paste0(SITE_NAME, "_fg_psm_dr_results.csv")),
+            row.names = FALSE)
+  cat("Saved Fine Gray DR model results\n")
+} else {
+  cat("Skipped Fine Gray DR model results (DR model not estimable)\n")
+}
 
 ### ---- I-b. Rubin's Rules Pooled Fine-Gray Models ----
 
+if (dr_ok) {
 cat("\nPooling Fine-Gray DR models across", N_IMP, "MICE imputations...\n")
 
 # Use the same PSM matched set (from imputation 1) but substitute imputed
@@ -1119,6 +1133,13 @@ write.csv(pooled_fg_results,
           file.path(output_dir, paste0(SITE_NAME, "_fg_psm_pooled_results.csv")),
           row.names = FALSE)
 cat("Saved pooled Fine-Gray results CSV\n")
+} else {
+  pooled_fg_results <- data.frame(
+    model = character(), HR_type = character(), HR = numeric(),
+    HR_lower = numeric(), HR_upper = numeric(), se_log_hr = numeric(),
+    p_value = numeric(), fmi = numeric(), stringsAsFactors = FALSE)
+  cat("Skipped pooled PSM Fine-Gray (DR model not estimable)\n")
+}
 
 ### ---- II. CIF Curves ----
 
@@ -1934,8 +1955,11 @@ extract_fg_trt <- function(fg, label){
   )
 }
 
-fg_death_row  <- extract_fg_trt(fg_death_psm_dr,  "PSM FG - Death")
-fg_disch_row  <- extract_fg_trt(fg_disch_psm_dr,  "PSM FG - Discharge")
+# NULL when the DR model was skipped; bind_rows() drops NULL args, and the
+# (empty) pooled_fg_results contributes 0 rows — so the comparison table simply
+# omits the PSM-FG rows instead of erroring.
+fg_death_row  <- if (dr_ok) extract_fg_trt(fg_death_psm_dr,  "PSM FG - Death")     else NULL
+fg_disch_row  <- if (dr_ok) extract_fg_trt(fg_disch_psm_dr,  "PSM FG - Discharge") else NULL
 
 # Extract IPTW Cox treatment rows
 extract_iptw_trt <- function(fit, label){
