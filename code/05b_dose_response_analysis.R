@@ -102,11 +102,13 @@ df$race_category <- forcats::fct_collapse(
 )
 
 ## ---- H. MICE imputation (same as script 05) ----
+# Comorbidity enters as the Charlson total, not the 17 binary components —
+# kept in lockstep with model_covariates in script 05 (see the rationale there).
 model_covariates_full <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  cci_vars
+  "cci_score"
 )
 
 required_vars <- c(

@@ -177,7 +177,12 @@ required_vars <- c(
   "sofa_total_0",
   # New covariates at t=0
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  # CCI components (baseline only)
+  # Charlson total — the comorbidity adjustment used by all models (see
+  # model_covariates below). Requires step 04 to have been re-run under the
+  # aligned schema; absent it, the stop() below reports it explicitly.
+  "cci_score",
+  # CCI components (baseline only) — no longer model covariates, but still
+  # needed for the subgroup cci_total and the balance-plot labels.
   cci_vars
 )
 
@@ -304,15 +309,27 @@ if (nrow(df_complete) < 50) {
 
 # All potential covariates for propensity / outcome models
 # NOTE: sofa_total_0 deliberately excluded from models
+#
+# Comorbidity is adjusted for as the Charlson TOTAL (cci_score), not the 17
+# binary components. Rationale: (a) the components are rare enough that several
+# are constant within a small site's matched set — an all-zero column makes the
+# doubly-robust Fine-Gray design matrix exactly singular, which halted script 05
+# outright at one site; (b) 17 extra parameters badly overfits a small matched
+# set (~4.5 obs/parameter at the smallest site vs ~10 after collapsing); (c) the
+# per-site dynamic filter below silently drops zero-prevalence components, so
+# sites were fitting DIFFERENT model specifications and the pooled meta-analysis
+# was combining them. A single total keeps every site's model identical, and
+# matches how comorbidity is already reported in Table 2.
 model_covariates <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  cci_vars
+  "cci_score"
 )
 
 # Dynamic filter: drop covariates with <2 unique values at this site
-# (e.g., CCI components with zero prevalence, single-level categoricals)
+# (e.g., single-level categoricals). Retained as a safety net; with the CCI
+# collapsed to a total it should no longer drop anything at a typical site.
 model_covariates <- model_covariates[
   sapply(model_covariates, function(v) {
     length(unique(df_complete[[v]])) >= 2
