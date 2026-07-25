@@ -2193,6 +2193,57 @@ if has_crrt_settings:
 
     print(f"   Encounters with median values calculated: {len(median_3hr):,}")
 
+    # ========================================================================
+    # First-3h INITIAL CRRT settings summary, per mode (PATIENT-LEVEL)
+    # ------------------------------------------------------------------------
+    # Companion to the whole-course settings summaries emitted earlier
+    # (crrt_settings_summary_simple / _distribution_by_mode, which pool ALL
+    # records and so over-weight long courses). This summarizes each setting
+    # over the SAME first-3h-after-initiation window used for the dose exposure,
+    # aggregated ONE VALUE PER PATIENT (first-3h median) THEN across patients —
+    # a true "initial settings" view consistent with the dose definition. Covers
+    # every mode present in the window (BFR/dialysate/pre+post replacement/UF);
+    # calculated dose is attached from median_3hr (dose modes cvvh/cvvhd/cvvhdf
+    # only, so SCUF/AVVH rows show dose = "No data"). Feeds the cross-site
+    # initial-settings comparison table (dashboard).
+    _init_params = ['blood_flow_rate', 'dialysate_flow_rate',
+                    'pre_filter_replacement_fluid_rate',
+                    'post_filter_replacement_fluid_rate', 'ultrafiltration_out']
+    _first3_all = crrt_cohort[
+        crrt_cohort['recorded_dttm']
+        <= (crrt_cohort['crrt_initiation_time'] + pd.Timedelta(hours=3))
+    ].copy()
+    _agg = {'crrt_mode_category':
+            lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan}
+    _agg.update({c: 'median' for c in _init_params if c in _first3_all.columns})
+    _pt_init = _first3_all.groupby('encounter_block').agg(_agg).reset_index()
+    if 'crrt_dose_ml_kg_hr' in median_3hr.columns:
+        _pt_init = _pt_init.merge(
+            median_3hr[['encounter_block', 'crrt_dose_ml_kg_hr']],
+            on='encounter_block', how='left')
+    _init_rows = []
+    for _mode in sorted(_pt_init['crrt_mode_category'].dropna().unique()):
+        _md = _pt_init[_pt_init['crrt_mode_category'] == _mode]
+        _row = {'Mode': str(_mode).upper(), 'N_patients': len(_md)}
+        for _c in _init_params + ['crrt_dose_ml_kg_hr']:
+            if _c not in _pt_init.columns:
+                continue
+            _v = _md[_c].dropna()
+            if len(_v):
+                _dec = 1 if _c == 'crrt_dose_ml_kg_hr' else 0
+                _row[_c] = (f"{_v.median():.{_dec}f} "
+                            f"[{_v.quantile(.25):.{_dec}f}-{_v.quantile(.75):.{_dec}f}]")
+            else:
+                _row[_c] = "No data"
+        _init_rows.append(_row)
+    init_settings_df = pd.DataFrame(_init_rows)
+    init_settings_df.to_csv(
+        f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_crrt_initial_settings_by_mode.csv',
+        index=False)
+    print(f"\n✓ First-3h initial settings (per mode, patient-level) saved: "
+          f"{len(init_settings_df)} modes -> "
+          f"{SITE_NAME}_crrt_initial_settings_by_mode.csv")
+
     # Get values at initiation time (original values)
     print("\n   Getting original values at initiation time...")
 
