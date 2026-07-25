@@ -430,12 +430,66 @@ crrt_df['crrt_mode_category'] = crrt_df['crrt_mode_category'].str.lower().str.st
 
 invalid_mask = ~crrt_df['crrt_mode_category'].isin(VALID_CRRT_MODES) & crrt_df['crrt_mode_category'].notna()
 n_invalid = invalid_mask.sum()
+
+# ── Modality data-quality diagnostic #1: what non-CRRT modes are DROPPED here ──
+# Breakdown of the rows this filter removes (mode category + raw crrt_mode_name if
+# present -> record & encounter counts), so sites can see exactly which modalities
+# (IHD, PIRRT, unmapped variants, ...) are excluded and at what scale. Emitted even
+# when zero (empty file) so the collected multi-site set is consistent.
+_excl_gb = (['crrt_mode_category']
+            + (['crrt_mode_name'] if 'crrt_mode_name' in crrt_df.columns else []))
+_excl_rows = crrt_df.loc[invalid_mask]
+if len(_excl_rows):
+    _excl_bd = (_excl_rows.groupby(_excl_gb, dropna=False)
+                .agg(n_records=('encounter_block', 'size'),
+                     n_encounter_blocks=('encounter_block', 'nunique'))
+                .reset_index().sort_values('n_records', ascending=False))
+else:
+    _excl_bd = pd.DataFrame(columns=_excl_gb + ['n_records', 'n_encounter_blocks'])
+_excl_bd.to_csv(
+    f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_excluded_modes_breakdown.csv', index=False)
+
 if n_invalid > 0:
     invalid_modes = crrt_df.loc[invalid_mask, 'crrt_mode_category'].value_counts()
     print(f"   Excluded {n_invalid:,} rows with non-CRRT modes:")
     print(invalid_modes.to_string())
     strobe_counts['excluded_non_crrt_modes'] = int(n_invalid)
     crrt_df = crrt_df[~invalid_mask].copy()
+
+# ── Modality data-quality diagnostic #2: composition of the KEPT null-mode rows ──
+# Null crrt_mode_category is NOT dropped (the filter above requires notna()); it
+# survives as "UNKNOWN" downstream. Characterize those null rows by their FLUID
+# PATTERN, which is what defines the mode: a null row with dialysate flow is
+# functionally CVVHD (a labeling/ETL gap, inferable & fixable); a null row with no
+# flows is genuinely uncharacterized. Also break down by raw crrt_mode_name (if
+# present) = the text the site's ETL failed to map. Record-level over all CRRT
+# records (pre-cohort-restriction). Feeds the modality data-quality dashboard table.
+_null = crrt_df[crrt_df['crrt_mode_category'].isna()].copy()
+if len(_null):
+    _d = _null['dialysate_flow_rate'].fillna(0) > 0
+    _p = ((_null['pre_filter_replacement_fluid_rate'].fillna(0)
+           + _null['post_filter_replacement_fluid_rate'].fillna(0)) > 0)
+    _u = _null['ultrafiltration_out'].fillna(0) > 0
+    _null['inferred_mode'] = np.select(
+        [_d & ~_p, ~_d & _p, _d & _p, ~_d & ~_p & _u],
+        ['CVVHD', 'CVVH', 'CVVHDF', 'SCUF'],
+        default='uncharacterized (no flows)')
+    _null_gb = (['inferred_mode']
+                + (['crrt_mode_name'] if 'crrt_mode_name' in _null.columns else []))
+    _null_bd = (_null.groupby(_null_gb, dropna=False)
+                .agg(n_records=('encounter_block', 'size'),
+                     n_encounter_blocks=('encounter_block', 'nunique'))
+                .reset_index().sort_values('n_records', ascending=False))
+    print(f"   Null-mode (UNKNOWN, KEPT) rows: {len(_null):,} records / "
+          f"{_null['encounter_block'].nunique():,} blocks; inferred-mode composition:")
+    print(_null_bd.to_string(index=False))
+else:
+    _null_cols = (['inferred_mode']
+                  + (['crrt_mode_name'] if 'crrt_mode_name' in crrt_df.columns else [])
+                  + ['n_records', 'n_encounter_blocks'])
+    _null_bd = pd.DataFrame(columns=_null_cols)
+_null_bd.to_csv(
+    f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_unknown_modality_composition.csv', index=False)
 
 # Recount after filtering
 n_crrt_blocks = crrt_df['encounter_block'].nunique()
