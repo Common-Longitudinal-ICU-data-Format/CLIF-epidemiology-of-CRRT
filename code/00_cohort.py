@@ -2298,6 +2298,37 @@ if has_crrt_settings:
           f"{len(init_settings_df)} modes -> "
           f"{SITE_NAME}_crrt_initial_settings_by_mode.csv")
 
+    # ── First-3h field COMPLETENESS (PATIENT-LEVEL) ──────────────────────────
+    # "How often is each CRRT field recorded AT CRRT START?" — the ETL/mapping
+    # signal we actually want, and un-confounded (unlike the raw record-level
+    # crrt_column_missingness, which reflects long-format charting structure).
+    # Denominator = CRRT encounters with a first-3h window (~the whole cohort);
+    # a field is "present" for an encounter if it has any non-null value in the
+    # first-3h window (i.e. its first-3h median in _pt_init is not NaN). Feeds the
+    # cross-site field-completeness comparison (dashboard). Dose and the
+    # dialysate/replacement fields are mode-dependent (dose only for
+    # cvvh/cvvhd/cvvhdf; replacement absent for CVVHD, dialysate for CVVH), so
+    # read those in light of the modality mix — mode/BFR/UF are the clean flags.
+    _comp_fields = (['crrt_mode_category'] + _init_params + ['crrt_dose_ml_kg_hr'])
+    _n_enc = len(_pt_init)
+    _comp_rows = []
+    for _f in _comp_fields:
+        if _f not in _pt_init.columns:
+            continue
+        _npres = int(_pt_init[_f].notna().sum())
+        _comp_rows.append({
+            'field': _f, 'n_encounters': _n_enc, 'n_present': _npres,
+            'n_missing': _n_enc - _npres,
+            'pct_missing': round(100 * (_n_enc - _npres) / _n_enc, 1) if _n_enc else np.nan,
+        })
+    init_completeness_df = pd.DataFrame(_comp_rows)
+    init_completeness_df.to_csv(
+        f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_crrt_initial_field_completeness.csv',
+        index=False)
+    print(f"✓ First-3h field completeness (patient-level, n={_n_enc:,} encounters) saved -> "
+          f"{SITE_NAME}_crrt_initial_field_completeness.csv")
+    print(init_completeness_df[['field', 'pct_missing']].to_string(index=False))
+
     # Get values at initiation time (original values)
     print("\n   Getting original values at initiation time...")
 
