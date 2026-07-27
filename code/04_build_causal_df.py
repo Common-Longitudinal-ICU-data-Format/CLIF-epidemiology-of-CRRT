@@ -1140,6 +1140,37 @@ print(f"  Excluded (died/off CRRT <=24h): {n_excluded_short:,}")
 print(f"  Excluded (SCUF-only): {n_excluded_scuf:,}")
 print(f"  Causal cohort: {n_causal:,} (high={n_high_dose:,}, low={n_low_dose:,})")
 
+# ── ETL / data-integrity guard ────────────────────────────────────────────────
+# The causal cohort is a SURVIVOR-RESTRICTED SUBSET of the descriptive cohort
+# (step 9b removes died/off-CRRT-within-24h + SCUF-only), so by construction
+# n_causal <= n_descriptive and causal_df must hold exactly one row per
+# encounter_block. A larger causal cohort, or duplicate encounter_blocks, indicates
+# ROW DUPLICATION / a merge fan-out upstream — an ETL problem, not a modeling one
+# (this is the Hopkins 2026-07 case: causal 8,764 > descriptive 2,868). Warn loudly
+# but DO NOT halt, so the site still gets outputs to inspect. (The coordinating-
+# center site_validation.py gate re-checks this post-collection; this catches it
+# earlier, at the site, before upload.)
+_n_blocks_unique = result["encounter_block"].nunique()
+if n_causal > n_descriptive:
+    print("\n" + "!" * 78)
+    print(f"  WARNING — POSSIBLE ETL / DATA-INTEGRITY ISSUE at {SITE}")
+    print(f"  Causal cohort ({n_causal:,}) is LARGER than the descriptive cohort "
+          f"({n_descriptive:,}).")
+    print("  The causal cohort is a survivor-restricted SUBSET, so this is impossible")
+    print("  by construction — it points to ROW DUPLICATION / a merge fan-out upstream.")
+    print("  Check crrt_therapy, labs, ADT, and the hospitalization/encounter keys")
+    print("  for duplicate rows per patient.")
+    print("!" * 78)
+if _n_blocks_unique != n_causal:
+    print("\n" + "!" * 78)
+    print(f"  WARNING — DUPLICATE encounter_blocks in causal_df at {SITE}")
+    print(f"  {n_causal:,} rows but only {_n_blocks_unique:,} unique encounter_blocks "
+          f"({n_causal - _n_blocks_unique:,} duplicates).")
+    print("  causal_df must be one row per encounter_block; duplicates inflate every")
+    print("  downstream count and estimate. Check upstream merges for a non-unique")
+    print("  join key.")
+    print("!" * 78)
+
 # --- Draw the diagram (matching 00_cohort.py style) ---
 fig, ax = plt.subplots(figsize=(10, 8))
 ax.set_xlim(0, 1)
