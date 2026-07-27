@@ -2316,11 +2316,23 @@ if has_crrt_settings:
         if _f not in _pt_init.columns:
             continue
         _npres = int(_pt_init[_f].notna().sum())
-        _comp_rows.append({
+        _r = {
             'field': _f, 'n_encounters': _n_enc, 'n_present': _npres,
             'n_missing': _n_enc - _npres,
             'pct_missing': round(100 * (_n_enc - _npres) / _n_enc, 1) if _n_enc else np.nan,
-        })
+            'median': np.nan, 'q25': np.nan, 'q75': np.nan,
+        }
+        # Overall first-3h median [IQR] among encounters that HAVE the value
+        # (numeric settings/dose only; crrt_mode_category is categorical). Pairs
+        # with pct_missing so the per-site tab can show "median [IQR] + % missing"
+        # per CRRT setting from this one file.
+        if _f != 'crrt_mode_category':
+            _vals = pd.to_numeric(_pt_init[_f], errors='coerce').dropna()
+            if len(_vals):
+                _r['median'] = round(_vals.median(), 1)
+                _r['q25'] = round(_vals.quantile(.25), 1)
+                _r['q75'] = round(_vals.quantile(.75), 1)
+        _comp_rows.append(_r)
     init_completeness_df = pd.DataFrame(_comp_rows)
     init_completeness_df.to_csv(
         f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_crrt_initial_field_completeness.csv',
