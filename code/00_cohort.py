@@ -1474,12 +1474,23 @@ _loc = adt_final_stitched.merge(
     crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
     on='encounter_block', how='inner')
 _before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['encounter_block', 'in_dttm'])
+# The last ADT segment at/before CRRT initiation gives BOTH the start location and
+# the HOSPITAL where CRRT was started (hospital_id_at_init). A stitched
+# encounter_block can span multiple hospitals (transfers), so hospital is only
+# well-defined at a fixed timepoint — we capture it at initiation, for descriptive
+# / initial-settings stratification only (NOT longitudinal analyses). Single-
+# hospital sites have a constant value; multi-hospital systems (e.g. UMN) vary.
+_init_seg = (_before.groupby('encounter_block').tail(1)
+             [['encounter_block', 'location_category', 'hospital_id']])
 crrt_start_location = (
     crrt_initiation[['encounter_block']].drop_duplicates()
-    .merge(_before.groupby('encounter_block').tail(1)[['encounter_block', 'location_category']],
-           on='encounter_block', how='left')
-    .rename(columns={'location_category': 'crrt_start_location'}))
+    .merge(_init_seg, on='encounter_block', how='left')
+    .rename(columns={'location_category': 'crrt_start_location',
+                     'hospital_id': 'hospital_id_at_init'}))
 crrt_start_location['crrt_start_location'] = crrt_start_location['crrt_start_location'].fillna('unknown')
+print(f"   Distinct hospital_id at CRRT initiation: "
+      f"{crrt_start_location['hospital_id_at_init'].nunique(dropna=True)} "
+      f"({crrt_start_location['hospital_id_at_init'].isna().sum()} encounters unknown)")
 crrt_start_location['no_icu_group'] = crrt_start_location['encounter_block'].isin(non_icu_hosps)
 crrt_start_location.to_parquet(f'{OUT}/intermediate_phi/crrt_start_location.parquet', index=False)
 
@@ -2861,6 +2872,15 @@ index_crrt_df = index_crrt_df.merge(
 
 # In[58]:
 
+
+# Carry hospital_id_at_init (facility where CRRT was started) into the canonical
+# per-encounter cohort frames so descriptive / initial-settings analyses can be
+# stratified by hospital at a multi-hospital site. Encounter_block-keyed left
+# merge; well-defined only at initiation (transfers make it ambiguous over the
+# course), so it is intended for descriptive-at-initiation use, NOT longitudinal.
+_hosp_at_init = crrt_start_location[['encounter_block', 'hospital_id_at_init']].drop_duplicates('encounter_block')
+index_crrt_df = index_crrt_df.merge(_hosp_at_init, on='encounter_block', how='left')
+outcomes_df = outcomes_df.merge(_hosp_at_init, on='encounter_block', how='left')
 
 cohort_df.to_parquet(f"{OUT}/intermediate_phi/cohort_df.parquet", index=False)
 outcomes_df.to_parquet(f"{OUT}/intermediate_phi/outcomes_df.parquet", index=False)
