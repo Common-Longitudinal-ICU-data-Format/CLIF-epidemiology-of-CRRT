@@ -497,6 +497,39 @@ for _x in _T1_LABS:
         analysis_df[f"{_x}_t1"] = analysis_df["encounter_block"].map(_near)
 del _t1_wd
 
+# ── Baseline SEVERITY threshold proportions (patient-level, at CRRT start) ──────
+# Companion to the median[IQR] labs in Table 1: the % of patients whose baseline
+# lab crosses a clinically severe threshold at CRRT initiation. The median can
+# understate hyperkalemia / hyperlactatemia (tail phenomena in a CRRT cohort where
+# most patients are near-normal), so these give a threshold-based severity view.
+# Denominator = patients with the lab measured in the baseline window (non-null
+# _t1). Uses the same nearest-measured _t1 values as the Table 1 lab rows. Emitted
+# per site for cross-site pooling. Thresholds chosen 2026-07-28.
+_SEV_THRESHOLDS = [
+    ("Severe hyperkalemia (K > 6 mEq/L)",           "potassium_t1",   "gt", 6.0),
+    ("Severe hyperlactatemia (lactate > 4 mmol/L)", "lactate_t1",     "gt", 4.0),
+    ("Severe acidosis (bicarbonate < 15 mEq/L)",    "bicarbonate_t1", "lt", 15.0),
+    ("Severe azotemia (creatinine > 4 mg/dL)",      "creatinine_t1",  "gt", 4.0),
+    ("Severe uremia (BUN > 80 mg/dL)",              "bun_t1",         "gt", 80.0),
+]
+_sev_rows = []
+for _lbl, _col, _dir, _thr in _SEV_THRESHOLDS:
+    if _col not in analysis_df.columns:
+        continue
+    _v = pd.to_numeric(analysis_df[_col], errors="coerce").dropna()
+    _n = len(_v)
+    _meet = int((_v > _thr).sum()) if _dir == "gt" else int((_v < _thr).sum())
+    _sev_rows.append({
+        "metric": _lbl, "column": _col,
+        "threshold": (">" if _dir == "gt" else "<") + f" {_thr:g}",
+        "n_with_lab": _n, "n_meeting": _meet,
+        "pct_meeting": round(100 * _meet / _n, 1) if _n else float("nan"),
+    })
+baseline_severity_df = pd.DataFrame(_sev_rows)
+baseline_severity_df.to_csv(FINAL_DIR / f"{SITE_NAME}_baseline_severity_thresholds.csv", index=False)
+print(f"  Baseline severity thresholds saved -> {SITE_NAME}_baseline_severity_thresholds.csv")
+print(baseline_severity_df[["metric", "pct_meeting", "n_meeting", "n_with_lab"]].to_string(index=False))
+
 # Save
 analysis_df.to_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet", index=False)
 print(f"  Analysis DataFrame: {analysis_df.shape}")
