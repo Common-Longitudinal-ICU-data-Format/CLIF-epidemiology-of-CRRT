@@ -75,6 +75,7 @@ code/report_core.py
 code/site_validation.py
 code/archive/output/
 code/archive/
+code/adhoc/
 grant/
 terminology-tool/
 output_nu/
