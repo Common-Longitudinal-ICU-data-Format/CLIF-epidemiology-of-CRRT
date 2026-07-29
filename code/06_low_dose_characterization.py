@@ -174,12 +174,12 @@ add_continuous("SOFA renal (baseline)", "sofa_renal")
 add_continuous("SOFA respiratory (baseline)", "sofa_resp")
 # Baseline labs
 for col, label in [
-    ("creatinine_baseline", "Creatinine (baseline)"),
-    ("bun_baseline", "BUN (baseline)"),
-    ("lactate_baseline", "Lactate (baseline)"),
-    ("ph_arterial_baseline", "Arterial pH (baseline)"),
-    ("bicarbonate_baseline", "Bicarbonate (baseline)"),
-    ("potassium_baseline", "Potassium (baseline)"),
+    ("creatinine_t1", "Creatinine (baseline)"),
+    ("bun_t1", "BUN (baseline)"),
+    ("lactate_t1", "Lactate (baseline)"),
+    ("ph_arterial_t1", "Arterial pH (baseline)"),
+    ("bicarbonate_t1", "Bicarbonate (baseline)"),
+    ("potassium_t1", "Potassium (baseline)"),
 ]:
     add_continuous(label, col)
 # Support / context

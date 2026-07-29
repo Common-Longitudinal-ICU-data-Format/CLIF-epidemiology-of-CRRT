@@ -477,9 +477,17 @@ for col in analysis_df.columns:
 # unlimited-forward-fill staleness in the *_baseline columns (a point lab does
 # not persist like an infusion rate). Computed ONCE here and persisted so BOTH
 # Table 1 (below) and the SMR builder (03b) consume one definition (and one
-# tz-correct windowing). NOTE: the *_baseline columns consumed by 04/causal
-# still use the forward-filled values - a separate, causal-affecting decision.
-_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
+# tz-correct windowing). 04 STEP 3 (2026-06-09) recomputes the causal baseline
+# labs as nearest-measured, and 03/06/05b read *_t1 too, so the stale point-lab
+# *_baseline columns are dropped before save below (see end of file, 2026-07-29).
+# All point labs get the nearest-measured *_t1 definition (unlimited ffill is
+# invalid for snapshot labs). The first 7 are Table-1 / consumed; the rest have
+# no consumer today but are converted for consistency + future use (their stale
+# *_baseline columns are dropped below either way). Verified 2026-07-29 none of
+# these *_baseline columns are read anywhere (P/F uses lab_po2_arterial straight
+# from wide_df in 04, not po2_arterial_baseline).
+_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate", "ph_arterial",
+            "calcium_total", "chloride", "glucose_serum", "magnesium", "po2_arterial", "sodium"]
 _t1_lab_cols = [f"lab_{x}" for x in _T1_LABS]
 _t1_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
 _t1_need = ["hospitalization_id", "event_dttm"] + [c for c in _t1_lab_cols if c in _t1_avail]
@@ -529,6 +537,17 @@ baseline_severity_df = pd.DataFrame(_sev_rows)
 baseline_severity_df.to_csv(FINAL_DIR / f"{SITE_NAME}_baseline_severity_thresholds.csv", index=False)
 print(f"  Baseline severity thresholds saved -> {SITE_NAME}_baseline_severity_thresholds.csv")
 print(baseline_severity_df[["metric", "pct_meeting", "n_meeting", "n_with_lab"]].to_string(index=False))
+
+# Drop every point-lab *_baseline column: point labs are snapshots, so unlimited
+# ffill is invalid. Each now has a nearest-measured *_t1 column instead - consumers
+# (Table 1 above, 03, 06, 05b) read *_t1; the rest carried no consumer and are just
+# removed as stale clutter. Vaso/NEE/resp/settings *_baseline are KEPT - forward-fill
+# is valid for values that persist between charted measurements.
+_stale_baseline = [f"{_x}_baseline" for _x in _T1_LABS
+                   if f"{_x}_baseline" in analysis_df.columns]
+if _stale_baseline:
+    analysis_df = analysis_df.drop(columns=_stale_baseline)
+    print(f"  Dropped stale ffill baseline lab cols: {_stale_baseline}")
 
 # Save
 analysis_df.to_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet", index=False)
@@ -700,6 +719,7 @@ _row_cont("Lactate (mmol/L)", "lactate_t1", 1)
 _row_cont("Bicarbonate (mEq/L)", "bicarbonate_t1", 1)
 _row_cont("Potassium (mEq/L)", "potassium_t1", 2)
 _row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
+_row_cont("Arterial pH", "ph_arterial_t1", 2)
 _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors

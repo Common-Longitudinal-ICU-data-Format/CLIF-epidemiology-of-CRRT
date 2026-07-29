@@ -275,8 +275,8 @@ def build_practice_quality() -> pd.DataFrame:
               median=med, q25=q1, q75=q3, mean=mn, sd=sd)
 
         # Acid-base delivery adequacy: among acidotic at baseline, % corrected by post window
-        ph_b = pd.to_numeric(coh["ph_arterial_baseline"], errors="coerce")
-        hco3_b = pd.to_numeric(coh["bicarbonate_baseline"], errors="coerce")
+        ph_b = pd.to_numeric(coh["ph_arterial_t1"], errors="coerce")
+        hco3_b = pd.to_numeric(coh["bicarbonate_t1"], errors="coerce")
         ph_p = pd.to_numeric(coh["ph_arterial_post_crrt"], errors="coerce")
         hco3_p = pd.to_numeric(coh["bicarbonate_post_crrt"], errors="coerce")
         acidotic = (ph_b < 7.30) | (hco3_b < 22)

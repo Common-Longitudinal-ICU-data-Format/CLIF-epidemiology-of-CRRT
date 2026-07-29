@@ -794,9 +794,9 @@ if (!file.exists(tbl_path)) {
   # Rename covariates to match the primary analysis
   df_full <- df_full %>%
     rename(
-      lactate_0 = lactate_baseline,
-      bicarbonate_0 = bicarbonate_baseline,
-      potassium_0 = potassium_baseline,
+      lactate_0 = lactate_t1,
+      bicarbonate_0 = bicarbonate_t1,
+      potassium_0 = potassium_t1,
       sofa_total_0 = sofa_total
     )
 
