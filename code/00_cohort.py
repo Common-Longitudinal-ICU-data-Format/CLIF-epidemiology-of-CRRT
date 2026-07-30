@@ -1207,6 +1207,40 @@ if has_crrt_settings:
 # Filter crrt_df to only include hospitalization_id present in cohort_df
 index_crrt_df = index_crrt_df[index_crrt_df['hospitalization_id'].isin(cohort_df['hospitalization_id'])]
 
+
+# ---------------------------------------------------------------------------
+# Enforce the one-row-per-encounter_block invariant that this frame's name and
+# every downstream consumer already assume but nothing enforced. `crrt_at_init-
+# iation` keeps EVERY crrt_therapy row whose recorded_dttm == the block's
+# initiation time, so a site that charts two rows at the exact same initiation
+# timestamp carries duplicate blocks here — and 02 (:444), 03 and 04 (:80,
+# :194) all merge this frame on encounter_block WITHOUT deduplicating, as does
+# the labs merge further down. Those merges then multiply rows, inflating the
+# Table 1 / SMR cohort above the STROBE funnel. The dose block below already
+# collapses per block ("should be unique at initiation time") and prints "one
+# row per encounter" — this makes that claim true.
+#
+# Collapse with groupby().first(), which takes the first NON-NULL value per
+# column, so a null charted on the first sibling row does not shadow a real
+# value on the next (notably crrt_mode_category). Sorted first so the pick is
+# deterministic across runs/platforms, and original column order is restored.
+# Dose and settings values are unaffected: they are recomputed from their own
+# per-block groupby below and overwrite these columns.
+def _one_row_per_block(df, label):
+    n_rows, n_blocks = len(df), df['encounter_block'].nunique()
+    if n_rows == n_blocks:
+        return df
+    out = (df.sort_values(['encounter_block', 'hospitalization_id'])
+             .groupby('encounter_block', as_index=False)
+             .first())[df.columns]
+    print(f"   ⚠️  {label}: collapsed {n_rows - n_blocks:,} duplicate "
+          f"initiation-timestamp row(s) — {n_rows:,} → {len(out):,} rows "
+          f"across {n_blocks:,} encounter_blocks")
+    return out
+
+
+index_crrt_df = _one_row_per_block(index_crrt_df, 'index_crrt_df')
+
 if has_crrt_settings:
     # Identify encounters without any CRRT settings documented
     crrt_settings_cols = [
@@ -2135,6 +2169,10 @@ if not has_crrt_settings:
         on='encounter_block',
         how='left'
     )
+    # This branch rebuilds index_crrt_df from scratch, so re-assert the same
+    # invariant: a stitched block with >1 hospitalization_id makes the merge
+    # above emit one row per hospitalization.
+    index_crrt_df = _one_row_per_block(index_crrt_df, 'index_crrt_df (no-settings branch)')
 
 # --- BEGIN CRRT DOSE CALCULATION (only when has_crrt_settings=True) ---
 if has_crrt_settings:
