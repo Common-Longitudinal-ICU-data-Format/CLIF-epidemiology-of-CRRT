@@ -959,21 +959,28 @@ if 'poa_present' in hospital_diagnosis_df.columns:
 # Let's debug why we're not finding ESRD codes
 esrd_codes = [
     'z992',    # Dependence on renal dialysis
-    'z9115',   # Patient's noncompliance with renal dialysis
     'i120',    # Hypertensive chronic kidney disease with stage 5 CKD or ESRD
     'n186',    # End stage renal disease
-    'i132',    # Hypertensive heart and chronic kidney disease with heart failure and ESRD
-    'z91158',  # Patient's noncompliance with renal dialysis (alternate code)
-    'i1311',   # Hypertensive heart and chronic kidney disease with heart failure and stage 5 CKD
-    "z4931",   # Encounter for continuous renal replacement therapy (CRRT) for ESRD (CMS/HCC)
-    "z4901",   # Encounter regarding vascular access for dialysis for end-stage renal disease (CMS/HCC)
-    "i272",    # Pulmonary hypertension associated with ESRD on dialysis (CMS/HCC)
+    'i132',    # Hypertensive heart and chronic kidney disease WITH heart failure and stage 5 CKD/ESRD
+    'i1311',   # Hypertensive heart and chronic kidney disease WITHOUT heart failure, stage 5 CKD/ESRD
+    "z4931",   # Encounter for adequacy testing for hemodialysis
+    "z4901",   # Encounter for fitting/adjustment of extracorporeal dialysis catheter
     '5856',     #ICD9 :End stage renal disease
     '40391',    #ICD9: Hypertensive chronic kidney disease, unspecified, with chronic kidney disease stage V or end stage renal disease
     '40311',     #ICD9: Hypertensive chronic kidney disease, benign, with chronic kidney disease stage V or end stage renal disease
-    'v4511',     #ICD9: Renal dialysis status
-    'v4512'     #ICD9: Noncompliance with renal dialysis
+    'v4511'      #ICD9: Renal dialysis status
 ]
+# REMOVED 2026-07-31 (user decision) — were over-excluding non-ESRD patients:
+#   'i272'   I27.2  "Other secondary pulmonary hypertension". NOT an ESRD code. Broad and common in
+#                   critically ill patients (left heart disease, chronic lung disease, PE); the prior
+#                   comment described it via a CMS-HCC gloss, not the code definition. Risked dropping
+#                   genuine AKI-CRRT patients from the cohort.
+#   'z9115'  Z91.15  "Patient's noncompliance with renal dialysis" — a care-adherence code, not a
+#   'z91158' Z91.158 dialysis-dependence code. (Z91.158 is probably not a valid ICD-10-CM code.)
+#   'v4512'  V45.12  ICD-9 "Noncompliance with renal dialysis" — the direct analog of Z91.15; removed
+#                    with it so the ICD-9 and ICD-10 arms of the list encode the same concepts.
+# Note: I13.11 / Z49.31 / Z49.01 comments above were also corrected; the codes themselves are unchanged
+# (the previous I13.11 comment said "with heart failure", which is the definition of I13.2, not I13.11).
 
 # Get hospitalization IDs with ESRD diagnoses and print debug info
 print("\nNumber of rows matching ESRD codes:", hospital_diagnosis_df['diagnosis_code'].isin(esrd_codes).sum())
