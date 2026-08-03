@@ -900,6 +900,40 @@ crrt_at_initiation = crrt_cohort[
 print(f"   CRRT records at initiation: {len(crrt_at_initiation):,}")
 print(f"   Unique encounter blocks: {crrt_at_initiation['encounter_block'].nunique():,}")
 
+# ── Infer modality when it's blank/unknown at initiation, from the settings on
+#    the initiation record. The record is chosen by positive fluid activity, so
+#    its dialysate / replacement rates are present and disambiguate the mode:
+#      dialysate>0 & replacement>0 -> CVVHDF   dialysate>0 only -> CVVHD
+#      replacement>0 only -> CVVH              UF-only -> SCUF
+#    Recorded modes are NEVER overwritten — only true blanks/"unknown". [Phase 3]
+if has_crrt_settings:
+    def _infer_mode_from_settings(row):
+        dial = pd.notna(row.get('dialysate_flow_rate')) and row.get('dialysate_flow_rate') > 0
+        repl = (pd.notna(row.get('pre_filter_replacement_fluid_rate')) and row.get('pre_filter_replacement_fluid_rate') > 0) \
+            or (pd.notna(row.get('post_filter_replacement_fluid_rate')) and row.get('post_filter_replacement_fluid_rate') > 0)
+        uf = pd.notna(row.get('ultrafiltration_out')) and row.get('ultrafiltration_out') > 0
+        if dial and repl:
+            return 'cvvhdf'
+        if dial:
+            return 'cvvhd'
+        if repl:
+            return 'cvvh'
+        if uf:
+            return 'scuf'
+        return np.nan
+
+    _m = crrt_at_initiation['crrt_mode_category'].astype('string').str.lower().str.strip()
+    _blank = _m.isna() | _m.isin(['', 'unknown', 'nan', 'none'])
+    n_blank = int(_blank.sum())
+    if n_blank:
+        _inferred = crrt_at_initiation.loc[_blank].apply(_infer_mode_from_settings, axis=1)
+        crrt_at_initiation.loc[_blank, 'crrt_mode_category'] = _inferred.values
+        n_recovered = int(pd.Series(_inferred).notna().sum())
+        print(f"   Modality blank/unknown at initiation: {n_blank}; inferred from settings: "
+              f"{n_recovered} ({n_recovered / max(n_blank,1) * 100:.0f}%); still unknown: {n_blank - n_recovered}")
+        strobe_counts['modality_blank_at_init'] = n_blank
+        strobe_counts['modality_inferred_from_settings'] = n_recovered
+
 
 
 # ## Step3: Exclude ESRD encounters
