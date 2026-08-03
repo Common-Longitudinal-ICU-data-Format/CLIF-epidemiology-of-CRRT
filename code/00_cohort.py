@@ -905,7 +905,7 @@ print(f"   Unique encounter blocks: {crrt_at_initiation['encounter_block'].nuniq
 #    its dialysate / replacement rates are present and disambiguate the mode:
 #      dialysate>0 & replacement>0 -> CVVHDF   dialysate>0 only -> CVVHD
 #      replacement>0 only -> CVVH              UF-only -> SCUF
-#    Recorded modes are NEVER overwritten — only true blanks/"unknown". [Phase 3]
+#    Recorded modes are NEVER overwritten — only true blanks/"unknown". 
 if has_crrt_settings:
     def _infer_mode_from_settings(row):
         dial = pd.notna(row.get('dialysate_flow_rate')) and row.get('dialysate_flow_rate') > 0
