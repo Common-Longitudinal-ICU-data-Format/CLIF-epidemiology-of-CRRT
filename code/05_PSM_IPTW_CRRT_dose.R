@@ -1083,9 +1083,15 @@ cat("\nPooling Fine-Gray DR models across", N_IMP, "MICE imputations...\n")
 # stays fixed — only the imputed values change.
 matched_ids <- as.integer(rownames(df_match))
 
+# Minimum number of imputations that must produce a usable Fine-Gray fit before
+# the treatment effect is pooled. Mirrors the identical guard already used by the
+# subgroup analysis (see `sum(fit_ok) < 3` in Section 6).
+MIN_IMP_FITS_FG <- 3
+
 pool_fg_treatment <- function(failcode_val, outcome_label) {
-  betas <- numeric(N_IMP)
-  ses   <- numeric(N_IMP)
+  betas  <- numeric(N_IMP)
+  ses    <- numeric(N_IMP)
+  fit_ok <- logical(N_IMP)   # which imputations actually yielded an estimate
 
   for (m in seq_len(N_IMP)) {
     d_imp <- imp_list[[m]]
@@ -1116,11 +1122,47 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
 
     s <- summary(fg_m)$coef
     trt_row <- grep("crrt_high", rownames(s))[1]
-    betas[m] <- s[trt_row, "coef"]
-    ses[m]   <- s[trt_row, "se(coef)"]
+    if (is.na(trt_row)) next            # treatment term absent from the fit
+    b  <- s[trt_row, "coef"]
+    se <- s[trt_row, "se(coef)"]
+    if (!is.finite(b) || !is.finite(se) || se <= 0) next
+    betas[m]  <- b
+    ses[m]    <- se
+    fit_ok[m] <- TRUE
   }
 
-  pooled <- rubins_pool(betas, ses)
+  # Pool ONLY the imputations that produced an estimate.
+  #
+  # Before 2026-08-04 a failed imputation was skipped by `next`, which left a 0
+  # in both `betas` and `ses`, and every element was then passed to
+  # rubins_pool(). Those zeros were averaged in as though they were real
+  # estimates. Two failure modes followed:
+  #   - ALL m failed  -> beta_bar = 0, se = 0, i.e. SHR exactly 1.00 with a
+  #     zero standard error. One site currently ships exactly this file. It is
+  #     caught downstream (report_core._collect_psm_fg drops se <= 0), but an SE
+  #     of zero carries infinite weight in inverse-variance meta-analysis, so
+  #     that guard was the only thing standing between a placeholder and a
+  #     pooled estimate determined entirely by it.
+  #   - SOME m failed -> the zeros biased the pooled log-HR toward the null and
+  #     shrank its standard error, producing a plausible-looking wrong number
+  #     with a positive SE that passes every downstream check. This is the more
+  #     dangerous case and nothing downstream could have detected it.
+  n_ok <- sum(fit_ok)
+  if (n_ok < MIN_IMP_FITS_FG) {
+    cat(sprintf(
+      "  *** PSM FG (%s): only %d of %d imputations produced a usable fit (need %d).\n",
+      outcome_label, n_ok, N_IMP, MIN_IMP_FITS_FG))
+    cat("      NOT pooled; this site will contribute no Fine-Gray estimate for this outcome.\n")
+    return(NULL)
+  }
+  if (n_ok < N_IMP) {
+    cat(sprintf("  Note: PSM FG (%s) pooled over %d of %d imputations (%d failed).\n",
+                outcome_label, n_ok, N_IMP, N_IMP - n_ok))
+  }
+
+  # rubins_pool() derives m from length(betas), so passing only the successful
+  # fits also makes m correct for Rubin's rules rather than overstating it.
+  pooled <- rubins_pool(betas[fit_ok], ses[fit_ok])
   data.frame(
     model    = paste0("PSM FG (pooled) - ", outcome_label),
     HR_type  = "SHR",
@@ -1136,20 +1178,30 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
 
 pooled_fg_death <- pool_fg_treatment(2, "Death")
 pooled_fg_disch <- pool_fg_treatment(1, "Discharge")
+# bind_rows() drops NULL arguments, so an outcome that could not be pooled simply
+# contributes no row.
 pooled_fg_results <- bind_rows(pooled_fg_death, pooled_fg_disch)
 
-cat("Pooled Fine-Gray results:\n")
-for (i in seq_len(nrow(pooled_fg_results))) {
-  r <- pooled_fg_results[i, ]
-  cat(sprintf("  %-35s SHR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
-              r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
-}
-cat("\n")
+if (nrow(pooled_fg_results) > 0) {
+  cat("Pooled Fine-Gray results:\n")
+  for (i in seq_len(nrow(pooled_fg_results))) {
+    r <- pooled_fg_results[i, ]
+    cat(sprintf("  %-35s SHR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
+                r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
+  }
+  cat("\n")
 
-write.csv(pooled_fg_results,
-          file.path(output_dir, paste0(SITE_NAME, "_fg_psm_pooled_results.csv")),
-          row.names = FALSE)
-cat("Saved pooled Fine-Gray results CSV\n")
+  write.csv(pooled_fg_results,
+            file.path(output_dir, paste0(SITE_NAME, "_fg_psm_pooled_results.csv")),
+            row.names = FALSE)
+  cat("Saved pooled Fine-Gray results CSV\n")
+} else {
+  # Deliberately write NO file rather than an empty or placeholder one. A missing
+  # file is unambiguous to the coordinating centre; a file containing SHR = 1.00
+  # with se = 0 is not.
+  cat("No poolable Fine-Gray outcome at this site; writing no",
+      "_fg_psm_pooled_results.csv.\n")
+}
 } else {
   pooled_fg_results <- data.frame(
     model = character(), HR_type = character(), HR = numeric(),
