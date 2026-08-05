@@ -42,7 +42,7 @@ See `config/clif_data_requirements.yaml` for the full column and category specif
 ## Prerequisites
 
 - **Python 3.11+**
-- **R 4.x** (for causal inference scripts 05 / 05b)
+- **R 4.3+** (for causal inference scripts 05 / 05b; the pinned `renv.lock` requires R ≥ 4.3). On **Windows**, prefer **R 4.5** — Posit PPM serves prebuilt binaries so `renv::restore()` needs no Rtools/compiler. On **Linux/HPC** (older R modules, e.g. 4.3/4.4) it also works: where PPM lacks a binary, packages build from source, which HPC toolchains support.
 - **UV package manager** ([install here](https://docs.astral.sh/uv/))
 - Access to CLIF 2.1.0 data tables at your site
 
@@ -110,7 +110,7 @@ Rscript -e "renv::restore(prompt = FALSE)"   :: pinned R packages (skip if no R)
 
 ### R Packages (`renv`)
 
-Package versions are pinned in `renv.lock` it works inside RStudio:
+Package versions are pinned in `renv.lock`, which resolves against a dated **Posit Public Package Manager** snapshot — so on **R 4.5** `renv::restore()` installs prebuilt **binaries** (no Rtools/compiler, no source builds). It works inside RStudio:
 
 1. Open the project folder in **RStudio** (it auto-activates renv via `.Rprofile`).
 2. Run once in the R console: `renv::restore()`  — installs the pinned packages into a project-local library.
