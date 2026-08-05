@@ -728,7 +728,9 @@ if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
-    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
+    # Net UF Intensity omitted from Table 1 — ultrafiltration_out sign convention
+    # is inconsistent across sites (negative values), so the derived intensity is
+    # unreliable for reporting (per Shan). The column is still computed for 03.
 # Outcome
 _row_binary("30-Day Mortality (%)", "_death30")
 

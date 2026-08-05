@@ -148,7 +148,7 @@ if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
     _modes = list(t1["crrt_mode_category"].dropna().astype("string").str.lower().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
-    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
+    # Net UF Intensity omitted (UF sign convention unreliable across sites) — mirrors 02.
 # Outcome
 _row_binary("30-Day Mortality (%)", "_death30")
 
