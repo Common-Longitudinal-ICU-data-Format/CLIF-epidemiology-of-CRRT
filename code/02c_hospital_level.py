@@ -1,0 +1,191 @@
+"""
+02c_hospital_level.py — hospital-level descriptive aggregates.
+
+Stratifies the CRRT cohort by `hospital_id_at_init` (the facility where CRRT was
+started; descriptive-at-initiation only — transfers make it ambiguous over the
+course). Produces three per-site CSVs:
+  1. {site}_hospital_counts.csv          — encounters per hospital
+  2. {site}_table1_by_hospital.csv       — the full Table 1, one column per hospital
+  3. {site}_crrt_settings_by_hospital.csv — 3h-median CRRT settings + mode mix per hospital
+
+⚠️  SHARING: these use the RAW hospital_id and are NOT small-cell suppressed by
+    default, so they are NOT safe to upload to Box/consortium. They are written
+    to intermediate_phi/hospital_level/ (local, git-ignored). To make them
+    shareable, set SUPPRESS_MIN_N (below) and move the output to final_no_phi/.
+
+Run from code/ :  uv run python 02c_hospital_level.py
+"""
+import json  # noqa: F401
+from pipeline_helpers import load_config, load_intermediate, get_output_root  # noqa: E402
+import pandas as pd
+import numpy as np
+
+# ---- small-cell suppression (OFF until the consortium threshold is decided) ----
+SUPPRESS_MIN_N = None   # e.g. 10 -> drop hospitals with < 10 encounters and blank
+                        #      categorical cells with numerator < 10. None = no suppression.
+
+config = load_config()
+OUTPUT_ROOT = get_output_root(config)
+INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
+OUT_DIR = INTERMEDIATE_DIR / "hospital_level"          # local, NOT shared (no suppression yet)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+SITE_NAME = config["site_name"]
+HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
+HCOL = "hospital_id_at_init"
+
+print("=== 02c: hospital-level aggregates ===")
+
+t1 = load_intermediate(INTERMEDIATE_DIR / "tableone_full_df.parquet")
+idx = load_intermediate(INTERMEDIATE_DIR / "index_crrt_df.parquet")
+
+# hospital label: raw id as string; missing -> "unknown"
+for _df in (t1, idx):
+    if HCOL not in _df.columns:
+        _df[HCOL] = pd.NA
+    _df[HCOL] = _df[HCOL].astype("string").fillna("unknown")
+
+_counts = t1[HCOL].value_counts(dropna=False)
+# groups: Overall + each hospital (unknown last), optionally suppressing small ones
+_hosps = [h for h in _counts.index if h != "unknown"] + (["unknown"] if "unknown" in _counts.index else [])
+if SUPPRESS_MIN_N:
+    _dropped = [h for h in _hosps if _counts[h] < SUPPRESS_MIN_N]
+    _hosps = [h for h in _hosps if _counts[h] >= SUPPRESS_MIN_N]
+    if _dropped:
+        print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}")
+GROUPS = ["Overall"] + _hosps
+print(f"  {SITE_NAME}: {t1[HCOL].nunique()} distinct hospital_id_at_init | {len(t1):,} encounters")
+
+
+# =====================================================================
+# 1. Hospital counts
+# =====================================================================
+_cnt = (t1[HCOL].value_counts(dropna=False).rename_axis("hospital_id").reset_index(name="n_encounters"))
+_cnt["pct_of_site"] = (_cnt["n_encounters"] / len(t1) * 100).round(1)
+_cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
+
+
+# =====================================================================
+# 2. Full Table 1 by hospital  (mirrors 02's variable spec, no p-value)
+# =====================================================================
+gframe = {"Overall": t1, **{h: t1[t1[HCOL] == h] for h in _hosps}}
+gn = {g: len(gframe[g]) for g in GROUPS}
+COL = "Characteristic"
+HDR = {g: (f"Overall (N={gn[g]:,})" if g == "Overall" else f"{g} (N={gn[g]:,})") for g in GROUPS}
+_columns = [COL] + [HDR[g] for g in GROUPS]
+
+
+def _suppress_cell(n):
+    return SUPPRESS_MIN_N is not None and 0 < n < SUPPRESS_MIN_N
+
+
+def _iqr(s, dec):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return "NA"
+    return f"{s.median():.{dec}f} ({s.quantile(0.25):.{dec}f}, {s.quantile(0.75):.{dec}f})"
+
+
+def _npct(n, d):
+    if _suppress_cell(n):
+        return f"<{SUPPRESS_MIN_N}"
+    return "NA" if d == 0 else f"{n} ({n / d * 100:.0f}%)"
+
+
+_rows = []
+
+
+def _row_cont(label, col, dec):
+    if col not in t1.columns:
+        return
+    r = {COL: f"__{label}__"}
+    for g in GROUPS:
+        r[HDR[g]] = _iqr(gframe[g][col], dec)
+    _rows.append(r)
+
+
+def _row_binary(label, boolcol):
+    if boolcol not in t1.columns:
+        return
+    r = {COL: f"__{label}__"}
+    for g in GROUPS:
+        f = gframe[g]
+        r[HDR[g]] = _npct(int(pd.Series(f[boolcol]).fillna(False).astype(bool).sum()), len(f))
+    _rows.append(r)
+
+
+def _row_multi(label, col, level_order):
+    if col not in t1.columns:
+        return
+    _rows.append({COL: f"__{label}__", **{HDR[g]: "" for g in GROUPS}})
+    for lv, disp in level_order:
+        r = {COL: disp}
+        for g in GROUPS:
+            f = gframe[g]
+            r[HDR[g]] = _npct(int((f[col] == lv).sum()), len(f))
+        _rows.append(r)
+
+
+# Demographics
+_row_cont("Age at Admission (years)", "age_at_admission", 0)
+_row_binary("Female (%)", "_female")
+_row_multi("Race", "_race_grp", [("Black", "Black"), ("White", "White"), ("Other", "Other")])
+_row_cont("Charlson Comorbidity Index (total)", "cci_score", 0)
+# Severity and labs at CRRT initiation
+_row_cont("SOFA Score", "sofa_total", 0)
+_row_cont("SOFA Score, Non-Renal", "sofa_nonrenal", 0)
+_row_cont("Creatinine (mg/dL)", "creatinine_t1", 2)
+_row_cont("BUN (mg/dL)", "bun_t1", 0)
+_row_cont("Lactate (mmol/L)", "lactate_t1", 1)
+_row_cont("Bicarbonate (mEq/L)", "bicarbonate_t1", 1)
+_row_cont("Potassium (mEq/L)", "potassium_t1", 2)
+_row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
+_row_cont("Arterial pH", "ph_arterial_t1", 2)
+_row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
+_row_binary("On IMV (%)", "_imv")
+# CRRT practice descriptors
+_row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
+    _modes = list(t1["crrt_mode_category"].dropna().astype("string").str.lower().value_counts().index)
+    if _modes:
+        _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
+    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
+# Outcome
+_row_binary("30-Day Mortality (%)", "_death30")
+
+pd.DataFrame(_rows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_table1_by_hospital.csv", index=False)
+
+
+# =====================================================================
+# 3. CRRT 3h-median settings by hospital
+# =====================================================================
+_SET = [("blood_flow_rate", "Blood Flow Rate (mL/min)", 0),
+        ("dialysate_flow_rate", "Dialysate Flow Rate (mL/hr)", 0),
+        ("pre_filter_replacement_fluid_rate", "Pre-filter Replacement (mL/hr)", 0),
+        ("post_filter_replacement_fluid_rate", "Post-filter Replacement (mL/hr)", 0),
+        ("ultrafiltration_out", "Ultrafiltration Out (mL/hr)", 0),
+        ("crrt_dose_ml_kg_hr", "Delivered Dose (mL/kg/hr)", 1)]
+if HCOL not in idx.columns:
+    idx[HCOL] = "unknown"
+_ig = {"Overall": idx, **{h: idx[idx[HCOL] == h] for h in _hosps}}
+_srows = []
+for col, label, dec in _SET:
+    if col not in idx.columns:
+        continue
+    _srows.append({COL: f"__{label}__ (median [IQR])",
+                   **{HDR[g]: _iqr(_ig[g][col], dec) for g in GROUPS}})
+# mode mix
+if HAS_CRRT_SETTINGS and "crrt_mode_category" in idx.columns:
+    _m = idx["crrt_mode_category"].dropna().astype("string").str.lower()
+    _srows.append({COL: "__CRRT Modality (n %)__", **{HDR[g]: "" for g in GROUPS}})
+    for mode in list(_m.value_counts().index):
+        r = {COL: str(mode).upper()}
+        for g in GROUPS:
+            f = _ig[g]
+            n = int((f["crrt_mode_category"].astype("string").str.lower() == mode).sum())
+            r[HDR[g]] = _npct(n, len(f))
+        _srows.append(r)
+pd.DataFrame(_srows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_crrt_settings_by_hospital.csv", index=False)
+
+print(f"  wrote 3 files -> {OUT_DIR}")
+print("  (RAW hospital_id, no suppression -> local only; not for Box/consortium yet)")
+print("Done!")

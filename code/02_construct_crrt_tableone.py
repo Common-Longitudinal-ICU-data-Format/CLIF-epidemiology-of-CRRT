@@ -762,4 +762,17 @@ with open(html_path, "w", encoding="utf-8") as _f:
         "p-value across the three dose bands (Kruskal-Wallis / chi-square).</em></p>"
         + _disp.to_html(index=False, escape=False) + "</body></html>")
 print(f"  HTML: {html_path}")
+
+# ── Full Table-1 frame for hospital-level aggregates (02c) ──
+# t1 carries every Table-1 display column (cci_score, net_uf_intensity, _female,
+# _race_grp, sofa_nonrenal, _imv, _death30, …) that the saved tableone_analysis_df
+# (written earlier, before those were computed) does not. Persist it — with
+# hospital_id_at_init merged on — so 02c can re-stratify by hospital without
+# recomputing anything.
+if "hospital_id_at_init" not in t1.columns and "hospital_id_at_init" in index_crrt_df.columns:
+    t1 = t1.merge(
+        index_crrt_df[["encounter_block", "hospital_id_at_init"]].drop_duplicates("encounter_block"),
+        on="encounter_block", how="left")
+t1.to_parquet(INTERMEDIATE_DIR / "tableone_full_df.parquet", index=False)
+print(f"  Saved full Table-1 frame -> tableone_full_df.parquet ({len(t1)} rows)")
 print("Done!")
