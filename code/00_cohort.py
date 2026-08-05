@@ -900,39 +900,9 @@ crrt_at_initiation = crrt_cohort[
 print(f"   CRRT records at initiation: {len(crrt_at_initiation):,}")
 print(f"   Unique encounter blocks: {crrt_at_initiation['encounter_block'].nunique():,}")
 
-# ── Infer modality when it's blank/unknown at initiation, from the settings on
-#    the initiation record. The record is chosen by positive fluid activity, so
-#    its dialysate / replacement rates are present and disambiguate the mode:
-#      dialysate>0 & replacement>0 -> CVVHDF   dialysate>0 only -> CVVHD
-#      replacement>0 only -> CVVH              UF-only -> SCUF
-#    Recorded modes are NEVER overwritten — only true blanks/"unknown". 
-if has_crrt_settings:
-    def _infer_mode_from_settings(row):
-        dial = pd.notna(row.get('dialysate_flow_rate')) and row.get('dialysate_flow_rate') > 0
-        repl = (pd.notna(row.get('pre_filter_replacement_fluid_rate')) and row.get('pre_filter_replacement_fluid_rate') > 0) \
-            or (pd.notna(row.get('post_filter_replacement_fluid_rate')) and row.get('post_filter_replacement_fluid_rate') > 0)
-        uf = pd.notna(row.get('ultrafiltration_out')) and row.get('ultrafiltration_out') > 0
-        if dial and repl:
-            return 'cvvhdf'
-        if dial:
-            return 'cvvhd'
-        if repl:
-            return 'cvvh'
-        if uf:
-            return 'scuf'
-        return np.nan
-
-    _m = crrt_at_initiation['crrt_mode_category'].astype('string').str.lower().str.strip()
-    _blank = _m.isna() | _m.isin(['', 'unknown', 'nan', 'none'])
-    n_blank = int(_blank.sum())
-    if n_blank:
-        _inferred = crrt_at_initiation.loc[_blank].apply(_infer_mode_from_settings, axis=1)
-        crrt_at_initiation.loc[_blank, 'crrt_mode_category'] = _inferred.values
-        n_recovered = int(pd.Series(_inferred).notna().sum())
-        print(f"   Modality blank/unknown at initiation: {n_blank}; inferred from settings: "
-              f"{n_recovered} ({n_recovered / max(n_blank,1) * 100:.0f}%); still unknown: {n_blank - n_recovered}")
-        strobe_counts['modality_blank_at_init'] = n_blank
-        strobe_counts['modality_inferred_from_settings'] = n_recovered
+# NOTE: modality inference for encounters blank-at-initiation runs at the END of
+# cohort identification (after all exclusions), so it applies only to final-cohort
+# encounters. See "Infer CRRT modality at initiation (final cohort only)" below.
 
 
 
@@ -1455,6 +1425,124 @@ strobe_counts['6_encounter_blocks_with_required_labs'] = len(cohort_blocks)
 crrt_at_initiation = crrt_at_initiation[crrt_at_initiation['encounter_block'].isin(cohort_blocks)]
 index_crrt_df = index_crrt_df[index_crrt_df['encounter_block'].isin(cohort_blocks)]
 crrt_initiation = crrt_initiation[crrt_initiation['encounter_block'].isin(cohort_blocks)]
+
+
+# =====================================================================
+# Infer CRRT modality at initiation (final cohort only)
+# ---------------------------------------------------------------------
+# For encounters whose mode is null/unknown at initiation, recover it:
+#   (a) ffill    — last mode recorded at/before the initiation time in the same
+#                  encounter (clinician label, no look-ahead), then
+#   (b) settings — rule on the initiation record for whatever ffill can't fill:
+#        dialysate>0 & replacement>0 -> cvvhdf ; dialysate>0 -> cvvhd ;
+#        replacement>0 -> cvvh ; UF-only -> scuf.
+# Recorded modes are NEVER overwritten. The fill is written into both
+# crrt_at_initiation and index_crrt_df (what 02/03 read). Three no-PHI
+# diagnostics are written to final_no_phi/diagnostics/.
+# =====================================================================
+if has_crrt_settings:
+    _BL = ['', 'unknown', 'nan', 'none']
+    _normmode = lambda s: s.astype('string').str.lower().str.strip()
+
+    def _infer_mode_from_settings(row):
+        dial = pd.notna(row.get('dialysate_flow_rate')) and row.get('dialysate_flow_rate') > 0
+        repl = (pd.notna(row.get('pre_filter_replacement_fluid_rate')) and row.get('pre_filter_replacement_fluid_rate') > 0) \
+            or (pd.notna(row.get('post_filter_replacement_fluid_rate')) and row.get('post_filter_replacement_fluid_rate') > 0)
+        uf = pd.notna(row.get('ultrafiltration_out')) and row.get('ultrafiltration_out') > 0
+        if dial and repl:
+            return 'cvvhdf'
+        if dial:
+            return 'cvvhd'
+        if repl:
+            return 'cvvh'
+        if uf:
+            return 'scuf'
+        return np.nan
+
+    # one initiation record per encounter_block (cohort already applied above)
+    _ci = crrt_at_initiation.drop_duplicates('encounter_block').set_index('encounter_block')
+    _rec0 = _normmode(_ci['crrt_mode_category'])                      # original recorded mode
+    _blank_blocks = _ci.index[_rec0.isna() | _rec0.isin(_BL)]
+    _settings_mode = _ci.apply(_infer_mode_from_settings, axis=1)
+
+    # (a) ffill: last recorded mode at/before initiation, per encounter
+    _ct = crrt_cohort.copy()
+    _ct['_m'] = _normmode(_ct['crrt_mode_category'])
+    _ct.loc[_ct['_m'].isin(_BL), '_m'] = pd.NA
+    _past = _ct.dropna(subset=['_m'])
+    _past = _past[_past['recorded_dttm'] <= _past['crrt_initiation_time']].sort_values(['encounter_block', 'recorded_dttm'])
+    _ffill = _past.groupby('encounter_block')['_m'].last()
+
+    # (b) ffill -> settings for the blank blocks
+    _inferred = _ffill.reindex(_blank_blocks).fillna(_settings_mode.reindex(_blank_blocks))
+    _src = pd.Series('settings', index=_blank_blocks)
+    _src[_ffill.reindex(_blank_blocks).notna()] = 'ffill'
+    _n_blank = len(_blank_blocks); _n_rec = int(_inferred.notna().sum())
+    print(f"\nCRRT modality inference (final cohort): null-at-init = {_n_blank}; "
+          f"recovered = {_n_rec} (ffill {int((_src == 'ffill').sum())}, settings {int((_src == 'settings').sum())}); "
+          f"still unknown = {_n_blank - _n_rec}")
+    strobe_counts['modality_blank_at_init'] = _n_blank
+    strobe_counts['modality_inferred'] = _n_rec
+
+    # write fills into both frames (mode column only, keyed by encounter_block)
+    def _apply_mode_fill(df):
+        _mn = _normmode(df['crrt_mode_category'])
+        _blank = _mn.isna() | _mn.isin(_BL)
+        _fill = df['encounter_block'].map(_inferred)
+        df.loc[_blank, 'crrt_mode_category'] = _fill[_blank].fillna(df.loc[_blank, 'crrt_mode_category'])
+        return df
+    crrt_at_initiation = _apply_mode_fill(crrt_at_initiation)
+    index_crrt_df = _apply_mode_fill(index_crrt_df)
+
+    # ---- no-PHI diagnostics -> final_no_phi/diagnostics/ ----
+    _dg = f"{OUT}/final_no_phi/diagnostics"
+    _recnn = _ct.dropna(subset=['_m']).copy()
+    _recnn['_dt'] = (_recnn['recorded_dttm'] - _recnn['crrt_initiation_time']).abs()
+    _closest = _recnn.sort_values(['encounter_block', '_dt']).groupby('encounter_block')['_m'].first()
+    _most_common = _recnn.groupby('encounter_block')['_m'].agg(lambda s: s.value_counts().index[0])
+    _repl_ever = ((_ct['pre_filter_replacement_fluid_rate'].fillna(0) > 0) |
+                  (_ct['post_filter_replacement_fluid_rate'].fillna(0) > 0)).groupby(_ct['encounter_block']).any()
+
+    # 1) recorded-vs-settings disagreements (encounters WITH a recorded mode) — data-quality signal
+    _known = _rec0[~(_rec0.isna() | _rec0.isin(_BL))]
+    _kv = pd.DataFrame({'recorded': _known, 'inf': _settings_mode.reindex(_known.index)}).dropna(subset=['inf'])
+    if len(_kv):
+        _dis = _kv[_kv['recorded'] != _kv['inf']].copy()
+        _dis['type'] = _dis['recorded'] + ' -> ' + _dis['inf']
+        _dis['rev'] = _dis.index.map(_repl_ever).fillna(False)
+        _s = _dis.groupby('type').size().rename('n_encounters').reset_index().sort_values('n_encounters', ascending=False)
+        _s['pct_of_recorded'] = (_s['n_encounters'] / len(_kv) * 100).round(1)
+        _s['persistent_gap'] = _s['type'].map(_dis[~_dis['rev']].groupby('type').size()).fillna(0).astype(int)
+        _s['charting_lag'] = _s['type'].map(_dis[_dis['rev']].groupby('type').size()).fillna(0).astype(int)
+        _s = pd.concat([_s, pd.DataFrame([['TOTAL', len(_dis), round(len(_dis) / len(_kv) * 100, 1),
+              int((~_dis['rev']).sum()), int(_dis['rev'].sum())]], columns=_s.columns)], ignore_index=True)
+        _s.to_csv(f"{_dg}/{SITE_NAME}_mode_disagreement_summary.csv", index=False)
+
+    if _n_blank:
+        # 2) modality of the fills, by method
+        _dist = pd.DataFrame({'pipeline_inferred': _inferred.value_counts(),
+                              'closest_in_time': _closest.reindex(_blank_blocks).value_counts(),
+                              'most_common': _most_common.reindex(_blank_blocks).value_counts()}).fillna(0).astype(int)
+        _dist.index.name = 'modality'
+        _dist.to_csv(f"{_dg}/{SITE_NAME}_inferred_mode_by_method.csv")
+
+        # 3) tidy: inferred fill vs closest recorded mode (same shape as the disagreement summary)
+        _cmp = pd.DataFrame({'inferred': _inferred, 'closest': _closest.reindex(_blank_blocks), 'source': _src})
+        _rows = [['AGREE (inferred == closest)', int((_cmp['closest'].notna() & (_cmp['inferred'] == _cmp['closest'])).sum()), '', '']]
+        _mm = _cmp[_cmp['closest'].notna() & (_cmp['inferred'] != _cmp['closest'])].copy()
+        _mm['t'] = _mm['inferred'] + ' -> ' + _mm['closest']
+        for _t, _g in _mm.groupby('t'):
+            _rows.append([_t, len(_g), int((_g['source'] == 'ffill').sum()), int((_g['source'] == 'settings').sum())])
+        _naref = _cmp[_cmp['closest'].isna()]
+        _rows.append(['no_reference (settings-only, unverifiable)', len(_naref),
+                      int((_naref['source'] == 'ffill').sum()), int((_naref['source'] == 'settings').sum())])
+        _rows.append(['TOTAL (inferred blanks)', _n_blank, '', ''])
+        _tidy = pd.DataFrame(_rows, columns=['type', 'n_encounters', 'from_ffill', 'from_settings'])
+        _tidy['pct_of_inferred'] = (_tidy['n_encounters'] / max(_n_blank, 1) * 100).round(1)
+        _tidy = _tidy[['type', 'n_encounters', 'pct_of_inferred', 'from_ffill', 'from_settings']]
+        _tidy.to_csv(f"{_dg}/{SITE_NAME}_inferred_vs_closest_summary.csv", index=False)
+    print(f"  mode diagnostics -> {SITE_NAME}_mode_disagreement_summary.csv, "
+          f"_inferred_mode_by_method.csv, _inferred_vs_closest_summary.csv")
 
 
 # # Cohort Sanity Checks
