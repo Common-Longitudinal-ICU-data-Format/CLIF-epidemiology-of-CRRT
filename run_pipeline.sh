@@ -24,11 +24,15 @@ for arg in "$@"; do
     esac
 done
 
-# Set up logging — capture all output to a timestamped log file + console
-LOG_DIR="$SCRIPT_DIR/output/final_no_phi"
+# Set up logging — capture all output to a timestamped log file + console.
+# Log lands in the config's output_dir so per-site runs (output_ucmc / output_nu)
+# keep their logs alongside their data.
+CFG="${CLIF_CONFIG:-$SCRIPT_DIR/config/config.json}"
+SITE_NAME=$(python3 -c "import json; print(json.load(open('$CFG'))['site_name'])" 2>/dev/null || echo "unknown")
+OUTPUT_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('output_dir','output'))" 2>/dev/null || echo "output")
+LOG_DIR="$SCRIPT_DIR/$OUTPUT_DIR/final_no_phi"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-SITE_NAME=$(python3 -c "import json; print(json.load(open('$SCRIPT_DIR/config/config.json'))['site_name'])" 2>/dev/null || echo "unknown")
 LOG_FILE="$LOG_DIR/${SITE_NAME}_pipeline_${TIMESTAMP}.log"
 
 exec > >(tee -a "$LOG_FILE") 2>&1

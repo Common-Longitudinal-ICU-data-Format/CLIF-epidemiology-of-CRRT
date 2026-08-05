@@ -48,6 +48,10 @@ cat(paste(rep("=", 80), collapse = ""), "\n\n")
 ## ---- A. Working directory (from config.json project_root) ----
 .find_config <- function() {
   candidates <- c("../config/config.json", "config/config.json")
+  # honor CLIF_CONFIG (matches the Python pipeline_helpers) so a multi-site run
+  # can point at config_nu.json etc. without editing config.json
+  .cc <- Sys.getenv("CLIF_CONFIG")
+  if (nzchar(.cc)) candidates <- c(.cc, candidates)
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
   if (length(file_arg) > 0) {

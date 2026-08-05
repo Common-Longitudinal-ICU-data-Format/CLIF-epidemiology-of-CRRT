@@ -23,6 +23,10 @@ cat("Environment and plots cleared.\n")
 # Try multiple config paths: relative to code/, relative to cwd, or via --file=
 .find_config <- function() {
   candidates <- c("../config/config.json", "config/config.json")
+  # honor CLIF_CONFIG (matches the Python pipeline_helpers) so a multi-site run
+  # can point at config_nu.json etc. without editing config.json
+  .cc <- Sys.getenv("CLIF_CONFIG")
+  if (nzchar(.cc)) candidates <- c(.cc, candidates)
   # Also try relative to script location
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
