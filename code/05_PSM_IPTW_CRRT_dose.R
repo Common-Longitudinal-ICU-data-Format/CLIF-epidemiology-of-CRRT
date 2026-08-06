@@ -1618,15 +1618,24 @@ summary(fit_cs_disch)
 
 #### ---- II. Extract IPTW Cox cause-specific HR results (full covariates) ----
 
+# Pick the first AVAILABLE column in order of preference.
+# intersect() returns elements ordered by its FIRST argument, so
+# intersect(colnames(co), c("robust se", "se(coef)"))[1] silently returns
+# "se(coef)": summary.coxph orders its columns coef, exp(coef), se(coef),
+# robust se, z, Pr(>|z|), so the naive model-based SE always wins the race
+# even though "robust se" was listed first to express the preference. For a
+# weighted Cox fit that is the wrong standard error.
+first_present <- function(prefs, cols) prefs[prefs %in% cols][1]
+
 extract_iptw_cox <- function(fit, label){
   s <- summary(fit)
   co <- s$coefficients
   ci <- confint(fit)    # CI already on coef scale
 
-  # detect correct column names
-  z_col <- intersect(colnames(co), c("robust z","z"))[1]
-  p_col <- intersect(colnames(co), c("Pr(>|z|)","Robust Pr(>|z|)","p"))[1]
-  se_col <- intersect(colnames(co), c("robust se","se(coef)"))[1]
+  # detect correct column names (preference order is honoured)
+  z_col <- first_present(c("robust z","z"), colnames(co))
+  p_col <- first_present(c("Pr(>|z|)","Robust Pr(>|z|)","p"), colnames(co))
+  se_col <- first_present(c("robust se","se(coef)"), colnames(co))
 
   data.frame(
     outcome = label,
@@ -2053,9 +2062,10 @@ extract_iptw_trt <- function(fit, label){
   ci <- confint(fit)
   idx <- grep("crrt_high", rownames(co))
 
-  # Detect column names dynamically
-  p_col <- intersect(colnames(co), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
-  se_col <- intersect(colnames(co), c("robust se", "se(coef)"))[1]
+  # Detect column names dynamically (see first_present: intersect() would
+  # ignore the preference order and hand back the naive se(coef))
+  p_col <- first_present(c("Pr(>|z|)", "Robust Pr(>|z|)"), colnames(co))
+  se_col <- first_present(c("robust se", "se(coef)"), colnames(co))
 
   data.frame(
     model = label,
