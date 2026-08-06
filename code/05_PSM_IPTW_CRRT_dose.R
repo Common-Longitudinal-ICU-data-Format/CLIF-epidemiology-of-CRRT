@@ -1843,6 +1843,22 @@ cumhaz_at_grid <- function(basehaz_df, grid_time) {
   out
 }
 
+# Helper: UNCENTERED linear predictor x'beta.
+# predict(fit, type = "lp") returns the linear predictor centered at fit$means,
+# i.e. x'beta - xbar'beta. Pairing that with basehaz(centered = FALSE), which is
+# the cumulative hazard at x = 0, multiplies every subject's hazard by a spurious
+# constant exp(-xbar'beta). The constant differs between the death and discharge
+# models, so it does not cancel in the competing-risks recursion: it deflates one
+# cause and inflates the other. Build x'beta explicitly instead of using
+# predict(..., reference = "zero"), because older survival versions absorb an
+# unknown `reference` into `...` and would silently return the centered value.
+lp_uncentered <- function(fit, newdata) {
+  b <- coef(fit)
+  b <- b[!is.na(b)]   # aliased terms carry no contribution
+  mm <- model.matrix(delete.response(terms(fit)), data = newdata, xlev = fit$xlevels)
+  as.vector(mm[, names(b), drop = FALSE] %*% b)
+}
+
 # Population-averaged standardized CIFs via g-computation
 build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, newdata) {
   bh_death <- basehaz(fit_death, centered = FALSE)
@@ -1858,8 +1874,8 @@ build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, n
   out <- lapply(trt_levels, function(lv) {
     cf_data <- newdata
     cf_data[[trt_var]] <- factor(lv, levels = trt_levels)
-    lp_death <- predict(fit_death, newdata = cf_data, type = "lp")
-    lp_disch <- predict(fit_disch, newdata = cf_data, type = "lp")
+    lp_death <- lp_uncentered(fit_death, cf_data)
+    lp_disch <- lp_uncentered(fit_disch, cf_data)
     mult_death <- exp(lp_death)
     mult_disch <- exp(lp_disch)
     n <- length(mult_death)
