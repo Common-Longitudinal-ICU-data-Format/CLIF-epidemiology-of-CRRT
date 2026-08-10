@@ -83,3 +83,6 @@ output_eu/
 config_nu.json
 
 manuscript/
+# Shan's coordinator tooling (source) — the 4 scripts are copied into code/
+crrt-manuscript-tools/
+manuscript_run_results/
