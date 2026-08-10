@@ -1509,7 +1509,7 @@ if has_crrt_settings:
     if len(_kv):
         _dis = _kv[_kv['recorded'] != _kv['inf']].copy()
         _dis['type'] = _dis['recorded'] + ' -> ' + _dis['inf']
-        _dis['rev'] = _dis.index.map(_repl_ever).fillna(False)
+        _dis['rev'] = _dis.index.map(_repl_ever).fillna(False).astype(bool)
         _s = _dis.groupby('type').size().rename('n_encounters').reset_index().sort_values('n_encounters', ascending=False)
         _s['pct_of_recorded'] = (_s['n_encounters'] / len(_kv) * 100).round(1)
         _s['persistent_gap'] = _s['type'].map(_dis[~_dis['rev']].groupby('type').size()).fillna(0).astype(int)
