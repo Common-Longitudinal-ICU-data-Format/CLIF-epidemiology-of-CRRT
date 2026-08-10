@@ -73,7 +73,11 @@ if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final_no_phi/psm_iptw"
+# Output root: honors config output_dir so a per-site run (output_ucmc / output_nu)
+# stays isolated from the default "output" tree.
+.out_root <- if (!is.null(.config$output_dir) && nzchar(.config$output_dir)) .config$output_dir else "output"
+cat("Output root:", .out_root, "\n")
+output_dir <- file.path(.out_root, "final_no_phi", "psm_iptw")
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")
@@ -114,19 +118,15 @@ rubins_pool <- function(betas, ses) {
 }
 
 ## ---- E. Load configuration ----
-config_path <- "config/config.json"
-if (!file.exists(config_path)) {
-  stop("Configuration file not found: ", config_path)
-}
-
-config <- jsonlite::fromJSON(config_path)
+config_path <- .config_path  # honors CLIF_CONFIG
+config <- .config
 SITE_NAME <- config$site_name
 
 cat("Site:", SITE_NAME, "\n")
 cat("Timezone:", config$timezone, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate_phi/causal_df.parquet"
+data_path <- file.path(.out_root, "intermediate_phi", "causal_df.parquet")
 if (!file.exists(data_path)) {
   stop("File '", data_path, "' not found.")
 }
