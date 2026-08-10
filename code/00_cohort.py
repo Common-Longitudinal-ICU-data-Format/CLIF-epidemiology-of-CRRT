@@ -1647,13 +1647,17 @@ _before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['en
 # well-defined at a fixed timepoint — we capture it at initiation, for descriptive
 # / initial-settings stratification only (NOT longitudinal analyses). Single-
 # hospital sites have a constant value; multi-hospital systems (e.g. UMN) vary.
-_init_seg = (_before.groupby('encounter_block').tail(1)
-             [['encounter_block', 'location_category', 'hospital_id']])
+_init_cols = ['encounter_block', 'location_category', 'hospital_id']
+if 'hospital_type' in _before.columns:
+    _init_cols.append('hospital_type')   # CLIF ADT field: academic / community
+_init_seg = _before.groupby('encounter_block').tail(1)[_init_cols]
+_init_rename = {'location_category': 'crrt_start_location', 'hospital_id': 'hospital_id_at_init'}
+if 'hospital_type' in _init_seg.columns:
+    _init_rename['hospital_type'] = 'hospital_type_at_init'
 crrt_start_location = (
     crrt_initiation[['encounter_block']].drop_duplicates()
     .merge(_init_seg, on='encounter_block', how='left')
-    .rename(columns={'location_category': 'crrt_start_location',
-                     'hospital_id': 'hospital_id_at_init'}))
+    .rename(columns=_init_rename))
 crrt_start_location['crrt_start_location'] = crrt_start_location['crrt_start_location'].fillna('unknown')
 print(f"   Distinct hospital_id at CRRT initiation: "
       f"{crrt_start_location['hospital_id_at_init'].nunique(dropna=True)} "
@@ -3039,7 +3043,10 @@ index_crrt_df = index_crrt_df.merge(
 # stratified by hospital at a multi-hospital site. Encounter_block-keyed left
 # merge; well-defined only at initiation (transfers make it ambiguous over the
 # course), so it is intended for descriptive-at-initiation use, NOT longitudinal.
-_hosp_at_init = crrt_start_location[['encounter_block', 'hospital_id_at_init']].drop_duplicates('encounter_block')
+_carry = ['encounter_block', 'hospital_id_at_init']
+if 'hospital_type_at_init' in crrt_start_location.columns:
+    _carry.append('hospital_type_at_init')
+_hosp_at_init = crrt_start_location[_carry].drop_duplicates('encounter_block')
 index_crrt_df = index_crrt_df.merge(_hosp_at_init, on='encounter_block', how='left')
 outcomes_df = outcomes_df.merge(_hosp_at_init, on='encounter_block', how='left')
 

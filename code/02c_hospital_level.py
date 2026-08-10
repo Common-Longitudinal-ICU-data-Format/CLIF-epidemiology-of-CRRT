@@ -3,15 +3,19 @@
 
 Stratifies the CRRT cohort by `hospital_id_at_init` (the facility where CRRT was
 started; descriptive-at-initiation only — transfers make it ambiguous over the
-course). Produces three per-site CSVs:
+course). Produces four per-site CSVs:
   1. {site}_hospital_counts.csv          — encounters per hospital
   2. {site}_table1_by_hospital.csv       — the full Table 1, one column per hospital
   3. {site}_crrt_settings_by_hospital.csv — 3h-median CRRT settings + mode mix per hospital
+  4. {site}_hospital_type.csv            — anon label -> academic/community (for caterpillar)
 
-⚠️  SHARING: these use the RAW hospital_id and are NOT small-cell suppressed by
-    default, so they are NOT safe to upload to Box/consortium. They are written
-    to intermediate_phi/hospital_level/ (local, git-ignored). To make them
-    shareable, set SUPPRESS_MIN_N (below) and move the output to final_no_phi/.
+SHARING: outputs are de-identified for the consortium — hospital labels are
+    anonymized to {site}_H1..Hn (ordered by descending encounter count; no
+    crosswalk leaves the site), and small cells are suppressed two ways:
+      * whole hospitals with < SUPPRESS_MIN_N encounters are dropped entirely, and
+      * any categorical cell with numerator < SUPPRESS_MIN_N is blanked to "<N".
+    Written to final_no_phi/hospital_level/. Set SUPPRESS_MIN_N = None to disable
+    suppression for LOCAL inspection only (never share an unsuppressed run).
 
 Run from code/ :  uv run python 02c_hospital_level.py
 """
@@ -20,18 +24,19 @@ from pipeline_helpers import load_config, load_intermediate, get_output_root  # 
 import pandas as pd
 import numpy as np
 
-# ---- small-cell suppression (OFF until the consortium threshold is decided) ----
-SUPPRESS_MIN_N = None   # e.g. 10 -> drop hospitals with < 10 encounters and blank
-                        #      categorical cells with numerator < 10. None = no suppression.
+# ---- small-cell suppression (consortium default; None = local inspection only) ----
+SUPPRESS_MIN_N = 10     # drop hospitals with < 10 encounters and blank categorical
+                        # cells with numerator < 10. Set None to disable (do NOT share).
 
 config = load_config()
 OUTPUT_ROOT = get_output_root(config)
 INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
-OUT_DIR = INTERMEDIATE_DIR / "hospital_level"          # local, NOT shared (no suppression yet)
+OUT_DIR = OUTPUT_ROOT / "final_no_phi" / "hospital_level"   # de-identified + suppressed -> shareable
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 SITE_NAME = config["site_name"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 HCOL = "hospital_id_at_init"
+TCOL = "hospital_type_at_init"
 
 print("=== 02c: hospital-level aggregates ===")
 
@@ -53,13 +58,26 @@ if SUPPRESS_MIN_N:
     if _dropped:
         print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}")
 GROUPS = ["Overall"] + _hosps
+# anonymize surviving hospitals -> {site}_H1..Hn (descending encounter count, which is
+# _hosps' order); "unknown" and "Overall" pass through. The raw->anon map never leaves here.
+LABEL = {"Overall": "Overall", "unknown": "unknown"}
+_h = 0
+for _hid in _hosps:
+    if _hid == "unknown":
+        continue
+    _h += 1
+    LABEL[_hid] = f"{SITE_NAME}_H{_h}"
 print(f"  {SITE_NAME}: {t1[HCOL].nunique()} distinct hospital_id_at_init | {len(t1):,} encounters")
+if SUPPRESS_MIN_N:
+    print(f"  suppression ON (min n = {SUPPRESS_MIN_N}); {len([h for h in _hosps if h != 'unknown'])} hospital(s) retained + anonymized")
 
 
 # =====================================================================
 # 1. Hospital counts
 # =====================================================================
-_cnt = (t1[HCOL].value_counts(dropna=False).rename_axis("hospital_id").reset_index(name="n_encounters"))
+# only retained (unsuppressed) hospitals, anonymized; pcts are of the full site total
+_cnt = pd.DataFrame({"hospital_id": [LABEL[h] for h in _hosps],
+                     "n_encounters": [int(_counts[h]) for h in _hosps]})
 _cnt["pct_of_site"] = (_cnt["n_encounters"] / len(t1) * 100).round(1)
 _cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
 
@@ -70,7 +88,7 @@ _cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
 gframe = {"Overall": t1, **{h: t1[t1[HCOL] == h] for h in _hosps}}
 gn = {g: len(gframe[g]) for g in GROUPS}
 COL = "Characteristic"
-HDR = {g: (f"Overall (N={gn[g]:,})" if g == "Overall" else f"{g} (N={gn[g]:,})") for g in GROUPS}
+HDR = {g: f"{LABEL[g]} (N={gn[g]:,})" for g in GROUPS}
 _columns = [COL] + [HDR[g] for g in GROUPS]
 
 
@@ -125,6 +143,23 @@ def _row_multi(label, col, level_order):
         _rows.append(r)
 
 
+def _row_dose_bins(label, col):
+    # N(%) of dosed patients per KDIGO-style band; denominator = patients with a
+    # non-missing dose (so bands sum to 100% of the dosed), edges: <20, 20-30, >30.
+    if col not in t1.columns:
+        return
+    bands = [("< 20 mL/kg/hr", lambda s: s < 20),
+             ("20–30 mL/kg/hr", lambda s: (s >= 20) & (s <= 30)),
+             ("> 30 mL/kg/hr", lambda s: s > 30)]
+    _rows.append({COL: f"__{label}__", **{HDR[g]: "" for g in GROUPS}})
+    for disp, pred in bands:
+        r = {COL: disp}
+        for g in GROUPS:
+            s = pd.to_numeric(gframe[g][col], errors="coerce")
+            r[HDR[g]] = _npct(int(pred(s).sum()), int(s.notna().sum()))
+        _rows.append(r)
+
+
 # Demographics
 _row_cont("Age at Admission (years)", "age_at_admission", 0)
 _row_binary("Female (%)", "_female")
@@ -144,6 +179,7 @@ _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
 _row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+_row_dose_bins("Initial CRRT Dose, banded (% of dosed)", "crrt_dose_ml_kg_hr")
 if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
     _modes = list(t1["crrt_mode_category"].dropna().astype("string").str.lower().value_counts().index)
     if _modes:
@@ -186,6 +222,27 @@ if HAS_CRRT_SETTINGS and "crrt_mode_category" in idx.columns:
         _srows.append(r)
 pd.DataFrame(_srows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_crrt_settings_by_hospital.csv", index=False)
 
-print(f"  wrote 3 files -> {OUT_DIR}")
-print("  (RAW hospital_id, no suppression -> local only; not for Box/consortium yet)")
+
+# =====================================================================
+# 4. Hospital type (academic / community) — anon label -> type, for the caterpillar
+# =====================================================================
+def _first_type(s):
+    v = s.dropna()
+    return str(v.iloc[0]).lower() if len(v) else "unknown"
+
+
+if TCOL in idx.columns:
+    _typ = idx.groupby(HCOL)[TCOL].agg(_first_type)
+else:
+    _typ = pd.Series(dtype="object")   # site did not populate ADT hospital_type
+_trows = [{"hospital": LABEL[h],
+           "hospital_type": _typ.get(h, "unknown"),
+           "n_encounters": int(_counts[h])}
+          for h in _hosps if h != "unknown"]
+pd.DataFrame(_trows, columns=["hospital", "hospital_type", "n_encounters"]).to_csv(
+    OUT_DIR / f"{SITE_NAME}_hospital_type.csv", index=False)
+
+print(f"  wrote 4 files -> {OUT_DIR}")
+print(f"  (anonymized labels + small-cell suppression @ n<{SUPPRESS_MIN_N} -> shareable)"
+      if SUPPRESS_MIN_N else "  (SUPPRESSION OFF -> local inspection only, DO NOT share)")
 print("Done!")
