@@ -89,16 +89,20 @@ if (length(new_packages)) {
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Output directory ----
-output_dir <- "output/final_no_phi/psm_iptw"
+# Output root: honors config output_dir so a per-site run (output_ucmc / output_nu)
+# stays isolated from the default "output" tree.
+.out_root <- if (!is.null(.config$output_dir) && nzchar(.config$output_dir)) .config$output_dir else "output"
+cat("Output root:", .out_root, "\n")
+output_dir <- file.path(.out_root, "final_no_phi", "psm_iptw")
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
 ## ---- D. Load configuration ----
-config <- jsonlite::fromJSON("config/config.json")
+config <- .config  # honors CLIF_CONFIG
 SITE_NAME <- config$site_name
 cat("Site:", SITE_NAME, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate_phi/causal_df.parquet"
+data_path <- file.path(.out_root, "intermediate_phi", "causal_df.parquet")
 if (!file.exists(data_path)) stop("File not found: ", data_path)
 df <- arrow::read_parquet(data_path)
 cat("Loaded:", nrow(df), "rows x", ncol(df), "columns\n")
