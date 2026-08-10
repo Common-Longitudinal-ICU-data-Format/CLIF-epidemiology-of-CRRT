@@ -1622,15 +1622,24 @@ summary(fit_cs_disch)
 
 #### ---- II. Extract IPTW Cox cause-specific HR results (full covariates) ----
 
+# Pick the first AVAILABLE column in order of preference.
+# intersect() returns elements ordered by its FIRST argument, so
+# intersect(colnames(co), c("robust se", "se(coef)"))[1] silently returns
+# "se(coef)": summary.coxph orders its columns coef, exp(coef), se(coef),
+# robust se, z, Pr(>|z|), so the naive model-based SE always wins the race
+# even though "robust se" was listed first to express the preference. For a
+# weighted Cox fit that is the wrong standard error.
+first_present <- function(prefs, cols) prefs[prefs %in% cols][1]
+
 extract_iptw_cox <- function(fit, label){
   s <- summary(fit)
   co <- s$coefficients
   ci <- confint(fit)    # CI already on coef scale
 
-  # detect correct column names
-  z_col <- intersect(colnames(co), c("robust z","z"))[1]
-  p_col <- intersect(colnames(co), c("Pr(>|z|)","Robust Pr(>|z|)","p"))[1]
-  se_col <- intersect(colnames(co), c("robust se","se(coef)"))[1]
+  # detect correct column names (preference order is honoured)
+  z_col <- first_present(c("robust z","z"), colnames(co))
+  p_col <- first_present(c("Pr(>|z|)","Robust Pr(>|z|)","p"), colnames(co))
+  se_col <- first_present(c("robust se","se(coef)"), colnames(co))
 
   data.frame(
     outcome = label,
@@ -1847,6 +1856,22 @@ cumhaz_at_grid <- function(basehaz_df, grid_time) {
   out
 }
 
+# Helper: UNCENTERED linear predictor x'beta.
+# predict(fit, type = "lp") returns the linear predictor centered at fit$means,
+# i.e. x'beta - xbar'beta. Pairing that with basehaz(centered = FALSE), which is
+# the cumulative hazard at x = 0, multiplies every subject's hazard by a spurious
+# constant exp(-xbar'beta). The constant differs between the death and discharge
+# models, so it does not cancel in the competing-risks recursion: it deflates one
+# cause and inflates the other. Build x'beta explicitly instead of using
+# predict(..., reference = "zero"), because older survival versions absorb an
+# unknown `reference` into `...` and would silently return the centered value.
+lp_uncentered <- function(fit, newdata) {
+  b <- coef(fit)
+  b <- b[!is.na(b)]   # aliased terms carry no contribution
+  mm <- model.matrix(delete.response(terms(fit)), data = newdata, xlev = fit$xlevels)
+  as.vector(mm[, names(b), drop = FALSE] %*% b)
+}
+
 # Population-averaged standardized CIFs via g-computation
 build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, newdata) {
   bh_death <- basehaz(fit_death, centered = FALSE)
@@ -1862,8 +1887,8 @@ build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, n
   out <- lapply(trt_levels, function(lv) {
     cf_data <- newdata
     cf_data[[trt_var]] <- factor(lv, levels = trt_levels)
-    lp_death <- predict(fit_death, newdata = cf_data, type = "lp")
-    lp_disch <- predict(fit_disch, newdata = cf_data, type = "lp")
+    lp_death <- lp_uncentered(fit_death, cf_data)
+    lp_disch <- lp_uncentered(fit_disch, cf_data)
     mult_death <- exp(lp_death)
     mult_disch <- exp(lp_disch)
     n <- length(mult_death)
@@ -2041,9 +2066,10 @@ extract_iptw_trt <- function(fit, label){
   ci <- confint(fit)
   idx <- grep("crrt_high", rownames(co))
 
-  # Detect column names dynamically
-  p_col <- intersect(colnames(co), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
-  se_col <- intersect(colnames(co), c("robust se", "se(coef)"))[1]
+  # Detect column names dynamically (see first_present: intersect() would
+  # ignore the preference order and hand back the naive se(coef))
+  p_col <- first_present(c("Pr(>|z|)", "Robust Pr(>|z|)"), colnames(co))
+  se_col <- first_present(c("robust se", "se(coef)"), colnames(co))
 
   data.frame(
     model = label,

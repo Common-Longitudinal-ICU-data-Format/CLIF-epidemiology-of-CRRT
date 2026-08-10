@@ -299,41 +299,53 @@ print(f"  Dose 0-24h: {dose_0_24['crrt_dose_0_24'].notna().sum()} encounters")
 print(f"  Dose 24-48h: {dose_24_48['crrt_dose_24_48'].notna().sum()} encounters"
       f" (+{n_miss_24_48_before - n_miss_24_48_after} filled from 0-24h)")
 
-# Flag patients with any non-zero dialysate flow in 0-24h (for SCUF exclusion)
-has_dialysate_24h = (
-    wide_df[
-        (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < 24)
-        & (wide_df["crrt_dialysate_flow_rate"].notna())
-        & (wide_df["crrt_dialysate_flow_rate"] > 0)
-    ]
-    .groupby("encounter_block")["crrt_dialysate_flow_rate"]
-    .count()
-    .reset_index()
-    .rename(columns={"crrt_dialysate_flow_rate": "has_dialysate_24h"})
-)
-has_dialysate_24h["has_dialysate_24h"] = 1
-result = result.merge(has_dialysate_24h, on="encounter_block", how="left")
-result["has_dialysate_24h"] = result["has_dialysate_24h"].fillna(0).astype(int)
-n_no_dialysate = (result["has_dialysate_24h"] == 0).sum()
-print(f"  Patients with no dialysate in 0-24h (SCUF-only candidates): {n_no_dialysate}")
+# Flag patients with any non-zero CLEARANCE flow (for ultrafiltration-only exclusion).
+#
+# Clearance is delivered diffusively (dialysate) OR convectively (replacement fluid).
+# CVVH has no dialysate flow at all, so a dialysate-only test misclassifies every
+# hemofiltration patient as "ultrafiltration-only" and drops them at step 9b. The
+# union below mirrors has_crrt_activity in 00_cohort.py:830-840, so cohort entry and
+# this exclusion agree on what counts as clearance. The dose calculation above
+# (mode-specific, replacement fluid for cvvh) already made this distinction.
+CLEARANCE_COLS = [
+    "crrt_dialysate_flow_rate",
+    "crrt_pre_filter_replacement_fluid_rate",
+    "crrt_post_filter_replacement_fluid_rate",
+]
 
-# 4f: Dialysate check extended to 48h (sensitivity)
-has_dialysate_48h = (
-    wide_df[
-        (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < 48)
-        & (wide_df["crrt_dialysate_flow_rate"].notna())
-        & (wide_df["crrt_dialysate_flow_rate"] > 0)
-    ]
-    .groupby("encounter_block")["crrt_dialysate_flow_rate"]
-    .count()
-    .reset_index()
-    .rename(columns={"crrt_dialysate_flow_rate": "has_dialysate_48h"})
-)
-has_dialysate_48h["has_dialysate_48h"] = 1
-result = result.merge(has_dialysate_48h, on="encounter_block", how="left")
-result["has_dialysate_48h"] = result["has_dialysate_48h"].fillna(0).astype(int)
-n_no_dialysate_48 = (result["has_dialysate_48h"] == 0).sum()
-print(f"  Patients with no dialysate in 0-48h: {n_no_dialysate_48}")
+
+def flag_clearance(wide_df, result, hours, colname):
+    """Flag encounter_blocks with any positive clearance flow in [0, hours)."""
+    present = [c for c in CLEARANCE_COLS if c in wide_df.columns]
+    if not present:
+        # Returning all-zeros here would silently drop the entire causal cohort at
+        # step 9b, so fail loudly instead.
+        raise KeyError(
+            "No CRRT clearance-flow columns found in wide_df; expected any of "
+            f"{CLEARANCE_COLS}"
+        )
+    in_window = (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < hours)
+    any_flow = np.zeros(len(wide_df), dtype=bool)
+    for col in present:
+        any_flow |= (wide_df[col].fillna(0) > 0).to_numpy()
+
+    flag = (
+        wide_df.loc[in_window & any_flow, ["encounter_block"]]
+        .drop_duplicates()
+        .assign(**{colname: 1})
+    )
+    result = result.merge(flag, on="encounter_block", how="left")
+    result[colname] = result[colname].fillna(0).astype(int)
+    n_none = (result[colname] == 0).sum()
+    print(f"  Patients with no clearance flow in 0-{hours}h: {n_none}"
+          f"  (clearance cols used: {', '.join(present)})")
+    return result
+
+
+result = flag_clearance(wide_df, result, 24, "has_clearance_24h")
+
+# 4f: Clearance check extended to 48h (sensitivity)
+result = flag_clearance(wide_df, result, 48, "has_clearance_48h")
 
 del crrt_rows, wide_df
 import gc; gc.collect()
@@ -918,11 +930,13 @@ if EXCLUDE_SHORT_CRRT:
     print(f"\nStep 9b: Excluded {n_excluded_short} patients (died or off CRRT within 24h)")
     print(f"  Remaining: {len(result)}")
 
-    # Exclude SCUF-only patients (no dialysate clearance in first 24h)
-    scuf_no_clearance = (result["has_dialysate_24h"] == 0)
+    # Exclude ultrafiltration-only patients (no diffusive or convective clearance
+    # in the first 24h). Keys on dialysate OR replacement fluid so CVVH is retained.
+    scuf_no_clearance = (result["has_clearance_24h"] == 0)
     n_excluded_scuf = scuf_no_clearance.sum()
     result = result[~scuf_no_clearance].reset_index(drop=True)
-    print(f"  Excluded {n_excluded_scuf} SCUF-only patients (no dialysate in 0-24h)")
+    print(f"  Excluded {n_excluded_scuf} ultrafiltration-only patients "
+          f"(no clearance flow in 0-24h)")
     print(f"  Remaining: {len(result)}")
 
 # ===================================================================
@@ -934,8 +948,8 @@ eligible_48h_mask = (
     ~((result["outcome"] == 2) & (result["time_to_event_90d"] <= 2.0))
     # CRRT duration >= 48h (2 days)
     & (result["crrt_duration_days"] >= 2.0)
-    # Has dialysate flow in 0-48h window
-    & (result["has_dialysate_48h"] == 1)
+    # Has clearance flow (dialysate or replacement) in 0-48h window
+    & (result["has_clearance_48h"] == 1)
 )
 result["eligible_48h_sensitivity"] = eligible_48h_mask.astype(int)
 n_eligible = result["eligible_48h_sensitivity"].sum()
@@ -949,7 +963,7 @@ if n_eligible < 200:
 # STEP 10: Final column ordering per schema (59 columns)
 # ===================================================================
 # Drop helper columns used for exclusion
-for helper_col in ["has_dialysate_24h", "has_dialysate_48h"]:
+for helper_col in ["has_clearance_24h", "has_clearance_48h"]:
     if helper_col in result.columns:
         result.drop(columns=[helper_col], inplace=True)
 
@@ -1232,7 +1246,7 @@ rows = [
 
 excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_short:,}"
 if n_excluded_scuf > 0:
-    excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
+    excl_short_label += f"\n+ Ultrafiltration-only: n = {n_excluded_scuf:,}"
 rows.append({
     "remaining_label": "Causal analysis cohort\n(complete-case, dichotomized dose)",
     "remaining_n": n_causal,
