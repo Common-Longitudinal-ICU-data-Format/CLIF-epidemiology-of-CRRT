@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -429,3 +430,31 @@ def course_average_intensity(records, group_col, time_col, rate_col,
     g = g[g["hours_on"] > 0].copy()
     g["intensity"] = g["total"] / g["hours_on"]
     return g[cols]
+
+
+# ── CRRT dose: single source of truth for the mode-specific effluent formula ──
+# Previously copy-pasted as an np.select in 00, 03 and 04 — centralised here so a
+# mode change is one edit (and can't be applied to 2 of 3 sites again, the AVVH
+# bug). SCUF is pure ultrafiltration (no clearance) and is the only mode excluded.
+DOSE_ELIGIBLE_MODES = {"cvvh", "cvvhd", "cvvhdf", "avvh"}
+CONVECTIVE_MODES = ("cvvh", "avvh")   # clearance via replacement fluid, no dialysate
+
+
+def crrt_effluent_flow(mode, dialysate, pre_repl, post_repl):
+    """Mode-specific total effluent flow (mL/hr) = the CRRT clearance term
+    (flow / weight -> mL/kg/hr dose). cvvhd: dialysate; cvvh/avvh (convective):
+    replacement fluid; cvvhdf: both; anything else -> NaN.
+
+    Name-agnostic — pass whichever Series the frame holds (crrt_-prefixed in
+    wide_df, unprefixed in crrt_cohort). Modes are assumed already lowercased, as
+    they are upstream. Masked assignment (not np.select) so each mode's formula is
+    evaluated only on its own rows."""
+    flow = pd.Series(np.nan, index=mode.index)
+    repl = pre_repl.fillna(0) + post_repl.fillna(0)
+    is_cvvhd = mode == "cvvhd"
+    is_conv = mode.isin(CONVECTIVE_MODES)
+    is_dhdf = mode == "cvvhdf"
+    flow[is_cvvhd] = dialysate[is_cvvhd]
+    flow[is_conv] = repl[is_conv]
+    flow[is_dhdf] = dialysate[is_dhdf].fillna(0) + repl[is_dhdf]
+    return flow

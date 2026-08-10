@@ -32,7 +32,8 @@ import pyarrow.parquet as pq
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
-from pipeline_helpers import load_config, load_intermediate, get_tables_path, get_output_root, compute_cci  # noqa: E402
+from pipeline_helpers import (load_config, load_intermediate, get_tables_path,  # noqa: E402
+    get_output_root, compute_cci, crrt_effluent_flow)
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
 
@@ -201,22 +202,13 @@ crrt_ffill_cols = [c for c in crrt_cols if c in wide_df.columns]
 wide_df[crrt_ffill_cols] = wide_df.groupby("encounter_block")[crrt_ffill_cols].ffill(limit=8)
 print(f"  Forward-filled CRRT settings (limit=8 rows)")
 
-# Mode-specific dose formula
+# Mode-specific dose formula (shared with 00/03 via pipeline_helpers)
 crrt_rows = wide_df[wide_df["crrt_mode_category"].notna()].copy()
-conditions = [
-    crrt_rows["crrt_mode_category"] == "cvvhd",
-    crrt_rows["crrt_mode_category"] == "cvvh",
-    crrt_rows["crrt_mode_category"] == "cvvhdf",
-]
-choices = [
+crrt_rows["total_flow_rate"] = crrt_effluent_flow(
+    crrt_rows["crrt_mode_category"],
     crrt_rows["crrt_dialysate_flow_rate"],
-    crrt_rows["crrt_pre_filter_replacement_fluid_rate"].fillna(0)
-    + crrt_rows["crrt_post_filter_replacement_fluid_rate"].fillna(0),
-    crrt_rows["crrt_dialysate_flow_rate"].fillna(0)
-    + crrt_rows["crrt_pre_filter_replacement_fluid_rate"].fillna(0)
-    + crrt_rows["crrt_post_filter_replacement_fluid_rate"].fillna(0),
-]
-crrt_rows["total_flow_rate"] = np.select(conditions, choices, default=np.nan)
+    crrt_rows["crrt_pre_filter_replacement_fluid_rate"],
+    crrt_rows["crrt_post_filter_replacement_fluid_rate"])
 crrt_rows["crrt_dose_ml_kg_hr"] = np.where(
     (crrt_rows["weight_kg"] > 0) & (crrt_rows["total_flow_rate"] > 0),
     crrt_rows["total_flow_rate"] / crrt_rows["weight_kg"],

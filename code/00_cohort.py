@@ -62,7 +62,8 @@ print(f"Current directory: {os.getcwd()}")
 
 
 # Load configuration (honors CLIF_CONFIG; defaults to config/config.json)
-from pipeline_helpers import load_config, safe_load_clif_table, get_output_root, STUDY_YEAR_START, STUDY_YEAR_END
+from pipeline_helpers import (load_config, safe_load_clif_table, get_output_root,
+    STUDY_YEAR_START, STUDY_YEAR_END, crrt_effluent_flow, DOSE_ELIGIBLE_MODES)
 config = load_config()
 SITE_NAME = config["site_name"]
 
@@ -2326,12 +2327,12 @@ if has_crrt_settings:
 
     print("\n Calculating CRRT dose at initiation...")
 
-    # Filter to dose-eligible modes (SCUF/AVVH excluded — no standard dose formula)
-    DOSE_MODES = {'cvvh', 'cvvhd', 'cvvhdf'}
-
+    # Filter to dose-eligible modes (only SCUF excluded — pure ultrafiltration has
+    # no clearance dose). AVVH is convective like CVVH so it IS dose-eligible; the
+    # mode set and the effluent formula live in pipeline_helpers (single source).
     print(f"   Total CRRT records before dose filtering: {len(crrt_cohort):,}")
-    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(DOSE_MODES)].copy()
-    print(f"   Records after filtering for dose modes (cvvh, cvvhd, cvvhdf): {len(crrt_df_filtered):,}")
+    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(DOSE_ELIGIBLE_MODES)].copy()
+    print(f"   Records after filtering for dose modes {sorted(DOSE_ELIGIBLE_MODES)}: {len(crrt_df_filtered):,}")
     print(f"   Excluded from dose calc: {len(crrt_cohort) - len(crrt_df_filtered):,}")
 
     # Fill NaN values with 0 for flow rate columns
@@ -2347,22 +2348,12 @@ if has_crrt_settings:
     print("\n   Mode distribution across all time points:")
     print(crrt_df_filtered['crrt_mode_category'].value_counts())
 
-    # Calculate mode-specific dose at EACH time point
-    conditions = [
-        crrt_df_filtered['crrt_mode_category'] == 'cvvhd',
-        crrt_df_filtered['crrt_mode_category'] == 'cvvh',
-        crrt_df_filtered['crrt_mode_category'] == 'cvvhdf'
-    ]
-
-    choices = [
+    # Mode-specific total effluent flow at each time point (shared formula)
+    crrt_df_filtered['total_flow_rate'] = crrt_effluent_flow(
+        crrt_df_filtered['crrt_mode_category'],
         crrt_df_filtered['dialysate_flow_rate'],
-        crrt_df_filtered['pre_filter_replacement_fluid_rate'] + crrt_df_filtered['post_filter_replacement_fluid_rate'],
-        crrt_df_filtered['dialysate_flow_rate'] + crrt_df_filtered['pre_filter_replacement_fluid_rate'] +
-        crrt_df_filtered['post_filter_replacement_fluid_rate']
-    ]
-
-    # Mode-specific total flow rate at each time point
-    crrt_df_filtered['total_flow_rate'] = np.select(conditions, choices, default=np.nan)
+        crrt_df_filtered['pre_filter_replacement_fluid_rate'],
+        crrt_df_filtered['post_filter_replacement_fluid_rate'])
 
     # Also calculate full flow rate (all components) at each time point
     crrt_df_filtered['total_flow_rate_full'] = (

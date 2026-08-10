@@ -75,6 +75,7 @@ matplotlib.rcParams.update({
 from pipeline_helpers import (
     load_config, safe_load_clif_table, integrate_persisting_rate,
     course_average_intensity, get_output_root, STUDY_YEAR_START, STUDY_YEAR_END,
+    crrt_effluent_flow,
 )
 
 warnings.filterwarnings("ignore")
@@ -473,11 +474,7 @@ def _crrt_dose_per_row(df: pd.DataFrame) -> np.ndarray:
     dia = pd.to_numeric(df.get("crrt_dialysate_flow_rate"), errors="coerce")
     pre = pd.to_numeric(df.get("crrt_pre_filter_replacement_fluid_rate"), errors="coerce")
     post = pd.to_numeric(df.get("crrt_post_filter_replacement_fluid_rate"), errors="coerce")
-    total = np.select(
-        [mode == "cvvhd", mode == "cvvh", mode == "cvvhdf"],
-        [dia, pre.fillna(0) + post.fillna(0), dia.fillna(0) + pre.fillna(0) + post.fillna(0)],
-        default=np.nan,
-    )
+    total = crrt_effluent_flow(mode, dia, pre, post)   # shared formula (pipeline_helpers)
     wt = pd.to_numeric(df["weight_kg"], errors="coerce")
     return np.where((wt > 0) & (total > 0), total / wt, np.nan)
 
