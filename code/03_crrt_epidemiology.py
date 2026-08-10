@@ -74,7 +74,7 @@ matplotlib.rcParams.update({
 
 from pipeline_helpers import (
     load_config, safe_load_clif_table, integrate_persisting_rate,
-    course_average_intensity, STUDY_YEAR_START, STUDY_YEAR_END,
+    course_average_intensity, get_output_root, STUDY_YEAR_START, STUDY_YEAR_END,
 )
 
 warnings.filterwarnings("ignore")
@@ -88,8 +88,9 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 YEAR_START = STUDY_YEAR_START
 YEAR_END = STUDY_YEAR_END
 
-INTER = Path("../output/intermediate_phi")
-OUT = Path("../output/final_no_phi/crrt_epi")
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
+INTER = OUTPUT_ROOT / "intermediate_phi"
+OUT = OUTPUT_ROOT / "final_no_phi" / "crrt_epi"
 OUT.mkdir(parents=True, exist_ok=True)
 GRAPHS = OUT / "graphs"
 GRAPHS.mkdir(parents=True, exist_ok=True)
@@ -115,7 +116,7 @@ def build_incidence() -> pd.DataFrame:
         data_directory=TABLES_PATH,
         filetype=config["file_type"],
         timezone=config["timezone"],
-        output_directory="../output",  # else clifpy logs to <cwd>/output (= code/output)
+        output_directory=str(OUTPUT_ROOT),  # else clifpy logs to <cwd>/output (= code/output)
     )
 
     # Core tables, full population
@@ -1035,7 +1036,7 @@ def build_dose_by_ibw() -> None:
     # Height from vitals (clifpy, filtered to cohort + height_cm).
     from clifpy.clif_orchestrator import ClifOrchestrator
     clif = ClifOrchestrator(data_directory=TABLES_PATH, filetype=config["file_type"],
-                            timezone=config["timezone"], output_directory="../output")
+                            timezone=config["timezone"], output_directory=str(OUTPUT_ROOT))
     hosp_ids = cohort["hospitalization_id"].astype(str).unique().tolist()
     safe_load_clif_table(clif, "vitals", tables_path=TABLES_PATH,
                          columns=["hospitalization_id", "vital_category", "vital_value"],
