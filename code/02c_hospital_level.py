@@ -8,10 +8,18 @@ course). Produces three per-site CSVs:
   2. {site}_table1_by_hospital.csv       — the full Table 1, one column per hospital
   3. {site}_crrt_settings_by_hospital.csv — 3h-median CRRT settings + mode mix per hospital
 
-⚠️  SHARING: these use the RAW hospital_id and are NOT small-cell suppressed by
-    default, so they are NOT safe to upload to Box/consortium. They are written
-    to intermediate_phi/hospital_level/ (local, git-ignored). To make them
-    shareable, set SUPPRESS_MIN_N (below) and move the output to final_no_phi/.
+SHARING: these are shareable as written (changed 2026-08-11). Two protections,
+    both required — either alone is insufficient:
+      1. SMALL-CELL SUPPRESSION at n < SUPPRESS_MIN_N: hospitals below the
+         threshold are dropped entirely, and categorical cells with a numerator
+         below it render as "<N" rather than a count.
+      2. PSEUDONYMOUS HOSPITAL LABELS: the raw hospital_id never leaves the site.
+         Hospitals are relabelled {SITE}_H1..{SITE}_Hk in DESCENDING order of
+         encounter count. The crosswalk back to the real ids is written to
+         intermediate_phi/ (local, git-ignored) so the site can audit its own
+         output; it is never part of the shareable set.
+    The consortium builders rely on the {SITE}_H<k> form — report_core's
+    collect_hospital_dose parses the trailing ordinal for its figure labels.
 
 Run from code/ :  uv run python 02c_hospital_level.py
 """
@@ -20,15 +28,25 @@ from pipeline_helpers import load_config, load_intermediate, get_output_root  # 
 import pandas as pd
 import numpy as np
 
-# ---- small-cell suppression (OFF until the consortium threshold is decided) ----
-SUPPRESS_MIN_N = None   # e.g. 10 -> drop hospitals with < 10 encounters and blank
-                        #      categorical cells with numerator < 10. None = no suppression.
+# ---- small-cell suppression -------------------------------------------------
+# Consortium threshold, set 2026-08-11: drop hospitals with < 10 encounters and
+# render categorical cells with a numerator < 10 as "<10". Setting this to None
+# reverts to unsuppressed output, which must then NOT leave the site.
+#
+# Distinct from the ANALYSIS threshold applied downstream: the pooled
+# hospital-dose figure additionally drops hospitals under
+# report_core.HOSP_DOSE_MIN_N (20) as too small for a stable median. That is a
+# statistical judgement, not a disclosure control; this one is the disclosure
+# control. Do not collapse them into a single number.
+SUPPRESS_MIN_N = 10
 
 config = load_config()
 OUTPUT_ROOT = get_output_root(config)
 INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
-OUT_DIR = INTERMEDIATE_DIR / "hospital_level"          # local, NOT shared (no suppression yet)
+OUT_DIR = OUTPUT_ROOT / "final_no_phi" / "hospital_level"   # shareable: suppressed + pseudonymous
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+CROSSWALK_DIR = INTERMEDIATE_DIR / "hospital_level"         # local only: label -> real hospital_id
+CROSSWALK_DIR.mkdir(parents=True, exist_ok=True)
 SITE_NAME = config["site_name"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 HCOL = "hospital_id_at_init"
@@ -44,6 +62,25 @@ for _df in (t1, idx):
         _df[HCOL] = pd.NA
     _df[HCOL] = _df[HCOL].astype("string").fillna("unknown")
 
+# ---- pseudonymize hospital ids ------------------------------------------
+# Applied HERE, at the single point where HCOL is normalized, so every
+# downstream group/header/count uses the pseudonym and no later code has to
+# remember to. Ordered by DESCENDING encounter count, so H1 is the largest.
+# "unknown" is a category, not a hospital, and passes through unchanged.
+_raw_counts = t1[HCOL].value_counts(dropna=False)
+_real = [h for h in _raw_counts.index if h != "unknown"]
+_pseudo = {h: f"{SITE_NAME}_H{i + 1}" for i, h in enumerate(_real)}
+_pseudo["unknown"] = "unknown"
+pd.DataFrame({"label": [_pseudo[h] for h in _raw_counts.index],
+              "hospital_id_at_init": list(_raw_counts.index),
+              "n_encounters": _raw_counts.values}).to_csv(
+    CROSSWALK_DIR / f"{SITE_NAME}_hospital_id_crosswalk.csv", index=False)
+for _df in (t1, idx):
+    if HCOL in _df.columns:
+        _df[HCOL] = _df[HCOL].map(lambda v: _pseudo.get(v, v)).astype("string")
+print(f"  pseudonymized {len(_real)} hospital(s) -> {SITE_NAME}_H1..H{len(_real)}; "
+      f"crosswalk (LOCAL ONLY) -> {CROSSWALK_DIR}")
+
 _counts = t1[HCOL].value_counts(dropna=False)
 # groups: Overall + each hospital (unknown last), optionally suppressing small ones
 _hosps = [h for h in _counts.index if h != "unknown"] + (["unknown"] if "unknown" in _counts.index else [])
@@ -51,15 +88,46 @@ if SUPPRESS_MIN_N:
     _dropped = [h for h in _hosps if _counts[h] < SUPPRESS_MIN_N]
     _hosps = [h for h in _hosps if _counts[h] >= SUPPRESS_MIN_N]
     if _dropped:
-        print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}")
+        print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}: "
+              + ", ".join(f"{h} (n={_counts[h]})" for h in _dropped))
 GROUPS = ["Overall"] + _hosps
 print(f"  {SITE_NAME}: {t1[HCOL].nunique()} distinct hospital_id_at_init | {len(t1):,} encounters")
 
 
 # =====================================================================
+# 0. Site-level hospital SUMMARY  (for pooled reporting)
+# ---------------------------------------------------------------------
+# The consortium needs "k sites comprising N hospitals". That total CANNOT be
+# recovered by counting rows of hospital_counts.csv, which lists only the
+# hospitals surviving suppression — counting those rows undercounts every site
+# where suppression fired. So the totals are recorded explicitly, here, before
+# any filtering. Counts of hospitals are not patient data; this is shareable.
+# =====================================================================
+_n_unknown = int(_raw_counts.get("unknown", 0))
+_n_reported = len([h for h in _hosps if h != "unknown"])
+pd.DataFrame([{
+    "site": SITE_NAME,
+    "n_hospitals_total": len(_real),               # distinct real hospital_id, pre-suppression
+    "n_hospitals_reported": _n_reported,           # surviving n >= SUPPRESS_MIN_N
+    "n_hospitals_suppressed": len(_real) - _n_reported,
+    "n_encounters_total": int(len(t1)),
+    "n_encounters_unknown_hospital": _n_unknown,
+    "suppress_min_n": SUPPRESS_MIN_N if SUPPRESS_MIN_N else 0,
+}]).to_csv(OUT_DIR / f"{SITE_NAME}_hospital_summary.csv", index=False)
+print(f"  hospital summary: {len(_real)} total, {_n_reported} reported, "
+      f"{len(_real) - _n_reported} suppressed, {_n_unknown} encounter(s) with unknown hospital_id")
+
+
+# =====================================================================
 # 1. Hospital counts
 # =====================================================================
+# Restricted to the SURVIVING groups. Built from the raw value_counts this
+# would have re-published every suppressed hospital with an exact count,
+# defeating the suppression applied to the tables beside it.
 _cnt = (t1[HCOL].value_counts(dropna=False).rename_axis("hospital_id").reset_index(name="n_encounters"))
+_cnt = _cnt[_cnt["hospital_id"].isin(_hosps)].copy()
+# Denominator stays the FULL site cohort, so the percentages remain
+# interpretable and visibly fail to sum to 100 when anything was suppressed.
 _cnt["pct_of_site"] = (_cnt["n_encounters"] / len(t1) * 100).round(1)
 _cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
 
@@ -186,6 +254,8 @@ if HAS_CRRT_SETTINGS and "crrt_mode_category" in idx.columns:
         _srows.append(r)
 pd.DataFrame(_srows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_crrt_settings_by_hospital.csv", index=False)
 
-print(f"  wrote 3 files -> {OUT_DIR}")
-print("  (RAW hospital_id, no suppression -> local only; not for Box/consortium yet)")
+print(f"  wrote 4 files -> {OUT_DIR}")
+print(f"  (pseudonymous labels + n<{SUPPRESS_MIN_N} suppression -> shareable)"
+      if SUPPRESS_MIN_N else
+      "  (SUPPRESS_MIN_N is None -> UNSUPPRESSED; do NOT share this output)")
 print("Done!")
