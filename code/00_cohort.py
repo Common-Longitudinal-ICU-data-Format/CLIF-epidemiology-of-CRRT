@@ -522,10 +522,24 @@ print("=" * 80)
 if has_crrt_settings:
     from utils import handle_crrt_outliers
 
-    # Apply outlier removal
+    # Apply outlier removal.
+    #
+    # Path resolved against THIS FILE, not the cwd. It was '../config/...',
+    # which only resolves when the script is launched from code/ (as
+    # run_pipeline.sh does). Launched from the repo root the file is not found,
+    # and handle_crrt_outliers prints a warning and SILENTLY SKIPS outlier
+    # removal (utils.py:30-34) rather than failing — so the run still exits 0
+    # while producing a DIFFERENT COHORT. At UChicago that was 18 extra CRRT
+    # records and 3 extra encounter blocks (2,136 -> 2,139).
+    _outlier_cfg = Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+    if not _outlier_cfg.exists():
+        raise FileNotFoundError(
+            f"Outlier config not found: {_outlier_cfg}. Refusing to continue: "
+            "skipping outlier removal silently changes the cohort."
+        )
     crrt_df, outlier_summary = handle_crrt_outliers(
         crrt_df,
-        config_path='../config/outlier_config.json'
+        config_path=str(_outlier_cfg)
     )
 
 if has_crrt_settings:
@@ -1646,13 +1660,30 @@ _before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['en
 # well-defined at a fixed timepoint — we capture it at initiation, for descriptive
 # / initial-settings stratification only (NOT longitudinal analyses). Single-
 # hospital sites have a constant value; multi-hospital systems (e.g. UMN) vary.
-_init_seg = (_before.groupby('encounter_block').tail(1)
-             [['encounter_block', 'location_category', 'hospital_id']])
+# hospital_type travels with hospital_id from the SAME ADT segment (it is a
+# required ADT column), so capturing it costs nothing extra and lets the
+# hospital-level descriptives separate academic from community practice. Guarded
+# because a site may ship the column empty even though the spec requires it.
+_seg_cols = ['encounter_block', 'location_category', 'hospital_id']
+if 'hospital_type' in _before.columns:
+    _seg_cols.append('hospital_type')
+_init_seg = _before.groupby('encounter_block').tail(1)[_seg_cols]
 crrt_start_location = (
     crrt_initiation[['encounter_block']].drop_duplicates()
     .merge(_init_seg, on='encounter_block', how='left')
     .rename(columns={'location_category': 'crrt_start_location',
-                     'hospital_id': 'hospital_id_at_init'}))
+                     'hospital_id': 'hospital_id_at_init',
+                     'hospital_type': 'hospital_type_at_init'}))
+if 'hospital_type_at_init' not in crrt_start_location.columns:
+    crrt_start_location['hospital_type_at_init'] = pd.NA
+    print("   NOTE: ADT has no hospital_type column; hospital_type_at_init is empty.")
+else:
+    crrt_start_location['hospital_type_at_init'] = (
+        crrt_start_location['hospital_type_at_init'].astype('string').str.strip().str.lower())
+    _ht = crrt_start_location['hospital_type_at_init']
+    print(f"   hospital_type at CRRT initiation: {_ht.notna().sum():,} recorded "
+          f"({_ht.isna().sum():,} missing); values: "
+          f"{', '.join(sorted(_ht.dropna().unique())) or 'none'}")
 crrt_start_location['crrt_start_location'] = crrt_start_location['crrt_start_location'].fillna('unknown')
 print(f"   Distinct hospital_id at CRRT initiation: "
       f"{crrt_start_location['hospital_id_at_init'].nunique(dropna=True)} "
@@ -3065,7 +3096,10 @@ index_crrt_df = index_crrt_df.merge(
 # stratified by hospital at a multi-hospital site. Encounter_block-keyed left
 # merge; well-defined only at initiation (transfers make it ambiguous over the
 # course), so it is intended for descriptive-at-initiation use, NOT longitudinal.
-_hosp_at_init = crrt_start_location[['encounter_block', 'hospital_id_at_init']].drop_duplicates('encounter_block')
+_hosp_cols = ['encounter_block', 'hospital_id_at_init']
+if 'hospital_type_at_init' in crrt_start_location.columns:
+    _hosp_cols.append('hospital_type_at_init')   # academic / community, for 02c
+_hosp_at_init = crrt_start_location[_hosp_cols].drop_duplicates('encounter_block')
 index_crrt_df = index_crrt_df.merge(_hosp_at_init, on='encounter_block', how='left')
 outcomes_df = outcomes_df.merge(_hosp_at_init, on='encounter_block', how='left')
 

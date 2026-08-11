@@ -119,6 +119,41 @@ print(f"  hospital summary: {len(_real)} total, {_n_reported} reported, "
 
 
 # =====================================================================
+# 0b. Hospital TYPE (academic / community)
+# ---------------------------------------------------------------------
+# hospital_type is a required ADT column, captured at CRRT initiation by 00
+# alongside hospital_id. Emitted as its own small file so the consortium can
+# describe practice by hospital type without any site shipping a hospital name.
+# Restricted to the surviving groups, like hospital_counts. A site whose ADT
+# leaves the column empty simply produces no file.
+# =====================================================================
+TCOL = "hospital_type_at_init"
+_type_src = next((f for f in (idx, t1) if TCOL in f.columns), None)
+if _type_src is not None and _type_src[TCOL].notna().any():
+    _ht = (_type_src[[HCOL, TCOL]].dropna(subset=[TCOL])
+           .astype({HCOL: "string", TCOL: "string"}))
+    _ht[TCOL] = _ht[TCOL].str.strip().str.lower()
+    # One type per hospital: take the most frequent, and say so if a hospital
+    # ever disagrees with itself (a data-quality signal, not something to hide).
+    _agg = (_ht.groupby(HCOL)[TCOL]
+            .agg(hospital_type=lambda s: s.mode().iloc[0] if not s.mode().empty else pd.NA,
+                 n_distinct_types="nunique")
+            .reset_index().rename(columns={HCOL: "hospital"}))
+    _mixed = _agg[_agg["n_distinct_types"] > 1]
+    if len(_mixed):
+        print(f"  WARNING: {len(_mixed)} hospital(s) report >1 hospital_type; "
+              f"taking the most frequent: {', '.join(_mixed['hospital'])}")
+    _agg = _agg[_agg["hospital"].isin(_hosps)]
+    _n = _type_src.groupby(HCOL).size().rename("n_encounters")
+    _agg = _agg.merge(_n, left_on="hospital", right_index=True, how="left")
+    _agg[["hospital", "hospital_type", "n_encounters"]].to_csv(
+        OUT_DIR / f"{SITE_NAME}_hospital_type.csv", index=False)
+    print(f"  hospital_type: {_agg['hospital_type'].value_counts().to_dict()}")
+else:
+    print("  hospital_type: not available (ADT column absent or empty) — file not written")
+
+
+# =====================================================================
 # 1. Hospital counts
 # =====================================================================
 # Restricted to the SURVIVING groups. Built from the raw value_counts this
