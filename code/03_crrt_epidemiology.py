@@ -720,7 +720,7 @@ def build_uf_trajectories(w: pd.DataFrame) -> None:
       (a) net UF RATE over time (mL/kg/hr, per-bin median [IQR]);
       (b) CUMULATIVE net UF volume over time (mL/kg, among encounters still on
           CRRT each day);
-      (c) crude 30-day mortality vs COURSE-AVERAGE net UF intensity (Murugan
+      (c) crude 30-day in-hospital mortality vs COURSE-AVERAGE net UF intensity (Murugan
           2019 style, over the whole course rather than the initiation snapshot).
     """
     if not HAS_CRRT_SETTINGS or "crrt_ultrafiltration_out" not in w.columns:
@@ -811,10 +811,10 @@ def build_uf_trajectories(w: pd.DataFrame) -> None:
                 ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan Middle (1.01–1.75)")
                 ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
                 ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
-                           label="Crude 30-Day Mortality (Marker Size Scaled to n)")
+                           label="Crude 30-Day In-Hospital Mortality (Marker Size Scaled to n)")
                 ax.set_xlabel("Net Ultrafiltration Intensity, First 72 h (mL/kg/hr)")
-                ax.set_ylabel("Crude 30-Day Mortality (%)")
-                ax.set_title(f"Crude 30-Day Mortality vs Net UF Intensity (First 72 h): {SITE_NAME}")
+                ax.set_ylabel("Crude 30-Day In-Hospital Mortality (%)")
+                ax.set_title(f"Crude 30-Day In-Hospital Mortality vs Net UF Intensity (First 72 h): {SITE_NAME}")
                 ax.legend(fontsize=9)
                 fig.tight_layout()
                 fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")

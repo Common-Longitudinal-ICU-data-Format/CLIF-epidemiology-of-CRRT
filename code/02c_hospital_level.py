@@ -272,7 +272,12 @@ if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
     # Net UF Intensity omitted (UF sign convention unreliable across sites) — mirrors 02.
 # Outcome
-_row_binary("30-Day Mortality (%)", "_death30")
+# Labels match 02's site-wide Table 1: both are IN-HOSPITAL (death comes from
+# the discharge disposition, so post-discharge death is unobservable) and the
+# 90-day row is in_hosp_death, which un-counts deaths >90d after CRRT start.
+_row_binary("30-Day In-Hospital Mortality (%)", "_death30")
+if "in_hosp_death" in t1.columns:
+    _row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 pd.DataFrame(_rows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_table1_by_hospital.csv", index=False)
 
