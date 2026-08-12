@@ -592,12 +592,17 @@ extra_df["pf_sf_ratio"] = np.where(pf_ratio.notna(), pf_ratio, sf_ratio)
 
 # Plausibility cap: S/F at SpO2=100, FiO2=0.21 (room air) ≈ 476; P/F rarely
 # exceeds 500 in ICU. Values above imply bad FiO2 or PaO2 encoding; set to NaN.
-try:
-    with open("../config/outlier_config.json") as _oc_f:
-        _oc = json.load(_oc_f)
-    _lo, _hi = _oc.get("pf_sf_ratio", [0, 500])
-except Exception:
-    _lo, _hi = 0, 500
+# Path resolved against THIS FILE, not the cwd. It was "../config/...", which
+# only resolves when launched from code/, and the except-branch fell back to a
+# DIFFERENT cap than the config carries ([0, 500] vs the config's [0, 1000]) —
+# so a run from anywhere else silently applied a tighter cap and nulled every
+# P/F between 500 and 1000, changing a causal covariate with no warning. The
+# file is tracked in the repo, so a missing one is a broken checkout, not a
+# recoverable condition.
+_oc_path = Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+with open(_oc_path) as _oc_f:
+    _oc = json.load(_oc_f)
+_lo, _hi = _oc.get("pf_sf_ratio", [0, 1000])
 _pf_sf = extra_df["pf_sf_ratio"]
 _n_oob = int(((_pf_sf < _lo) | (_pf_sf > _hi)).sum())
 if _n_oob > 0:

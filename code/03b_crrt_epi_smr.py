@@ -61,7 +61,13 @@ INTER = OUTPUT_ROOT / "intermediate_phi"
 INTER.mkdir(parents=True, exist_ok=True)
 EPI_OUT = OUTPUT_ROOT / "final_no_phi" / "crrt_epi"
 EPI_OUT.mkdir(parents=True, exist_ok=True)
-MODEL_PATH = Path("../config/smr_reference_model.json")
+# Resolved against THIS FILE, not the cwd. As "../config/..." it only resolved
+# when launched from code/; anywhere else the model was "not found" and the
+# script printed "Cohort built only", skipped the ENTIRE SMR computation and
+# exited 0 without writing {SITE}_smr.csv. The graceful skip below is a real
+# mode (it is how a site runs before the reference model exists), which is
+# exactly why the path must never be able to miss by accident.
+MODEL_PATH = Path(__file__).resolve().parent.parent / "config" / "smr_reference_model.json"
 
 def P(name): return f"{TABLES_PATH}/clif_{name}.{FILE_TYPE}"
 def pct(n, d): return f"{100*n/d:.1f}%" if d else "n/a"
