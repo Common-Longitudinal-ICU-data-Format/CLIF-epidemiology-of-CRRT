@@ -437,13 +437,20 @@ def course_average_intensity(records, group_col, time_col, rate_col,
 # mode change is one edit (and can't be applied to 2 of 3 sites again, the AVVH
 # bug). SCUF is pure ultrafiltration (no clearance) and is the only mode excluded.
 DOSE_ELIGIBLE_MODES = {"cvvh", "cvvhd", "cvvhdf", "avvh"}
-CONVECTIVE_MODES = ("cvvh", "avvh")   # clearance via replacement fluid, no dialysate
+CONVECTIVE_MODES = ("cvvh",)          # clearance via replacement fluid only
+SUM_ALL_MODES = ("cvvhdf", "avvh")    # sum every clearance-generating flow present
 
 
 def crrt_effluent_flow(mode, dialysate, pre_repl, post_repl):
     """Mode-specific total effluent flow (mL/hr) = the CRRT clearance term
-    (flow / weight -> mL/kg/hr dose). cvvhd: dialysate; cvvh/avvh (convective):
-    replacement fluid; cvvhdf: both; anything else -> NaN.
+    (flow / weight -> mL/kg/hr dose). cvvhd: dialysate; cvvh (convective):
+    replacement fluid; cvvhdf/avvh: sum every clearance-generating flow present
+    (dialysate + replacement); anything else -> NaN.
+
+    avvh sums all present flows rather than assuming a charting pattern: it
+    degrades to the cvvh formula where only replacement is charted (dialysate=0)
+    and to the cvvhd formula where only dialysate is (replacement=0). Matches the
+    consortium dose decision (2026-08-11).
 
     Name-agnostic — pass whichever Series the frame holds (crrt_-prefixed in
     wide_df, unprefixed in crrt_cohort). Modes are assumed already lowercased, as
@@ -453,8 +460,8 @@ def crrt_effluent_flow(mode, dialysate, pre_repl, post_repl):
     repl = pre_repl.fillna(0) + post_repl.fillna(0)
     is_cvvhd = mode == "cvvhd"
     is_conv = mode.isin(CONVECTIVE_MODES)
-    is_dhdf = mode == "cvvhdf"
+    is_sum = mode.isin(SUM_ALL_MODES)
     flow[is_cvvhd] = dialysate[is_cvvhd]
     flow[is_conv] = repl[is_conv]
-    flow[is_dhdf] = dialysate[is_dhdf].fillna(0) + repl[is_dhdf]
+    flow[is_sum] = dialysate[is_sum].fillna(0) + repl[is_sum]
     return flow

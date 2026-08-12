@@ -63,7 +63,8 @@ print(f"Current directory: {os.getcwd()}")
 
 # Load configuration (honors CLIF_CONFIG; defaults to config/config.json)
 from pipeline_helpers import (load_config, safe_load_clif_table, get_output_root,
-    STUDY_YEAR_START, STUDY_YEAR_END, crrt_effluent_flow, DOSE_ELIGIBLE_MODES)
+                              STUDY_YEAR_START, STUDY_YEAR_END,
+                              crrt_effluent_flow, DOSE_ELIGIBLE_MODES)
 config = load_config()
 SITE_NAME = config["site_name"]
 
@@ -208,6 +209,32 @@ else:
 strobe_counts = {}
 
 
+# ============================================================================
+# Determinism helpers
+# ----------------------------------------------------------------------------
+# Several per-encounter values are picked by "first"/"last"/"most frequent"
+# after a sort. Where the sort key does not order rows TOTALLY, the winner is
+# decided by the order pandas happens to hold the rows in, which is not stable:
+# weight_df and hospital_diagnosis_df were observed to come out in a different
+# row order on every run of this script. At UChicago no tie had disagreeing
+# values so nothing moved, but at a site whose ties disagree the same code would
+# produce a different cohort run to run.
+#
+# The fix is to make every such choice a function of the DATA, never of the row
+# order — either by appending tie-break keys to the sort, or via _modal_stable
+# below. Cheaper and safer than trying to force a stable order upstream.
+def _modal_stable(s):
+    """Most frequent value in *s*; ties broken by sorting the tied values, so
+    the result never depends on row order. Returns NaN for an all-null series.
+
+    pandas' .mode()[0] and .value_counts().index[0] both break count ties by
+    order of appearance, which is exactly the dependency being removed."""
+    vc = s.dropna().value_counts()
+    if vc.empty:
+        return np.nan
+    return sorted(vc[vc == vc.max()].index)[0]
+
+
 # ## Step0: Load Core Tables
 
 # In[6]:
@@ -303,9 +330,28 @@ adult_encounters = adult_encounters[
 ]
 
 # Filter for admission years — fixed study window (2018–2024), PI-approved.
-# Single source of truth: pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END.
-year_start = STUDY_YEAR_START
-year_end = STUDY_YEAR_END
+# Default from pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END, OVERRIDABLE
+# per config.
+#
+# The override was removed on 2026-07-06 (2f3ba1c), which commented out
+# `year_start = config["admission_year_start"]` and hardcoded the constants. That
+# silently broke the MIMIC development site, whose admission dates are shifted to
+# 2105-2214 for de-identification: the 2018-2024 window excluded 100% of it, the
+# cohort came out empty, and 00 then died with a DuckDB "syntax error at or near
+# )" from an empty ID list. Nobody noticed, because the SMR reference model was
+# already frozen and the dev path had not been exercised since — so the refit
+# this pipeline depends on had been impossible, not merely undone.
+#
+# Semantics, chosen so consortium sites cannot drift: key ABSENT -> the PI-approved
+# constant (every site config; unchanged). Key present and NULL -> no bound on
+# that side, which is what config_mimic.json asks for. Key present with a value
+# -> that value.
+year_start = config.get("admission_year_start", STUDY_YEAR_START)
+year_end = config.get("admission_year_end", STUDY_YEAR_END)
+if (year_start, year_end) != (STUDY_YEAR_START, STUDY_YEAR_END):
+    print(f"   NOTE: admission-year window overridden by config: "
+          f"{year_start or 'earliest'}-{year_end or 'present'} "
+          f"(study default {STUDY_YEAR_START}-{STUDY_YEAR_END})")
 year_mask = pd.Series(True, index=adult_encounters.index)
 if year_start is not None:
     year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year >= year_start)
@@ -457,40 +503,15 @@ if n_invalid > 0:
     strobe_counts['excluded_non_crrt_modes'] = int(n_invalid)
     crrt_df = crrt_df[~invalid_mask].copy()
 
-# ── Modality data-quality diagnostic #2: composition of the KEPT null-mode rows ──
-# Null crrt_mode_category is NOT dropped (the filter above requires notna()); it
-# survives as "UNKNOWN" downstream. Characterize those null rows by their FLUID
-# PATTERN, which is what defines the mode: a null row with dialysate flow is
-# functionally CVVHD (a labeling/ETL gap, inferable & fixable); a null row with no
-# flows is genuinely uncharacterized. Also break down by raw crrt_mode_name (if
-# present) = the text the site's ETL failed to map. Record-level over all CRRT
-# records (pre-cohort-restriction). Feeds the modality data-quality dashboard table.
-_null = crrt_df[crrt_df['crrt_mode_category'].isna()].copy()
-if len(_null):
-    _d = _null['dialysate_flow_rate'].fillna(0) > 0
-    _p = ((_null['pre_filter_replacement_fluid_rate'].fillna(0)
-           + _null['post_filter_replacement_fluid_rate'].fillna(0)) > 0)
-    _u = _null['ultrafiltration_out'].fillna(0) > 0
-    _null['inferred_mode'] = np.select(
-        [_d & ~_p, ~_d & _p, _d & _p, ~_d & ~_p & _u],
-        ['CVVHD', 'CVVH', 'CVVHDF', 'SCUF'],
-        default='uncharacterized (no flows)')
-    _null_gb = (['inferred_mode']
-                + (['crrt_mode_name'] if 'crrt_mode_name' in _null.columns else []))
-    _null_bd = (_null.groupby(_null_gb, dropna=False)
-                .agg(n_records=('encounter_block', 'size'),
-                     n_encounter_blocks=('encounter_block', 'nunique'))
-                .reset_index().sort_values('n_records', ascending=False))
-    print(f"   Null-mode (UNKNOWN, KEPT) rows: {len(_null):,} records / "
-          f"{_null['encounter_block'].nunique():,} blocks; inferred-mode composition:")
-    print(_null_bd.to_string(index=False))
-else:
-    _null_cols = (['inferred_mode']
-                  + (['crrt_mode_name'] if 'crrt_mode_name' in crrt_df.columns else [])
-                  + ['n_records', 'n_encounter_blocks'])
-    _null_bd = pd.DataFrame(columns=_null_cols)
-_null_bd.to_csv(
-    f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_unknown_modality_composition.csv', index=False)
+# ── Modality data-quality diagnostic #2 (RELOCATED) ───────────────────────────
+# The null-mode composition breakdown used to be computed HERE, over ALL CRRT
+# records before any cohort restriction and across the entire course. That could
+# not answer the question the manuscript asks — why is modality missing AT
+# INITIATION, in the analysed cohort — and its counts were unreadable against
+# the cohort N (per-row block counts double-count blocks and are not a
+# partition). It now lives in the modality-inference block below, computed on
+# the SAME first-3h window and final cohort as the dose exposure.
+# Search: "composition of the blank-mode rows".
 
 # Recount after filtering
 n_crrt_blocks = crrt_df['encounter_block'].nunique()
@@ -523,10 +544,24 @@ print("=" * 80)
 if has_crrt_settings:
     from utils import handle_crrt_outliers
 
-    # Apply outlier removal
+    # Apply outlier removal.
+    #
+    # Path resolved against THIS FILE, not the cwd. It was '../config/...',
+    # which only resolves when the script is launched from code/ (as
+    # run_pipeline.sh does). Launched from the repo root the file is not found,
+    # and handle_crrt_outliers prints a warning and SILENTLY SKIPS outlier
+    # removal (utils.py:30-34) rather than failing — so the run still exits 0
+    # while producing a DIFFERENT COHORT. At UChicago that was 18 extra CRRT
+    # records and 3 extra encounter blocks (2,136 -> 2,139).
+    _outlier_cfg = Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+    if not _outlier_cfg.exists():
+        raise FileNotFoundError(
+            f"Outlier config not found: {_outlier_cfg}. Refusing to continue: "
+            "skipping outlier removal silently changes the cohort."
+        )
     crrt_df, outlier_summary = handle_crrt_outliers(
         crrt_df,
-        config_path='../config/outlier_config.json'
+        config_path=str(_outlier_cfg)
     )
 
 if has_crrt_settings:
@@ -1000,11 +1035,31 @@ print(esrd_poa_counts)
 
 # Use a more inclusive approach for ESRD identification
 # Include cases where present_on_admission is 1 OR NA (assuming NA means unknown/possible)
-esrd_mask = (
-    hospital_diagnosis_df['diagnosis_code'].isin(esrd_codes) & 
-    ((hospital_diagnosis_df['poa_present'] == 1) | 
-        (hospital_diagnosis_df['poa_present'].isna()))
-)
+#
+# POA-ROBUSTNESS (added 2026-08-11). The POA condition assumes poa_present is
+# informative. Where it is not — every row 0, or every row null — the mask is
+# all-False and NO ESRD patient is excluded, silently, with the cohort simply
+# coming out larger. The MIMIC development site is exactly this case: its
+# conversion sets poa_present = 0 on all 80,624 rows because MIMIC's source
+# diagnoses_icd carries no present-on-admission field. 638 of 2,748 (23.2%) of
+# the SMR reference cohort were ESRD patients that every consortium site
+# excludes, so the frozen model was being fitted on one population and applied
+# to another.
+#
+# When POA carries no information, fall back to matching on the diagnosis code
+# alone. That is the same rule the POA branch already applies to NA. All ten
+# current sites have informative POA (22-49% excluded at this gate), so this
+# changes nothing for them; it repairs the dev site and guards any future site
+# whose ETL leaves the column unpopulated.
+_poa = hospital_diagnosis_df['poa_present']
+_poa_informative = bool((_poa == 1).any())
+if not _poa_informative:
+    print("   NOTE: poa_present carries no positive values — treating it as "
+          "UNINFORMATIVE and identifying ESRD by diagnosis code alone. "
+          "(With the POA condition applied, ZERO patients would be excluded.)")
+esrd_mask = hospital_diagnosis_df['diagnosis_code'].isin(esrd_codes)
+if _poa_informative:
+    esrd_mask = esrd_mask & ((_poa == 1) | (_poa.isna()))
 hosp_ids_with_esrd = hospital_diagnosis_df[esrd_mask]['hospitalization_id'].unique()
 blocks_with_esrd = hospital_diagnosis_df[esrd_mask]['encounter_block'].unique()
 
@@ -1139,7 +1194,8 @@ combined = crrt_initiation.merge(weight_df, on='encounter_block', how='inner')
 
 before_mask = combined['recorded_dttm'] <= combined['crrt_initiation_time']
 combined_before = combined[before_mask].copy()
-combined_before_sorted = combined_before.sort_values(['encounter_block', 'recorded_dttm'])
+# weight_kg appended so ties at the same timestamp resolve by value, not row order.
+combined_before_sorted = combined_before.sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
 closest_before = (combined_before_sorted
                   .groupby('encounter_block')
                   .last()
@@ -1160,7 +1216,7 @@ after_mask = (
     (combined['weight_kg'].notnull())
 )
 combined_after = combined[after_mask].copy()
-combined_after_sorted = combined_after.sort_values(['encounter_block', 'recorded_dttm'])
+combined_after_sorted = combined_after.sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
 first_after = (combined_after_sorted
                .groupby('encounter_block')
                .first()
@@ -1176,8 +1232,13 @@ print(f"   Number of weights from after initiation: {num_taken_after}")
 combined_final = pd.concat([closest_before, first_after], axis=0, ignore_index=True)
 combined = combined_final
 
+# weight_kg appended as a tie-break: (encounter_block, recorded_dttm) is NOT a
+# total order — a block can carry two weights at the same timestamp — and
+# .last() would then return whichever row pandas happened to hold last, which
+# varies between runs. With weight_kg in the sort the tie resolves to the
+# largest weight, deterministically, and a run is reproducible from the data.
 closest_weights = (combined
-                .sort_values(['encounter_block', 'recorded_dttm'])
+                .sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
                 .groupby('encounter_block')
                 .last()
                 .reset_index())
@@ -1429,12 +1490,17 @@ crrt_initiation = crrt_initiation[crrt_initiation['encounter_block'].isin(cohort
 
 
 # =====================================================================
-# Infer CRRT modality at initiation (final cohort only)
+# Infer CRRT modality at initiation (final cohort, FIRST 3 HOURS)
 # ---------------------------------------------------------------------
-# For encounters whose mode is null/unknown at initiation, recover it:
+# "At initiation" means the FIRST 3 HOURS after crrt_initiation_time — the same
+# window that defines the dose exposure (crrt_dose_median_3h) — so that initial
+# modality and initial dose describe the same period. Recorded mode is the most
+# frequent non-blank mode in that window.
+#
+# For encounters with no recorded mode anywhere in the window, recover it:
 #   (a) ffill    — last mode recorded at/before the initiation time in the same
 #                  encounter (clinician label, no look-ahead), then
-#   (b) settings — rule on the initiation record for whatever ffill can't fill:
+#   (b) settings — rule on the first-3h flows for whatever ffill can't fill:
 #        dialysate>0 & replacement>0 -> cvvhdf ; dialysate>0 -> cvvhd ;
 #        replacement>0 -> cvvh ; UF-only -> scuf.
 # Recorded modes are NEVER overwritten. The fill is written into both
@@ -1460,18 +1526,45 @@ if has_crrt_settings:
             return 'scuf'
         return np.nan
 
-    # one initiation record per encounter_block (cohort already applied above)
-    _ci = crrt_at_initiation.drop_duplicates('encounter_block').set_index('encounter_block')
-    _rec0 = _normmode(_ci['crrt_mode_category'])                      # original recorded mode
-    _blank_blocks = _ci.index[_rec0.isna() | _rec0.isin(_BL)]
-    _settings_mode = _ci.apply(_infer_mode_from_settings, axis=1)
+    # FIRST-3h WINDOW after initiation, matching the dose exposure
+    # (crrt_dose_median_3h). This previously used the single record at exactly
+    # crrt_initiation_time, so "initial modality" and "initial dose" were
+    # measured over DIFFERENT windows while the manuscript treats both as the
+    # same "initial" quantity. The instant is also a worse measurement: one
+    # unlabeled first row counted as a missing modality even when the mode was
+    # charted minutes later, inflating apparent missingness.
+    _W3 = pd.Timedelta(hours=3)
+    _w3 = crrt_cohort[
+        crrt_cohort['encounter_block'].isin(cohort_blocks)
+        & (crrt_cohort['recorded_dttm'] >= crrt_cohort['crrt_initiation_time'])
+        & (crrt_cohort['recorded_dttm'] <= crrt_cohort['crrt_initiation_time'] + _W3)
+    ].copy()
+    _w3['_m'] = _normmode(_w3['crrt_mode_category'])
+    _w3.loc[_w3['_m'].isin(_BL), '_m'] = pd.NA
+    _all_blocks = pd.Index(sorted(_w3['encounter_block'].unique()), name='encounter_block')
+
+    # Recorded mode = MOST FREQUENT non-blank mode in the window, mirroring the
+    # first-3h aggregation the dose uses (median_3hr takes x.mode()[0]).
+    _rec0 = (_w3.dropna(subset=['_m']).groupby('encounter_block')['_m']
+             .agg(_modal_stable).reindex(_all_blocks))
+    _blank_blocks = _all_blocks[_rec0.isna()]
+
+    # Settings inference over the same window: a flow counts if it is EVER
+    # positive in the first 3h, so a single zero-flow row at t=0 cannot mask a
+    # mode that the rest of the window shows plainly.
+    _flow_cols = [c for c in ('dialysate_flow_rate', 'pre_filter_replacement_fluid_rate',
+                              'post_filter_replacement_fluid_rate', 'ultrafiltration_out')
+                  if c in _w3.columns]
+    _agg3 = _w3.groupby('encounter_block')[_flow_cols].max().reindex(_all_blocks)
+    _settings_mode = _agg3.apply(_infer_mode_from_settings, axis=1)
 
     # (a) ffill: last recorded mode at/before initiation, per encounter
     _ct = crrt_cohort.copy()
     _ct['_m'] = _normmode(_ct['crrt_mode_category'])
     _ct.loc[_ct['_m'].isin(_BL), '_m'] = pd.NA
     _past = _ct.dropna(subset=['_m'])
-    _past = _past[_past['recorded_dttm'] <= _past['crrt_initiation_time']].sort_values(['encounter_block', 'recorded_dttm'])
+    _past = _past[_past['recorded_dttm'] <= _past['crrt_initiation_time']].sort_values(
+        ['encounter_block', 'recorded_dttm', '_m'])   # '_m' breaks same-timestamp ties
     _ffill = _past.groupby('encounter_block')['_m'].last()
 
     # (b) ffill -> settings for the blank blocks
@@ -1497,10 +1590,52 @@ if has_crrt_settings:
 
     # ---- no-PHI diagnostics -> final_no_phi/diagnostics/ ----
     _dg = f"{OUT}/final_no_phi/diagnostics"
+
+    # 0) composition of the blank-mode rows, FIRST 3h / FINAL COHORT.
+    # Characterizes rows the ETL left unmapped by their FLUID PATTERN, which is
+    # what defines the mode: a blank row with dialysate flow is functionally
+    # CVVHD (a recoverable labeling gap), a blank row with no flows at all is
+    # genuinely uncharacterized — typically the circuit being down (clotted,
+    # filter change, patient off for a procedure), where neither a mode nor a
+    # flow is charted.
+    #
+    # n_encounter_blocks is nunique WITHIN each row, so a block appears in every
+    # pattern it exhibits; the column is NOT a partition and does not sum to the
+    # cohort. n_blocks_all_rows_blank below IS a clean per-block count: blocks
+    # with NO recorded mode anywhere in the window, i.e. the actual missingness.
+    _blank_rows = _w3[_w3['_m'].isna()].copy()
+    if len(_blank_rows):
+        _d = _blank_rows.get('dialysate_flow_rate', pd.Series(0, index=_blank_rows.index)).fillna(0) > 0
+        _p = ((_blank_rows.get('pre_filter_replacement_fluid_rate', pd.Series(0, index=_blank_rows.index)).fillna(0)
+               + _blank_rows.get('post_filter_replacement_fluid_rate', pd.Series(0, index=_blank_rows.index)).fillna(0)) > 0)
+        _u = _blank_rows.get('ultrafiltration_out', pd.Series(0, index=_blank_rows.index)).fillna(0) > 0
+        _blank_rows['inferred_mode'] = np.select(
+            [_d & ~_p, ~_d & _p, _d & _p, ~_d & ~_p & _u],
+            ['CVVHD', 'CVVH', 'CVVHDF', 'SCUF'],
+            default='uncharacterized (no flows)')
+        _gb = ['inferred_mode'] + (['crrt_mode_name'] if 'crrt_mode_name' in _blank_rows.columns else [])
+        _null_bd = (_blank_rows.groupby(_gb, dropna=False)
+                    .agg(n_records=('encounter_block', 'size'),
+                         n_encounter_blocks=('encounter_block', 'nunique'))
+                    .reset_index().sort_values('n_records', ascending=False))
+    else:
+        _null_bd = pd.DataFrame(columns=['inferred_mode', 'n_records', 'n_encounter_blocks'])
+    # Denominators, so the file is interpretable on its own.
+    _null_bd['window'] = 'first_3h_after_initiation'
+    _null_bd['n_cohort_blocks'] = len(_all_blocks)
+    _null_bd['n_blocks_all_rows_blank'] = len(_blank_blocks)
+    _null_bd.to_csv(
+        f'{_dg}/{SITE_NAME}_unknown_modality_composition.csv', index=False)
+    print(f"   blank-mode rows in first 3h: {len(_blank_rows):,} records across "
+          f"{_blank_rows['encounter_block'].nunique() if len(_blank_rows) else 0:,} blocks; "
+          f"{len(_blank_blocks):,}/{len(_all_blocks):,} blocks have NO recorded mode in the window")
     _recnn = _ct.dropna(subset=['_m']).copy()
     _recnn['_dt'] = (_recnn['recorded_dttm'] - _recnn['crrt_initiation_time']).abs()
-    _closest = _recnn.sort_values(['encounter_block', '_dt']).groupby('encounter_block')['_m'].first()
-    _most_common = _recnn.groupby('encounter_block')['_m'].agg(lambda s: s.value_counts().index[0])
+    # '_dt' alone is not a total order: a record 5 min before and one 5 min
+    # after are equidistant. recorded_dttm then '_m' make the pick data-determined.
+    _closest = (_recnn.sort_values(['encounter_block', '_dt', 'recorded_dttm', '_m'])
+                .groupby('encounter_block')['_m'].first())
+    _most_common = _recnn.groupby('encounter_block')['_m'].agg(_modal_stable)
     _repl_ever = ((_ct['pre_filter_replacement_fluid_rate'].fillna(0) > 0) |
                   (_ct['post_filter_replacement_fluid_rate'].fillna(0) > 0)).groupby(_ct['encounter_block']).any()
 
@@ -1640,24 +1775,41 @@ adt_df_non_icu_hosps.to_csv(f'{OUT}/intermediate_phi/adt_df_non_icu_hosps.csv', 
 _loc = adt_final_stitched.merge(
     crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
     on='encounter_block', how='inner')
-_before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['encounter_block', 'in_dttm'])
+# hospital_id appended: ties on in_dttm previously decided which HOSPITAL an
+# encounter was attributed to by row order alone — now consequential, since
+# 02c ships hospital-level aggregates.
+_before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(
+    ['encounter_block', 'in_dttm'] + ([c for c in ('hospital_id',) if c in _loc.columns]))
 # The last ADT segment at/before CRRT initiation gives BOTH the start location and
 # the HOSPITAL where CRRT was started (hospital_id_at_init). A stitched
 # encounter_block can span multiple hospitals (transfers), so hospital is only
 # well-defined at a fixed timepoint — we capture it at initiation, for descriptive
 # / initial-settings stratification only (NOT longitudinal analyses). Single-
 # hospital sites have a constant value; multi-hospital systems (e.g. UMN) vary.
-_init_cols = ['encounter_block', 'location_category', 'hospital_id']
+# hospital_type travels with hospital_id from the SAME ADT segment (it is a
+# required ADT column), so capturing it costs nothing extra and lets the
+# hospital-level descriptives separate academic from community practice. Guarded
+# because a site may ship the column empty even though the spec requires it.
+_seg_cols = ['encounter_block', 'location_category', 'hospital_id']
 if 'hospital_type' in _before.columns:
-    _init_cols.append('hospital_type')   # CLIF ADT field: academic / community
-_init_seg = _before.groupby('encounter_block').tail(1)[_init_cols]
-_init_rename = {'location_category': 'crrt_start_location', 'hospital_id': 'hospital_id_at_init'}
-if 'hospital_type' in _init_seg.columns:
-    _init_rename['hospital_type'] = 'hospital_type_at_init'
+    _seg_cols.append('hospital_type')
+_init_seg = _before.groupby('encounter_block').tail(1)[_seg_cols]
 crrt_start_location = (
     crrt_initiation[['encounter_block']].drop_duplicates()
     .merge(_init_seg, on='encounter_block', how='left')
-    .rename(columns=_init_rename))
+    .rename(columns={'location_category': 'crrt_start_location',
+                     'hospital_id': 'hospital_id_at_init',
+                     'hospital_type': 'hospital_type_at_init'}))
+if 'hospital_type_at_init' not in crrt_start_location.columns:
+    crrt_start_location['hospital_type_at_init'] = pd.NA
+    print("   NOTE: ADT has no hospital_type column; hospital_type_at_init is empty.")
+else:
+    crrt_start_location['hospital_type_at_init'] = (
+        crrt_start_location['hospital_type_at_init'].astype('string').str.strip().str.lower())
+    _ht = crrt_start_location['hospital_type_at_init']
+    print(f"   hospital_type at CRRT initiation: {_ht.notna().sum():,} recorded "
+          f"({_ht.isna().sum():,} missing); values: "
+          f"{', '.join(sorted(_ht.dropna().unique())) or 'none'}")
 crrt_start_location['crrt_start_location'] = crrt_start_location['crrt_start_location'].fillna('unknown')
 print(f"   Distinct hospital_id at CRRT initiation: "
       f"{crrt_start_location['hospital_id_at_init'].nunique(dropna=True)} "
@@ -2187,14 +2339,40 @@ _death_gap_days = (
     (death_info['final_outcome_dttm'] - death_info['crrt_initiation_time']).dt.total_seconds() / 86400
 )
 death_info.loc[_death_gap_days > 90, 'in_hosp_death'] = 0
-death_info = death_info.drop(columns=['crrt_initiation_time'])
 
-# 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
+# 30-day mortality: died AND final_outcome_dttm within 30 days OF CRRT INITIATION.
+#
+# Anchored to crrt_initiation_time as of 2026-08-11. It previously ran from
+# first_vital_dttm — 30 days from roughly ADMISSION — so the follow-up window
+# opened before the exposure did and the two "30-day mortality" numbers in the
+# manuscript measured different things: the causal branch already counts from
+# CRRT initiation (04:873-878, days_to_death = death_dttm - crrt_initiation_time,
+# CENSOR_DAYS = 30), while every descriptive number did not.
+#
+# The old anchor also made some patients structurally uncountable: at UChicago
+# 90 encounters (4.2%) started CRRT more than 30 days after admission, so their
+# window had already expired and they could never be a "30-day death" whatever
+# happened — 59 of them died in hospital. They sat in the denominator with a
+# guaranteed zero in the numerator.
+#
+# Consumers that inherit this: Table 1 (02), the crude/dose-band mortality in
+# 03, the low-dose comparison in 06, and — importantly — the SMR in 03b, whose
+# reference model is fitted against this same outcome. THE SMR REFERENCE MODEL
+# MUST BE REFIT after this change; observed and expected are only comparable
+# when both use this definition.
+#
+# NOT changed here, and still a small difference from the causal branch: this
+# uses final_outcome_dttm (death_dttm with a last_vital_dttm proxy when the
+# death timestamp is missing) while 04 uses death_dttm directly, and "died"
+# here counts hospice discharges. Both are deliberate in 00 and out of scope.
 death_info['death_30d'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
-    (death_info['final_outcome_dttm'] <= (death_info['first_vital_dttm'] + pd.Timedelta(days=30)))
+    (death_info['crrt_initiation_time'].notna()) &
+    (death_info['final_outcome_dttm'] <= (death_info['crrt_initiation_time'] + pd.Timedelta(days=30)))
 ).astype(int)
+
+death_info = death_info.drop(columns=['crrt_initiation_time'])
 
 
 print(f"   In-hospital deaths: {death_info['in_hosp_death'].sum():,} ({death_info['in_hosp_death'].mean()*100:.1f}%)")
@@ -2226,7 +2404,10 @@ print(f"   Records with Hospital LOS: {outcomes_df['hosp_los_days'].notna().sum(
 print(f"   In-hospital mortality rate: {outcomes_df['in_hosp_death'].mean()*100:.1f}%")
 print(f"   30-day mortality rate: {outcomes_df['death_30d'].mean()*100:.1f}%")
 
-# ── Diagnostic: CRRT encounter_blocks by CRRT-initiation year (window 2018–2024) ──
+# ── Diagnostic: CRRT encounter_blocks by CRRT-initiation year ──
+_init_years = crrt_initiation['crrt_initiation_time'].dt.year.dropna()
+_obs_ymin = int(_init_years.min()) if len(_init_years) else 0
+_obs_ymax = int(_init_years.max()) if len(_init_years) else 0
 _by_year = (
     outcomes_df[['encounter_block']]
     .merge(crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
@@ -2235,7 +2416,10 @@ _by_year = (
     .dropna(subset=['init_year'])
     .astype({'init_year': 'int'})
     .groupby('init_year')['encounter_block'].nunique()
-    .reindex(range(STUDY_YEAR_START, STUDY_YEAR_END + 1), fill_value=0)
+    # Span the ACTUAL window, not the study constants: with a config override
+    # (dev site) the constants are the wrong range and would zero every row.
+    .reindex(range(int(year_start) if year_start else _obs_ymin,
+                   (int(year_end) if year_end else _obs_ymax) + 1), fill_value=0)
     .rename_axis('init_year').reset_index(name='n_encounter_blocks')
 )
 _by_year.to_csv(f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_crrt_by_year.csv', index=False)
@@ -2331,13 +2515,22 @@ if has_crrt_settings:
 
     print("\n Calculating CRRT dose at initiation...")
 
-    # Filter to dose-eligible modes (only SCUF excluded — pure ultrafiltration has
-    # no clearance dose). AVVH is convective like CVVH so it IS dose-eligible; the
-    # mode set and the effluent formula live in pipeline_helpers (single source).
+    # Filter to dose-eligible modes. SCUF alone is excluded: it is ultrafiltration
+    # with no clearance-generating flow, so no effluent-based dose is defined.
+    #
+    # AVVH is INCLUDED (added 2026-08-11). It is arteriovenous rather than
+    # venovenous, but clearance is still generated by replacement fluid (and by
+    # dialysate where a site charts it), so effluent-based dose is defined exactly
+    # as it is for CVVH/CVVHDF. Excluding it silently deleted the dose of every
+    # AVVH encounter — 32% of the cohort at one participating site — from the dose
+    # distribution, the dose bands, the practice-quality tiers and the causal dose
+    # contrast, while those patients remained in the denominator elsewhere.
+    DOSE_MODES = DOSE_ELIGIBLE_MODES   # shared constant (pipeline_helpers) — single source of truth
+
     print(f"   Total CRRT records before dose filtering: {len(crrt_cohort):,}")
-    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(DOSE_ELIGIBLE_MODES)].copy()
-    print(f"   Records after filtering for dose modes {sorted(DOSE_ELIGIBLE_MODES)}: {len(crrt_df_filtered):,}")
-    print(f"   Excluded from dose calc: {len(crrt_cohort) - len(crrt_df_filtered):,}")
+    crrt_df_filtered = crrt_cohort[crrt_cohort['crrt_mode_category'].isin(DOSE_MODES)].copy()
+    print(f"   Records after filtering for dose modes ({', '.join(sorted(DOSE_MODES))}): {len(crrt_df_filtered):,}")
+    print(f"   Excluded from dose calc (SCUF / unmapped modality): {len(crrt_cohort) - len(crrt_df_filtered):,}")
 
     # Fill NaN values with 0 for flow rate columns
     flow_cols = ['dialysate_flow_rate', 'pre_filter_replacement_fluid_rate',
@@ -2352,7 +2545,10 @@ if has_crrt_settings:
     print("\n   Mode distribution across all time points:")
     print(crrt_df_filtered['crrt_mode_category'].value_counts())
 
-    # Mode-specific total effluent flow at each time point (shared formula)
+    # Mode-specific total effluent flow at each time point — shared formula
+    # (pipeline_helpers.crrt_effluent_flow), the single source of truth also used
+    # by 03 and 04 so a mode change is one edit. cvvhd: dialysate; cvvh:
+    # replacement; cvvhdf/avvh: sum all present flows; else NaN.
     crrt_df_filtered['total_flow_rate'] = crrt_effluent_flow(
         crrt_df_filtered['crrt_mode_category'],
         crrt_df_filtered['dialysate_flow_rate'],
@@ -2417,7 +2613,7 @@ if has_crrt_settings:
         'hospitalization_id': 'first',
         'crrt_initiation_time': 'first',
         'weight_kg': 'first',
-        'crrt_mode_category': lambda x: x.mode()[0] if not x.empty else np.nan,  # Most frequent mode
+        'crrt_mode_category': _modal_stable,  # most frequent mode, ties broken deterministically
         **{col: 'median' for col in dose_columns}
     }).reset_index()
 
@@ -2433,8 +2629,8 @@ if has_crrt_settings:
     # aggregated ONE VALUE PER PATIENT (first-3h median) THEN across patients —
     # a true "initial settings" view consistent with the dose definition. Covers
     # every mode present in the window (BFR/dialysate/pre+post replacement/UF);
-    # calculated dose is attached from median_3hr (dose modes cvvh/cvvhd/cvvhdf
-    # only, so SCUF/AVVH rows show dose = "No data"). Feeds the cross-site
+    # calculated dose is attached from median_3hr (dose modes cvvh/cvvhd/cvvhdf/
+    # avvh only, so SCUF rows show dose = "No data"). Feeds the cross-site
     # initial-settings comparison table (dashboard).
     _init_params = ['blood_flow_rate', 'dialysate_flow_rate',
                     'pre_filter_replacement_fluid_rate',
@@ -2564,7 +2760,7 @@ if has_crrt_settings:
     print(f"     Total columns: {len(final_df.columns)}")
 
     # Merge dose results back into the full index_crrt_df (left join)
-    # This preserves encounters excluded from dose calc (e.g. SCUF/AVVH, missing flows)
+    # This preserves encounters excluded from dose calc (e.g. SCUF, unmapped modality, missing flows)
     dose_only_cols = [c for c in final_df.columns if c not in ['encounter_block', 'hospitalization_id', 'crrt_initiation_time', 'weight_kg', 'crrt_mode_category']]
     # Drop any overlapping columns from index_crrt_df before merge to avoid _x/_y suffixes
     overlap_cols = [c for c in dose_only_cols if c in index_crrt_df.columns]
@@ -3043,10 +3239,10 @@ index_crrt_df = index_crrt_df.merge(
 # stratified by hospital at a multi-hospital site. Encounter_block-keyed left
 # merge; well-defined only at initiation (transfers make it ambiguous over the
 # course), so it is intended for descriptive-at-initiation use, NOT longitudinal.
-_carry = ['encounter_block', 'hospital_id_at_init']
+_hosp_cols = ['encounter_block', 'hospital_id_at_init']
 if 'hospital_type_at_init' in crrt_start_location.columns:
-    _carry.append('hospital_type_at_init')
-_hosp_at_init = crrt_start_location[_carry].drop_duplicates('encounter_block')
+    _hosp_cols.append('hospital_type_at_init')   # academic / community, for 02c
+_hosp_at_init = crrt_start_location[_hosp_cols].drop_duplicates('encounter_block')
 index_crrt_df = index_crrt_df.merge(_hosp_at_init, on='encounter_block', how='left')
 outcomes_df = outcomes_df.merge(_hosp_at_init, on='encounter_block', how='left')
 
@@ -3054,6 +3250,12 @@ cohort_df.to_parquet(f"{OUT}/intermediate_phi/cohort_df.parquet", index=False)
 outcomes_df.to_parquet(f"{OUT}/intermediate_phi/outcomes_df.parquet", index=False)
 # Filter weight_df to hospitalization_ids present in cohort_df before saving
 weight_df_filtered = weight_df[weight_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
+# Sorted before writing so the artifact is byte-reproducible: this frame's row
+# order was observed to differ on every run, which made hash-comparing a re-run
+# impossible even when every value was identical.
+weight_df_filtered = weight_df_filtered.sort_values(
+    [c for c in ('hospitalization_id', 'recorded_dttm', 'weight_kg', 'encounter_block')
+     if c in weight_df_filtered.columns]).reset_index(drop=True)
 weight_df_filtered.to_parquet(f"{OUT}/intermediate_phi/weight_df.parquet", index=False)
 # save or use crrt_initiation df
 crrt_initiation.to_parquet(f"{OUT}/intermediate_phi/crrt_initiation.parquet", index=False)
@@ -3063,6 +3265,11 @@ crrt_cohort.to_parquet(f"{OUT}/intermediate_phi/crrt_cohort.parquet", index=Fals
 # Save processed hospital_diagnosis (with POA normalized, codes cleaned)
 # Filtered to cohort hospitalization_ids for use by script 04
 diag_cohort = hospital_diagnosis_df[hospital_diagnosis_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
+# Sorted before writing, same reason as weight_df above.
+# Sort on EVERY column: a three-key sort is not a total order here (rows tying
+# on those keys but differing in diagnosis_primary etc. keep an arbitrary
+# relative order), and 168 rows are exact duplicates.
+diag_cohort = diag_cohort.sort_values(list(diag_cohort.columns)).reset_index(drop=True)
 diag_cohort.to_parquet(f"{OUT}/intermediate_phi/hospital_diagnosis_df.parquet", index=False)
 print(f"Saved hospital_diagnosis_df: {len(diag_cohort):,} rows ({diag_cohort['poa_present'].sum():,} POA=1)")
 

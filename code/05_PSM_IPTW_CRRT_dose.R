@@ -66,7 +66,23 @@ if (is.null(getOption("repos")) || getOption("repos")["CRAN"] == "@CRAN@") {
 required_packages <- c("tidyverse", "readr", "arrow", "gtsummary", "cmprsk",
                        "survival", "jsonlite", "MatchIt", "WeightIt", "broom",
                        "cobalt", "EValue", "SuperLearner", "randomForest",
-                       "xgboost","gam","survminer", "survey", "mice", "smd")
+                       # survminer removed 2026-08-11: not called anywhere in the
+                       # ACTIVE pipeline (this script or 05b). It IS used by archived
+                       # scripts — ggsurvplot in code/archive/{03_psm_iptw,primary_psm_iptw,
+                       # extreme_psm_iptw}_models.R and survminer::ggcoxzph in
+                       # archive/code/05c_low_dose_emulation.R — so restoring any of those
+                       # means restoring survminer to renv.lock too. It became unnecessary
+                       # here when the estimand moved from Kaplan-Meier to COMPETING RISKS:
+                       # CIF curves come from cmprsk::cuminc and the standardized
+                       # g-computation, and PH diagnostics are written as tables rather than
+                       # plotted with ggcoxzph. It dragged in a
+                       # 7-package chain — survminer -> ggpubr -> rstatix -> car ->
+                       # pbkrtest -> doBy -> Deriv — and Deriv 4.3.0 uses C-API
+                       # symbols added in R 4.5.0 (R_ClosureFormals, Rf_allocLang).
+                       # On any site with R < 4.5 that failed to compile, renv::restore()
+                       # aborted, the project library stayed empty, and BOTH R steps
+                       # then died on "there is no package called 'jsonlite'".
+                       "xgboost","gam", "survey", "mice", "smd")
 new_packages <- required_packages[!(required_packages %in% installed.packages()
                                     [,"Package"])]
 if(length(new_packages)) install.packages(new_packages)

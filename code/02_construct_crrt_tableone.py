@@ -724,6 +724,39 @@ _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
 _row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+
+# --- Dose-band composition -------------------------------------------------
+# Mirrors the block in 02c's hospital-level Table 1 and the CRRT Dose Band block
+# of the pooled combined Table 1, so all three tables state the distribution the
+# same way instead of leaving the reader to derive it from the column headers.
+#
+# STRUCTURALLY DEGENERATE IN THE BAND COLUMNS, deliberately so: this table is
+# stratified BY dose band, so the "<20" column's "<20" row is 100% by
+# construction. Kept visible rather than blanked because it makes the banding
+# auditable at a glance — any band column whose own row is not 100% means the
+# strata and the row disagree, which is a bug. The Overall column is the
+# informative one.
+#
+# Denominator is the number WITH A COMPUTABLE DOSE, not the cohort N, matching
+# 03's crrt_practice_quality, the pooled dose-band figure and the combined
+# Table 1. Using the cohort N here would give this table a fourth, private
+# definition of "dose band %".
+#
+# No p-value: testing dose_band against strata defined by dose_band is a perfect
+# association by construction, not a result.
+_dn = {g: int(gframe[g]["dose_band"].notna().sum()) for g in GROUPS}
+_band_hdr = "CRRT Dose Band"
+if _dn["Overall"] != len(t1):
+    # Qualifier appears only while some encounters have no computable dose
+    # (SCUF, unmapped modality, missing flows); it disappears on its own once
+    # that gap closes, with no code change here.
+    _band_hdr += f" (n = {_dn['Overall']:,} with computable dose)"
+_rows.append({COL: f"__{_band_hdr}__", PCOL: "", **{GHDR[g]: "" for g in GROUPS}})
+for _b in BANDS:
+    _r = {COL: _b, PCOL: ""}
+    for g in GROUPS:
+        _r[GHDR[g]] = _npct(int((gframe[g]["dose_band"] == _b).sum()), _dn[g])
+    _rows.append(_r)
 if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
@@ -732,7 +765,22 @@ if HAS_CRRT_SETTINGS:
     # is inconsistent across sites (negative values), so the derived intensity is
     # unreliable for reporting (per Shan). The column is still computed for 03.
 # Outcome
-_row_binary("30-Day Mortality (%)", "_death30")
+# Both mortality rows are IN-HOSPITAL and differ only in the window, so both
+# labels say so. Neither is all-cause: death is established from the discharge
+# disposition (expired OR hospice, 00:2261), so a death after discharge is
+# unobservable and is never counted.
+#
+#   30-day : died within 30 days of CRRT INITIATION (00's death_30d, re-anchored
+#            2026-08-11; it previously ran from ~admission).
+#   90-day : 00's in_hosp_death — died before discharge, with deaths more than
+#            90 days after CRRT initiation un-counted (00:2297-2300). The old
+#            label "In-Hospital Mortality" hid that cap, so it is named for the
+#            window it actually applies.
+#
+# UChicago: 1,385 (65%) vs 1,440 (67%); the 55-encounter gap is deaths between
+# day 30 and day 90. 39 of the counted deaths are hospice discharges.
+_row_binary("30-Day In-Hospital Mortality (%)", "_death30")
+_row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 
 # ===================================================================

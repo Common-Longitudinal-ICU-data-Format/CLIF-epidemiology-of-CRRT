@@ -3,19 +3,23 @@
 
 Stratifies the CRRT cohort by `hospital_id_at_init` (the facility where CRRT was
 started; descriptive-at-initiation only — transfers make it ambiguous over the
-course). Produces four per-site CSVs:
+course). Produces three per-site CSVs:
   1. {site}_hospital_counts.csv          — encounters per hospital
   2. {site}_table1_by_hospital.csv       — the full Table 1, one column per hospital
   3. {site}_crrt_settings_by_hospital.csv — 3h-median CRRT settings + mode mix per hospital
-  4. {site}_hospital_type.csv            — anon label -> academic/community (for caterpillar)
 
-SHARING: outputs are de-identified for the consortium — hospital labels are
-    anonymized to {site}_H1..Hn (ordered by descending encounter count; no
-    crosswalk leaves the site), and small cells are suppressed two ways:
-      * whole hospitals with < SUPPRESS_MIN_N encounters are dropped entirely, and
-      * any categorical cell with numerator < SUPPRESS_MIN_N is blanked to "<N".
-    Written to final_no_phi/hospital_level/. Set SUPPRESS_MIN_N = None to disable
-    suppression for LOCAL inspection only (never share an unsuppressed run).
+SHARING: these are shareable as written (changed 2026-08-11). Two protections,
+    both required — either alone is insufficient:
+      1. SMALL-CELL SUPPRESSION at n < SUPPRESS_MIN_N: hospitals below the
+         threshold are dropped entirely, and categorical cells with a numerator
+         below it render as "<N" rather than a count.
+      2. PSEUDONYMOUS HOSPITAL LABELS: the raw hospital_id never leaves the site.
+         Hospitals are relabelled {SITE}_H1..{SITE}_Hk in DESCENDING order of
+         encounter count. The crosswalk back to the real ids is written to
+         intermediate_phi/ (local, git-ignored) so the site can audit its own
+         output; it is never part of the shareable set.
+    The consortium builders rely on the {SITE}_H<k> form — report_core's
+    collect_hospital_dose parses the trailing ordinal for its figure labels.
 
 Run from code/ :  uv run python 02c_hospital_level.py
 """
@@ -24,19 +28,28 @@ from pipeline_helpers import load_config, load_intermediate, get_output_root  # 
 import pandas as pd
 import numpy as np
 
-# ---- small-cell suppression (consortium default; None = local inspection only) ----
-SUPPRESS_MIN_N = 10     # drop hospitals with < 10 encounters and blank categorical
-                        # cells with numerator < 10. Set None to disable (do NOT share).
+# ---- small-cell suppression -------------------------------------------------
+# Consortium threshold, set 2026-08-11: drop hospitals with < 10 encounters and
+# render categorical cells with a numerator < 10 as "<10". Setting this to None
+# reverts to unsuppressed output, which must then NOT leave the site.
+#
+# Distinct from the ANALYSIS threshold applied downstream: the pooled
+# hospital-dose figure additionally drops hospitals under
+# report_core.HOSP_DOSE_MIN_N (20) as too small for a stable median. That is a
+# statistical judgement, not a disclosure control; this one is the disclosure
+# control. Do not collapse them into a single number.
+SUPPRESS_MIN_N = 10
 
 config = load_config()
 OUTPUT_ROOT = get_output_root(config)
 INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
-OUT_DIR = OUTPUT_ROOT / "final_no_phi" / "hospital_level"   # de-identified + suppressed -> shareable
+OUT_DIR = OUTPUT_ROOT / "final_no_phi" / "hospital_level"   # shareable: suppressed + pseudonymous
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+CROSSWALK_DIR = INTERMEDIATE_DIR / "hospital_level"         # local only: label -> real hospital_id
+CROSSWALK_DIR.mkdir(parents=True, exist_ok=True)
 SITE_NAME = config["site_name"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 HCOL = "hospital_id_at_init"
-TCOL = "hospital_type_at_init"
 
 print("=== 02c: hospital-level aggregates ===")
 
@@ -49,6 +62,25 @@ for _df in (t1, idx):
         _df[HCOL] = pd.NA
     _df[HCOL] = _df[HCOL].astype("string").fillna("unknown")
 
+# ---- pseudonymize hospital ids ------------------------------------------
+# Applied HERE, at the single point where HCOL is normalized, so every
+# downstream group/header/count uses the pseudonym and no later code has to
+# remember to. Ordered by DESCENDING encounter count, so H1 is the largest.
+# "unknown" is a category, not a hospital, and passes through unchanged.
+_raw_counts = t1[HCOL].value_counts(dropna=False)
+_real = [h for h in _raw_counts.index if h != "unknown"]
+_pseudo = {h: f"{SITE_NAME}_H{i + 1}" for i, h in enumerate(_real)}
+_pseudo["unknown"] = "unknown"
+pd.DataFrame({"label": [_pseudo[h] for h in _raw_counts.index],
+              "hospital_id_at_init": list(_raw_counts.index),
+              "n_encounters": _raw_counts.values}).to_csv(
+    CROSSWALK_DIR / f"{SITE_NAME}_hospital_id_crosswalk.csv", index=False)
+for _df in (t1, idx):
+    if HCOL in _df.columns:
+        _df[HCOL] = _df[HCOL].map(lambda v: _pseudo.get(v, v)).astype("string")
+print(f"  pseudonymized {len(_real)} hospital(s) -> {SITE_NAME}_H1..H{len(_real)}; "
+      f"crosswalk (LOCAL ONLY) -> {CROSSWALK_DIR}")
+
 _counts = t1[HCOL].value_counts(dropna=False)
 # groups: Overall + each hospital (unknown last), optionally suppressing small ones
 _hosps = [h for h in _counts.index if h != "unknown"] + (["unknown"] if "unknown" in _counts.index else [])
@@ -56,28 +88,81 @@ if SUPPRESS_MIN_N:
     _dropped = [h for h in _hosps if _counts[h] < SUPPRESS_MIN_N]
     _hosps = [h for h in _hosps if _counts[h] >= SUPPRESS_MIN_N]
     if _dropped:
-        print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}")
+        print(f"  suppression: dropped {len(_dropped)} hospital(s) with n < {SUPPRESS_MIN_N}: "
+              + ", ".join(f"{h} (n={_counts[h]})" for h in _dropped))
 GROUPS = ["Overall"] + _hosps
-# anonymize surviving hospitals -> {site}_H1..Hn (descending encounter count, which is
-# _hosps' order); "unknown" and "Overall" pass through. The raw->anon map never leaves here.
-LABEL = {"Overall": "Overall", "unknown": "unknown"}
-_h = 0
-for _hid in _hosps:
-    if _hid == "unknown":
-        continue
-    _h += 1
-    LABEL[_hid] = f"{SITE_NAME}_H{_h}"
 print(f"  {SITE_NAME}: {t1[HCOL].nunique()} distinct hospital_id_at_init | {len(t1):,} encounters")
-if SUPPRESS_MIN_N:
-    print(f"  suppression ON (min n = {SUPPRESS_MIN_N}); {len([h for h in _hosps if h != 'unknown'])} hospital(s) retained + anonymized")
+
+
+# =====================================================================
+# 0. Site-level hospital SUMMARY  (for pooled reporting)
+# ---------------------------------------------------------------------
+# The consortium needs "k sites comprising N hospitals". That total CANNOT be
+# recovered by counting rows of hospital_counts.csv, which lists only the
+# hospitals surviving suppression — counting those rows undercounts every site
+# where suppression fired. So the totals are recorded explicitly, here, before
+# any filtering. Counts of hospitals are not patient data; this is shareable.
+# =====================================================================
+_n_unknown = int(_raw_counts.get("unknown", 0))
+_n_reported = len([h for h in _hosps if h != "unknown"])
+pd.DataFrame([{
+    "site": SITE_NAME,
+    "n_hospitals_total": len(_real),               # distinct real hospital_id, pre-suppression
+    "n_hospitals_reported": _n_reported,           # surviving n >= SUPPRESS_MIN_N
+    "n_hospitals_suppressed": len(_real) - _n_reported,
+    "n_encounters_total": int(len(t1)),
+    "n_encounters_unknown_hospital": _n_unknown,
+    "suppress_min_n": SUPPRESS_MIN_N if SUPPRESS_MIN_N else 0,
+}]).to_csv(OUT_DIR / f"{SITE_NAME}_hospital_summary.csv", index=False)
+print(f"  hospital summary: {len(_real)} total, {_n_reported} reported, "
+      f"{len(_real) - _n_reported} suppressed, {_n_unknown} encounter(s) with unknown hospital_id")
+
+
+# =====================================================================
+# 0b. Hospital TYPE (academic / community)
+# ---------------------------------------------------------------------
+# hospital_type is a required ADT column, captured at CRRT initiation by 00
+# alongside hospital_id. Emitted as its own small file so the consortium can
+# describe practice by hospital type without any site shipping a hospital name.
+# Restricted to the surviving groups, like hospital_counts. A site whose ADT
+# leaves the column empty simply produces no file.
+# =====================================================================
+TCOL = "hospital_type_at_init"
+_type_src = next((f for f in (idx, t1) if TCOL in f.columns), None)
+if _type_src is not None and _type_src[TCOL].notna().any():
+    _ht = (_type_src[[HCOL, TCOL]].dropna(subset=[TCOL])
+           .astype({HCOL: "string", TCOL: "string"}))
+    _ht[TCOL] = _ht[TCOL].str.strip().str.lower()
+    # One type per hospital: take the most frequent, and say so if a hospital
+    # ever disagrees with itself (a data-quality signal, not something to hide).
+    _agg = (_ht.groupby(HCOL)[TCOL]
+            .agg(hospital_type=lambda s: s.mode().iloc[0] if not s.mode().empty else pd.NA,
+                 n_distinct_types="nunique")
+            .reset_index().rename(columns={HCOL: "hospital"}))
+    _mixed = _agg[_agg["n_distinct_types"] > 1]
+    if len(_mixed):
+        print(f"  WARNING: {len(_mixed)} hospital(s) report >1 hospital_type; "
+              f"taking the most frequent: {', '.join(_mixed['hospital'])}")
+    _agg = _agg[_agg["hospital"].isin(_hosps)]
+    _n = _type_src.groupby(HCOL).size().rename("n_encounters")
+    _agg = _agg.merge(_n, left_on="hospital", right_index=True, how="left")
+    _agg[["hospital", "hospital_type", "n_encounters"]].to_csv(
+        OUT_DIR / f"{SITE_NAME}_hospital_type.csv", index=False)
+    print(f"  hospital_type: {_agg['hospital_type'].value_counts().to_dict()}")
+else:
+    print("  hospital_type: not available (ADT column absent or empty) — file not written")
 
 
 # =====================================================================
 # 1. Hospital counts
 # =====================================================================
-# only retained (unsuppressed) hospitals, anonymized; pcts are of the full site total
-_cnt = pd.DataFrame({"hospital_id": [LABEL[h] for h in _hosps],
-                     "n_encounters": [int(_counts[h]) for h in _hosps]})
+# Restricted to the SURVIVING groups. Built from the raw value_counts this
+# would have re-published every suppressed hospital with an exact count,
+# defeating the suppression applied to the tables beside it.
+_cnt = (t1[HCOL].value_counts(dropna=False).rename_axis("hospital_id").reset_index(name="n_encounters"))
+_cnt = _cnt[_cnt["hospital_id"].isin(_hosps)].copy()
+# Denominator stays the FULL site cohort, so the percentages remain
+# interpretable and visibly fail to sum to 100 when anything was suppressed.
 _cnt["pct_of_site"] = (_cnt["n_encounters"] / len(t1) * 100).round(1)
 _cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
 
@@ -88,7 +173,7 @@ _cnt.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_counts.csv", index=False)
 gframe = {"Overall": t1, **{h: t1[t1[HCOL] == h] for h in _hosps}}
 gn = {g: len(gframe[g]) for g in GROUPS}
 COL = "Characteristic"
-HDR = {g: f"{LABEL[g]} (N={gn[g]:,})" for g in GROUPS}
+HDR = {g: (f"Overall (N={gn[g]:,})" if g == "Overall" else f"{g} (N={gn[g]:,})") for g in GROUPS}
 _columns = [COL] + [HDR[g] for g in GROUPS]
 
 
@@ -143,22 +228,24 @@ def _row_multi(label, col, level_order):
         _rows.append(r)
 
 
-def _row_dose_bins(label, col):
-    # N(%) of dosed patients per KDIGO-style band; denominator = patients with a
-    # non-missing dose (so bands sum to 100% of the dosed), edges: <20, 20-30, >30.
-    if col not in t1.columns:
-        return
-    bands = [("< 20 mL/kg/hr", lambda s: s < 20),
-             ("20–30 mL/kg/hr", lambda s: (s >= 20) & (s <= 30)),
-             ("> 30 mL/kg/hr", lambda s: s > 30)]
-    _rows.append({COL: f"__{label}__", **{HDR[g]: "" for g in GROUPS}})
-    for disp, pred in bands:
-        r = {COL: disp}
-        for g in GROUPS:
-            s = pd.to_numeric(gframe[g][col], errors="coerce")
-            r[HDR[g]] = _npct(int(pred(s).sum()), int(s.notna().sum()))
-        _rows.append(r)
-
+# Hospital type first: it describes the COLUMN (the hospital), so a reader knows
+# which stratum is academic and which is community before reading any patient
+# characteristic, without joining {SITE}_hospital_type.csv.
+#
+# In the per-hospital columns this is 100%/0% by construction — a hospital has
+# one type — and that doubles as a self-check. The OVERALL column is the
+# informative one: it gives the share of the site's CRRT delivered at academic
+# vs community hospitals, which nothing else in this file reports.
+#
+# Kept as a ROW, not folded into the column header: report_core's
+# collect_hospital_dose parses the trailing "_H<k>" off the header to label the
+# pooled caterpillar, and appending ", academic" to the label would break it.
+if TCOL in t1.columns and t1[TCOL].notna().any():
+    _types = sorted(t1[TCOL].dropna().astype("string").str.strip().str.lower().unique())
+    t1[TCOL] = t1[TCOL].astype("string").str.strip().str.lower()
+    for _g in GROUPS:                       # gframe holds slices taken before this normalization
+        gframe[_g] = gframe[_g].assign(**{TCOL: gframe[_g][TCOL].astype("string").str.strip().str.lower()})
+    _row_multi("Hospital Type", TCOL, [(t, t.capitalize()) for t in _types])
 
 # Demographics
 _row_cont("Age at Admission (years)", "age_at_admission", 0)
@@ -179,14 +266,18 @@ _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
 _row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
-_row_dose_bins("Initial CRRT Dose, banded (% of dosed)", "crrt_dose_ml_kg_hr")
 if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
     _modes = list(t1["crrt_mode_category"].dropna().astype("string").str.lower().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
     # Net UF Intensity omitted (UF sign convention unreliable across sites) — mirrors 02.
 # Outcome
-_row_binary("30-Day Mortality (%)", "_death30")
+# Labels match 02's site-wide Table 1: both are IN-HOSPITAL (death comes from
+# the discharge disposition, so post-discharge death is unobservable) and the
+# 90-day row is in_hosp_death, which un-counts deaths >90d after CRRT start.
+_row_binary("30-Day In-Hospital Mortality (%)", "_death30")
+if "in_hosp_death" in t1.columns:
+    _row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 pd.DataFrame(_rows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_table1_by_hospital.csv", index=False)
 
@@ -222,27 +313,8 @@ if HAS_CRRT_SETTINGS and "crrt_mode_category" in idx.columns:
         _srows.append(r)
 pd.DataFrame(_srows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_crrt_settings_by_hospital.csv", index=False)
 
-
-# =====================================================================
-# 4. Hospital type (academic / community) — anon label -> type, for the caterpillar
-# =====================================================================
-def _first_type(s):
-    v = s.dropna()
-    return str(v.iloc[0]).lower() if len(v) else "unknown"
-
-
-if TCOL in idx.columns:
-    _typ = idx.groupby(HCOL)[TCOL].agg(_first_type)
-else:
-    _typ = pd.Series(dtype="object")   # site did not populate ADT hospital_type
-_trows = [{"hospital": LABEL[h],
-           "hospital_type": _typ.get(h, "unknown"),
-           "n_encounters": int(_counts[h])}
-          for h in _hosps if h != "unknown"]
-pd.DataFrame(_trows, columns=["hospital", "hospital_type", "n_encounters"]).to_csv(
-    OUT_DIR / f"{SITE_NAME}_hospital_type.csv", index=False)
-
 print(f"  wrote 4 files -> {OUT_DIR}")
-print(f"  (anonymized labels + small-cell suppression @ n<{SUPPRESS_MIN_N} -> shareable)"
-      if SUPPRESS_MIN_N else "  (SUPPRESSION OFF -> local inspection only, DO NOT share)")
+print(f"  (pseudonymous labels + n<{SUPPRESS_MIN_N} suppression -> shareable)"
+      if SUPPRESS_MIN_N else
+      "  (SUPPRESS_MIN_N is None -> UNSUPPRESSED; do NOT share this output)")
 print("Done!")
