@@ -456,40 +456,15 @@ if n_invalid > 0:
     strobe_counts['excluded_non_crrt_modes'] = int(n_invalid)
     crrt_df = crrt_df[~invalid_mask].copy()
 
-# ── Modality data-quality diagnostic #2: composition of the KEPT null-mode rows ──
-# Null crrt_mode_category is NOT dropped (the filter above requires notna()); it
-# survives as "UNKNOWN" downstream. Characterize those null rows by their FLUID
-# PATTERN, which is what defines the mode: a null row with dialysate flow is
-# functionally CVVHD (a labeling/ETL gap, inferable & fixable); a null row with no
-# flows is genuinely uncharacterized. Also break down by raw crrt_mode_name (if
-# present) = the text the site's ETL failed to map. Record-level over all CRRT
-# records (pre-cohort-restriction). Feeds the modality data-quality dashboard table.
-_null = crrt_df[crrt_df['crrt_mode_category'].isna()].copy()
-if len(_null):
-    _d = _null['dialysate_flow_rate'].fillna(0) > 0
-    _p = ((_null['pre_filter_replacement_fluid_rate'].fillna(0)
-           + _null['post_filter_replacement_fluid_rate'].fillna(0)) > 0)
-    _u = _null['ultrafiltration_out'].fillna(0) > 0
-    _null['inferred_mode'] = np.select(
-        [_d & ~_p, ~_d & _p, _d & _p, ~_d & ~_p & _u],
-        ['CVVHD', 'CVVH', 'CVVHDF', 'SCUF'],
-        default='uncharacterized (no flows)')
-    _null_gb = (['inferred_mode']
-                + (['crrt_mode_name'] if 'crrt_mode_name' in _null.columns else []))
-    _null_bd = (_null.groupby(_null_gb, dropna=False)
-                .agg(n_records=('encounter_block', 'size'),
-                     n_encounter_blocks=('encounter_block', 'nunique'))
-                .reset_index().sort_values('n_records', ascending=False))
-    print(f"   Null-mode (UNKNOWN, KEPT) rows: {len(_null):,} records / "
-          f"{_null['encounter_block'].nunique():,} blocks; inferred-mode composition:")
-    print(_null_bd.to_string(index=False))
-else:
-    _null_cols = (['inferred_mode']
-                  + (['crrt_mode_name'] if 'crrt_mode_name' in crrt_df.columns else [])
-                  + ['n_records', 'n_encounter_blocks'])
-    _null_bd = pd.DataFrame(columns=_null_cols)
-_null_bd.to_csv(
-    f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_unknown_modality_composition.csv', index=False)
+# ── Modality data-quality diagnostic #2 (RELOCATED) ───────────────────────────
+# The null-mode composition breakdown used to be computed HERE, over ALL CRRT
+# records before any cohort restriction and across the entire course. That could
+# not answer the question the manuscript asks — why is modality missing AT
+# INITIATION, in the analysed cohort — and its counts were unreadable against
+# the cohort N (per-row block counts double-count blocks and are not a
+# partition). It now lives in the modality-inference block below, computed on
+# the SAME first-3h window and final cohort as the dose exposure.
+# Search: "composition of the blank-mode rows".
 
 # Recount after filtering
 n_crrt_blocks = crrt_df['encounter_block'].nunique()
@@ -1442,12 +1417,17 @@ crrt_initiation = crrt_initiation[crrt_initiation['encounter_block'].isin(cohort
 
 
 # =====================================================================
-# Infer CRRT modality at initiation (final cohort only)
+# Infer CRRT modality at initiation (final cohort, FIRST 3 HOURS)
 # ---------------------------------------------------------------------
-# For encounters whose mode is null/unknown at initiation, recover it:
+# "At initiation" means the FIRST 3 HOURS after crrt_initiation_time — the same
+# window that defines the dose exposure (crrt_dose_median_3h) — so that initial
+# modality and initial dose describe the same period. Recorded mode is the most
+# frequent non-blank mode in that window.
+#
+# For encounters with no recorded mode anywhere in the window, recover it:
 #   (a) ffill    — last mode recorded at/before the initiation time in the same
 #                  encounter (clinician label, no look-ahead), then
-#   (b) settings — rule on the initiation record for whatever ffill can't fill:
+#   (b) settings — rule on the first-3h flows for whatever ffill can't fill:
 #        dialysate>0 & replacement>0 -> cvvhdf ; dialysate>0 -> cvvhd ;
 #        replacement>0 -> cvvh ; UF-only -> scuf.
 # Recorded modes are NEVER overwritten. The fill is written into both
@@ -1473,11 +1453,37 @@ if has_crrt_settings:
             return 'scuf'
         return np.nan
 
-    # one initiation record per encounter_block (cohort already applied above)
-    _ci = crrt_at_initiation.drop_duplicates('encounter_block').set_index('encounter_block')
-    _rec0 = _normmode(_ci['crrt_mode_category'])                      # original recorded mode
-    _blank_blocks = _ci.index[_rec0.isna() | _rec0.isin(_BL)]
-    _settings_mode = _ci.apply(_infer_mode_from_settings, axis=1)
+    # FIRST-3h WINDOW after initiation, matching the dose exposure
+    # (crrt_dose_median_3h). This previously used the single record at exactly
+    # crrt_initiation_time, so "initial modality" and "initial dose" were
+    # measured over DIFFERENT windows while the manuscript treats both as the
+    # same "initial" quantity. The instant is also a worse measurement: one
+    # unlabeled first row counted as a missing modality even when the mode was
+    # charted minutes later, inflating apparent missingness.
+    _W3 = pd.Timedelta(hours=3)
+    _w3 = crrt_cohort[
+        crrt_cohort['encounter_block'].isin(cohort_blocks)
+        & (crrt_cohort['recorded_dttm'] >= crrt_cohort['crrt_initiation_time'])
+        & (crrt_cohort['recorded_dttm'] <= crrt_cohort['crrt_initiation_time'] + _W3)
+    ].copy()
+    _w3['_m'] = _normmode(_w3['crrt_mode_category'])
+    _w3.loc[_w3['_m'].isin(_BL), '_m'] = pd.NA
+    _all_blocks = pd.Index(sorted(_w3['encounter_block'].unique()), name='encounter_block')
+
+    # Recorded mode = MOST FREQUENT non-blank mode in the window, mirroring the
+    # first-3h aggregation the dose uses (median_3hr takes x.mode()[0]).
+    _rec0 = (_w3.dropna(subset=['_m']).groupby('encounter_block')['_m']
+             .agg(lambda s: s.value_counts().index[0]).reindex(_all_blocks))
+    _blank_blocks = _all_blocks[_rec0.isna()]
+
+    # Settings inference over the same window: a flow counts if it is EVER
+    # positive in the first 3h, so a single zero-flow row at t=0 cannot mask a
+    # mode that the rest of the window shows plainly.
+    _flow_cols = [c for c in ('dialysate_flow_rate', 'pre_filter_replacement_fluid_rate',
+                              'post_filter_replacement_fluid_rate', 'ultrafiltration_out')
+                  if c in _w3.columns]
+    _agg3 = _w3.groupby('encounter_block')[_flow_cols].max().reindex(_all_blocks)
+    _settings_mode = _agg3.apply(_infer_mode_from_settings, axis=1)
 
     # (a) ffill: last recorded mode at/before initiation, per encounter
     _ct = crrt_cohort.copy()
@@ -1510,6 +1516,45 @@ if has_crrt_settings:
 
     # ---- no-PHI diagnostics -> final_no_phi/diagnostics/ ----
     _dg = f"{OUT}/final_no_phi/diagnostics"
+
+    # 0) composition of the blank-mode rows, FIRST 3h / FINAL COHORT.
+    # Characterizes rows the ETL left unmapped by their FLUID PATTERN, which is
+    # what defines the mode: a blank row with dialysate flow is functionally
+    # CVVHD (a recoverable labeling gap), a blank row with no flows at all is
+    # genuinely uncharacterized — typically the circuit being down (clotted,
+    # filter change, patient off for a procedure), where neither a mode nor a
+    # flow is charted.
+    #
+    # n_encounter_blocks is nunique WITHIN each row, so a block appears in every
+    # pattern it exhibits; the column is NOT a partition and does not sum to the
+    # cohort. n_blocks_all_rows_blank below IS a clean per-block count: blocks
+    # with NO recorded mode anywhere in the window, i.e. the actual missingness.
+    _blank_rows = _w3[_w3['_m'].isna()].copy()
+    if len(_blank_rows):
+        _d = _blank_rows.get('dialysate_flow_rate', pd.Series(0, index=_blank_rows.index)).fillna(0) > 0
+        _p = ((_blank_rows.get('pre_filter_replacement_fluid_rate', pd.Series(0, index=_blank_rows.index)).fillna(0)
+               + _blank_rows.get('post_filter_replacement_fluid_rate', pd.Series(0, index=_blank_rows.index)).fillna(0)) > 0)
+        _u = _blank_rows.get('ultrafiltration_out', pd.Series(0, index=_blank_rows.index)).fillna(0) > 0
+        _blank_rows['inferred_mode'] = np.select(
+            [_d & ~_p, ~_d & _p, _d & _p, ~_d & ~_p & _u],
+            ['CVVHD', 'CVVH', 'CVVHDF', 'SCUF'],
+            default='uncharacterized (no flows)')
+        _gb = ['inferred_mode'] + (['crrt_mode_name'] if 'crrt_mode_name' in _blank_rows.columns else [])
+        _null_bd = (_blank_rows.groupby(_gb, dropna=False)
+                    .agg(n_records=('encounter_block', 'size'),
+                         n_encounter_blocks=('encounter_block', 'nunique'))
+                    .reset_index().sort_values('n_records', ascending=False))
+    else:
+        _null_bd = pd.DataFrame(columns=['inferred_mode', 'n_records', 'n_encounter_blocks'])
+    # Denominators, so the file is interpretable on its own.
+    _null_bd['window'] = 'first_3h_after_initiation'
+    _null_bd['n_cohort_blocks'] = len(_all_blocks)
+    _null_bd['n_blocks_all_rows_blank'] = len(_blank_blocks)
+    _null_bd.to_csv(
+        f'{_dg}/{SITE_NAME}_unknown_modality_composition.csv', index=False)
+    print(f"   blank-mode rows in first 3h: {len(_blank_rows):,} records across "
+          f"{_blank_rows['encounter_block'].nunique() if len(_blank_rows) else 0:,} blocks; "
+          f"{len(_blank_blocks):,}/{len(_all_blocks):,} blocks have NO recorded mode in the window")
     _recnn = _ct.dropna(subset=['_m']).copy()
     _recnn['_dt'] = (_recnn['recorded_dttm'] - _recnn['crrt_initiation_time']).abs()
     _closest = _recnn.sort_values(['encounter_block', '_dt']).groupby('encounter_block')['_m'].first()
