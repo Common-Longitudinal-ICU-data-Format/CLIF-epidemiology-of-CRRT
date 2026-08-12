@@ -765,14 +765,22 @@ if HAS_CRRT_SETTINGS:
     # is inconsistent across sites (negative values), so the derived intensity is
     # unreliable for reporting (per Shan). The column is still computed for 03.
 # Outcome
-_row_binary("30-Day Mortality (%)", "_death30")
-# In-hospital mortality sits directly beneath 30-day so the two are read
-# together. Both are in-hospital: 30-day is a WINDOW (died within 30 days of
-# CRRT initiation), this is the WHOLE ADMISSION (died before discharge, with
-# 00's >90-day cap). The difference is therefore deaths after day 30 that still
-# occurred in hospital — at UChicago 55 encounters, 2.6 percentage points.
-# Hospice discharges count as deaths in both (00's `died`).
-_row_binary("In-Hospital Mortality (%)", "in_hosp_death")
+# Both mortality rows are IN-HOSPITAL and differ only in the window, so both
+# labels say so. Neither is all-cause: death is established from the discharge
+# disposition (expired OR hospice, 00:2261), so a death after discharge is
+# unobservable and is never counted.
+#
+#   30-day : died within 30 days of CRRT INITIATION (00's death_30d, re-anchored
+#            2026-08-11; it previously ran from ~admission).
+#   90-day : 00's in_hosp_death — died before discharge, with deaths more than
+#            90 days after CRRT initiation un-counted (00:2297-2300). The old
+#            label "In-Hospital Mortality" hid that cap, so it is named for the
+#            window it actually applies.
+#
+# UChicago: 1,385 (65%) vs 1,440 (67%); the 55-encounter gap is deaths between
+# day 30 and day 90. 39 of the counted deaths are hospice discharges.
+_row_binary("30-Day In-Hospital Mortality (%)", "_death30")
+_row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 
 # ===================================================================
