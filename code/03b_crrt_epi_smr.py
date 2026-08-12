@@ -236,6 +236,35 @@ if not MODEL_PATH.exists():
 else:
     from sklearn.metrics import roc_auc_score
     model = json.loads(MODEL_PATH.read_text())
+
+    # ---- outcome-definition guard -------------------------------------
+    # The SMR compares OBSERVED deaths at this site against EXPECTED deaths from
+    # a frozen model. That comparison is only meaningful when both count the
+    # same outcome. On 2026-08-11 death_30d was re-anchored from ~admission to
+    # CRRT initiation; observed rose (UChicago 1,250 -> 1,385) while expected
+    # could not move, and the SMR went 0.991 (0.937-1.047) -> 1.098
+    # (1.041-1.157) — a CI excluding 1, i.e. apparent excess mortality that is
+    # entirely a definition mismatch. Nothing in the output would have shown it.
+    #
+    # A model refit after that change must record outcome_definition; a model
+    # without the key predates the tagging and cannot be verified.
+    OUTCOME_DEF = "death_30d_from_crrt_initiation"
+    _model_def = model.get("outcome_definition")
+    if _model_def is None:
+        print("\n  " + "!" * 74)
+        print("  WARNING: the reference model carries no `outcome_definition`, so it predates")
+        print("  the 2026-08-11 re-anchoring of death_30d to CRRT initiation. If it was fitted")
+        print("  against the old admission-anchored outcome, EXPECTED is on a different scale")
+        print("  from OBSERVED and the SMR is biased UPWARD. Refit before reporting.")
+        print("  " + "!" * 74)
+    elif _model_def != OUTCOME_DEF:
+        raise ValueError(
+            f"SMR reference model outcome mismatch: model was fitted on "
+            f"'{_model_def}' but this pipeline computes '{OUTCOME_DEF}'. Observed and "
+            f"expected would not be comparable and the SMR would be wrong. Refit the "
+            f"reference model, or check out the pipeline version matching the model."
+        )
+
     COVARS = model["covariates"]
     coef, intercept = model["coef"], model["intercept"]
     pdf = cohort.copy()
@@ -256,7 +285,12 @@ else:
            "observed": O, "expected": round(E, 2), "smr": round(smr, 3),
            "lo": round(lo, 3), "hi": round(hi, 3), "auc": round(float(auc), 3),
            "crude_mort_pct": round(100 * O / len(pdf), 1),
-           "reference_dev_site": model.get("dev_site", "")}
+           "reference_dev_site": model.get("dev_site", ""),
+           # Provenance: which outcome each side of the ratio counts. During a
+           # staggered re-run these will differ between sites, and pooling SMRs
+           # computed under different definitions would be meaningless.
+           "outcome_definition": OUTCOME_DEF,
+           "model_outcome_definition": _model_def if _model_def else "UNTAGGED (pre-2026-08-11)"}
     pd.DataFrame([row]).to_csv(EPI_OUT / f"{SITE}_smr.csv", index=False)
     # Transfer calibration: observed vs expected by predicted-risk decile
     cal = (pd.DataFrame({"y": y, "p": p})

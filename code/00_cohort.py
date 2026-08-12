@@ -2298,14 +2298,40 @@ _death_gap_days = (
     (death_info['final_outcome_dttm'] - death_info['crrt_initiation_time']).dt.total_seconds() / 86400
 )
 death_info.loc[_death_gap_days > 90, 'in_hosp_death'] = 0
-death_info = death_info.drop(columns=['crrt_initiation_time'])
 
-# 30-day mortality: died AND final_outcome_dttm within 30 days of first vital
+# 30-day mortality: died AND final_outcome_dttm within 30 days OF CRRT INITIATION.
+#
+# Anchored to crrt_initiation_time as of 2026-08-11. It previously ran from
+# first_vital_dttm — 30 days from roughly ADMISSION — so the follow-up window
+# opened before the exposure did and the two "30-day mortality" numbers in the
+# manuscript measured different things: the causal branch already counts from
+# CRRT initiation (04:873-878, days_to_death = death_dttm - crrt_initiation_time,
+# CENSOR_DAYS = 30), while every descriptive number did not.
+#
+# The old anchor also made some patients structurally uncountable: at UChicago
+# 90 encounters (4.2%) started CRRT more than 30 days after admission, so their
+# window had already expired and they could never be a "30-day death" whatever
+# happened — 59 of them died in hospital. They sat in the denominator with a
+# guaranteed zero in the numerator.
+#
+# Consumers that inherit this: Table 1 (02), the crude/dose-band mortality in
+# 03, the low-dose comparison in 06, and — importantly — the SMR in 03b, whose
+# reference model is fitted against this same outcome. THE SMR REFERENCE MODEL
+# MUST BE REFIT after this change; observed and expected are only comparable
+# when both use this definition.
+#
+# NOT changed here, and still a small difference from the causal branch: this
+# uses final_outcome_dttm (death_dttm with a last_vital_dttm proxy when the
+# death timestamp is missing) while 04 uses death_dttm directly, and "died"
+# here counts hospice discharges. Both are deliberate in 00 and out of scope.
 death_info['death_30d'] = (
     (death_info['died'] == 1) &
     (death_info['final_outcome_dttm'].notna()) &
-    (death_info['final_outcome_dttm'] <= (death_info['first_vital_dttm'] + pd.Timedelta(days=30)))
+    (death_info['crrt_initiation_time'].notna()) &
+    (death_info['final_outcome_dttm'] <= (death_info['crrt_initiation_time'] + pd.Timedelta(days=30)))
 ).astype(int)
+
+death_info = death_info.drop(columns=['crrt_initiation_time'])
 
 
 print(f"   In-hospital deaths: {death_info['in_hosp_death'].sum():,} ({death_info['in_hosp_death'].mean()*100:.1f}%)")
