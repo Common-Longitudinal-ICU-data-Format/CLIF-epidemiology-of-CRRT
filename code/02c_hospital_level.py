@@ -228,6 +228,25 @@ def _row_multi(label, col, level_order):
         _rows.append(r)
 
 
+# Hospital type first: it describes the COLUMN (the hospital), so a reader knows
+# which stratum is academic and which is community before reading any patient
+# characteristic, without joining {SITE}_hospital_type.csv.
+#
+# In the per-hospital columns this is 100%/0% by construction — a hospital has
+# one type — and that doubles as a self-check. The OVERALL column is the
+# informative one: it gives the share of the site's CRRT delivered at academic
+# vs community hospitals, which nothing else in this file reports.
+#
+# Kept as a ROW, not folded into the column header: report_core's
+# collect_hospital_dose parses the trailing "_H<k>" off the header to label the
+# pooled caterpillar, and appending ", academic" to the label would break it.
+if TCOL in t1.columns and t1[TCOL].notna().any():
+    _types = sorted(t1[TCOL].dropna().astype("string").str.strip().str.lower().unique())
+    t1[TCOL] = t1[TCOL].astype("string").str.strip().str.lower()
+    for _g in GROUPS:                       # gframe holds slices taken before this normalization
+        gframe[_g] = gframe[_g].assign(**{TCOL: gframe[_g][TCOL].astype("string").str.strip().str.lower()})
+    _row_multi("Hospital Type", TCOL, [(t, t.capitalize()) for t in _types])
+
 # Demographics
 _row_cont("Age at Admission (years)", "age_at_admission", 0)
 _row_binary("Female (%)", "_female")
