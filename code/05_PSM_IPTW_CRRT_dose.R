@@ -66,7 +66,15 @@ if (is.null(getOption("repos")) || getOption("repos")["CRAN"] == "@CRAN@") {
 required_packages <- c("tidyverse", "readr", "arrow", "gtsummary", "cmprsk",
                        "survival", "jsonlite", "MatchIt", "WeightIt", "broom",
                        "cobalt", "EValue", "SuperLearner", "randomForest",
-                       "xgboost","gam","survminer", "survey", "mice", "smd")
+                       # survminer removed 2026-08-11: never called anywhere in this
+                       # script (no ggsurvplot / survminer::), but it dragged in a
+                       # 7-package chain — survminer -> ggpubr -> rstatix -> car ->
+                       # pbkrtest -> doBy -> Deriv — and Deriv 4.3.0 uses C-API
+                       # symbols added in R 4.5.0 (R_ClosureFormals, Rf_allocLang).
+                       # On any site with R < 4.5 that failed to compile, renv::restore()
+                       # aborted, the project library stayed empty, and BOTH R steps
+                       # then died on "there is no package called 'jsonlite'".
+                       "xgboost","gam", "survey", "mice", "smd")
 new_packages <- required_packages[!(required_packages %in% installed.packages()
                                     [,"Package"])]
 if(length(new_packages)) install.packages(new_packages)
