@@ -328,9 +328,28 @@ adult_encounters = adult_encounters[
 ]
 
 # Filter for admission years — fixed study window (2018–2024), PI-approved.
-# Single source of truth: pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END.
-year_start = STUDY_YEAR_START
-year_end = STUDY_YEAR_END
+# Default from pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END, OVERRIDABLE
+# per config.
+#
+# The override was removed on 2026-07-06 (2f3ba1c), which commented out
+# `year_start = config["admission_year_start"]` and hardcoded the constants. That
+# silently broke the MIMIC development site, whose admission dates are shifted to
+# 2105-2214 for de-identification: the 2018-2024 window excluded 100% of it, the
+# cohort came out empty, and 00 then died with a DuckDB "syntax error at or near
+# )" from an empty ID list. Nobody noticed, because the SMR reference model was
+# already frozen and the dev path had not been exercised since — so the refit
+# this pipeline depends on had been impossible, not merely undone.
+#
+# Semantics, chosen so consortium sites cannot drift: key ABSENT -> the PI-approved
+# constant (every site config; unchanged). Key present and NULL -> no bound on
+# that side, which is what config_mimic.json asks for. Key present with a value
+# -> that value.
+year_start = config.get("admission_year_start", STUDY_YEAR_START)
+year_end = config.get("admission_year_end", STUDY_YEAR_END)
+if (year_start, year_end) != (STUDY_YEAR_START, STUDY_YEAR_END):
+    print(f"   NOTE: admission-year window overridden by config: "
+          f"{year_start or 'earliest'}-{year_end or 'present'} "
+          f"(study default {STUDY_YEAR_START}-{STUDY_YEAR_END})")
 year_mask = pd.Series(True, index=adult_encounters.index)
 if year_start is not None:
     year_mask = year_mask & (adult_encounters['admission_dttm'].dt.year >= year_start)
@@ -1014,11 +1033,31 @@ print(esrd_poa_counts)
 
 # Use a more inclusive approach for ESRD identification
 # Include cases where present_on_admission is 1 OR NA (assuming NA means unknown/possible)
-esrd_mask = (
-    hospital_diagnosis_df['diagnosis_code'].isin(esrd_codes) & 
-    ((hospital_diagnosis_df['poa_present'] == 1) | 
-        (hospital_diagnosis_df['poa_present'].isna()))
-)
+#
+# POA-ROBUSTNESS (added 2026-08-11). The POA condition assumes poa_present is
+# informative. Where it is not — every row 0, or every row null — the mask is
+# all-False and NO ESRD patient is excluded, silently, with the cohort simply
+# coming out larger. The MIMIC development site is exactly this case: its
+# conversion sets poa_present = 0 on all 80,624 rows because MIMIC's source
+# diagnoses_icd carries no present-on-admission field. 638 of 2,748 (23.2%) of
+# the SMR reference cohort were ESRD patients that every consortium site
+# excludes, so the frozen model was being fitted on one population and applied
+# to another.
+#
+# When POA carries no information, fall back to matching on the diagnosis code
+# alone. That is the same rule the POA branch already applies to NA. All ten
+# current sites have informative POA (22-49% excluded at this gate), so this
+# changes nothing for them; it repairs the dev site and guards any future site
+# whose ETL leaves the column unpopulated.
+_poa = hospital_diagnosis_df['poa_present']
+_poa_informative = bool((_poa == 1).any())
+if not _poa_informative:
+    print("   NOTE: poa_present carries no positive values — treating it as "
+          "UNINFORMATIVE and identifying ESRD by diagnosis code alone. "
+          "(With the POA condition applied, ZERO patients would be excluded.)")
+esrd_mask = hospital_diagnosis_df['diagnosis_code'].isin(esrd_codes)
+if _poa_informative:
+    esrd_mask = esrd_mask & ((_poa == 1) | (_poa.isna()))
 hosp_ids_with_esrd = hospital_diagnosis_df[esrd_mask]['hospitalization_id'].unique()
 blocks_with_esrd = hospital_diagnosis_df[esrd_mask]['encounter_block'].unique()
 
@@ -2363,7 +2402,10 @@ print(f"   Records with Hospital LOS: {outcomes_df['hosp_los_days'].notna().sum(
 print(f"   In-hospital mortality rate: {outcomes_df['in_hosp_death'].mean()*100:.1f}%")
 print(f"   30-day mortality rate: {outcomes_df['death_30d'].mean()*100:.1f}%")
 
-# ── Diagnostic: CRRT encounter_blocks by CRRT-initiation year (window 2018–2024) ──
+# ── Diagnostic: CRRT encounter_blocks by CRRT-initiation year ──
+_init_years = crrt_initiation['crrt_initiation_time'].dt.year.dropna()
+_obs_ymin = int(_init_years.min()) if len(_init_years) else 0
+_obs_ymax = int(_init_years.max()) if len(_init_years) else 0
 _by_year = (
     outcomes_df[['encounter_block']]
     .merge(crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
@@ -2372,7 +2414,10 @@ _by_year = (
     .dropna(subset=['init_year'])
     .astype({'init_year': 'int'})
     .groupby('init_year')['encounter_block'].nunique()
-    .reindex(range(STUDY_YEAR_START, STUDY_YEAR_END + 1), fill_value=0)
+    # Span the ACTUAL window, not the study constants: with a config override
+    # (dev site) the constants are the wrong range and would zero every row.
+    .reindex(range(int(year_start) if year_start else _obs_ymin,
+                   (int(year_end) if year_end else _obs_ymax) + 1), fill_value=0)
     .rename_axis('init_year').reset_index(name='n_encounter_blocks')
 )
 _by_year.to_csv(f'{OUT}/final_no_phi/diagnostics/{SITE_NAME}_crrt_by_year.csv', index=False)

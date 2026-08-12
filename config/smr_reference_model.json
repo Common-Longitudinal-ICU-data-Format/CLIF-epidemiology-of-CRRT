@@ -7,29 +7,30 @@
     "lactate",
     "cci_score"
   ],
-  "intercept": -3.682996258772492,
+  "intercept": -3.0659926510205535,
   "coef": {
-    "age": 0.027865977694181258,
-    "female": 0.05488375109462681,
-    "sofa_total": 0.1256159492464428,
-    "lactate": 0.14704859498449938,
-    "cci_score": 0.02210874159762212
+    "age": 0.022114531976519428,
+    "female": 0.0865054565438328,
+    "sofa_total": 0.12434426535229309,
+    "lactate": 0.13760331745854626,
+    "cci_score": 0.02719046343247735
   },
   "impute_medians": {
     "age": 64.0,
     "female": 0.0,
     "sofa_total": 10.0,
-    "lactate": 2.4,
+    "lactate": 2.6,
     "cci_score": 4.0
   },
-  "dev_n": 2748,
-  "dev_auc": 0.717,
-  "dev_auc_optimism_corrected": 0.715,
+  "dev_n": 2110,
+  "dev_auc": 0.707,
+  "dev_auc_optimism_corrected": 0.703,
   "vif": {
-    "age": 1.03,
-    "female": 1.0,
+    "age": 1.04,
+    "female": 1.01,
     "sofa_total": 1.09,
-    "lactate": 1.07,
+    "lactate": 1.05,
     "cci_score": 1.01
-  }
+  },
+  "outcome_definition": "death_30d_from_crrt_initiation"
 }

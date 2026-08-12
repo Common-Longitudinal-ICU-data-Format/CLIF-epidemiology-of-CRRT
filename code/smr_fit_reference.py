@@ -44,7 +44,11 @@ config = load_config()
 DEV_SITE = config["site_name"]
 COVARS = ["age", "female", "sofa_total", "lactate", "cci_score"]
 
-OUT = get_output_root(config) / "smr"  # honors config['output_dir'] (dev-site isolation)
+# The dev cohort is row-level PHI, so 03b writes it to intermediate_phi/
+# (03b:22,227-228). This was "smr/" — the pre-rename layout — and was missed
+# by the July output rename, so the fitter could not find a cohort that had
+# just been built. Honors config['output_dir'] for dev-site isolation.
+OUT = get_output_root(config) / "intermediate_phi"
 cohort_path = OUT / f"{DEV_SITE}_smr_cohort.parquet"
 if not cohort_path.exists():
     raise FileNotFoundError(
@@ -94,8 +98,17 @@ model = {"dev_site": DEV_SITE, "covariates": COVARS,
          "intercept": intercept, "coef": coef, "impute_medians": impute_medians,
          "dev_n": int(len(dev)), "dev_auc": round(auc, 3),
          "dev_auc_optimism_corrected": round(auc_corr, 3),
-         "vif": {k: round(v, 2) for k, v in vif.items()}}
-MODEL_PATH = Path("../config/smr_reference_model.json")
+         "vif": {k: round(v, 2) for k, v in vif.items()},
+         # Which outcome this model predicts. 03b compares the site's OBSERVED
+         # deaths against EXPECTED from this model, which is only meaningful when
+         # both count the same thing; it refuses to run on a mismatch and warns
+         # when this key is absent. death_30d was re-anchored from ~admission to
+         # CRRT initiation on 2026-08-11 (5fda0cc), and a model fitted before
+         # that predicts a different outcome.
+         "outcome_definition": "death_30d_from_crrt_initiation"}
+# Resolved against THIS FILE, not the cwd — as "../config/..." it silently wrote
+# the frozen model to a path that only existed when run from code/.
+MODEL_PATH = Path(__file__).resolve().parent.parent / "config" / "smr_reference_model.json"
 MODEL_PATH.write_text(json.dumps(model, indent=2))
 
 # ── Report ──────────────────────────────────────────────────────────────────
