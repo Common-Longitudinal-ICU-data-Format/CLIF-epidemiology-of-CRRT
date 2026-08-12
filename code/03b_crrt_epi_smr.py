@@ -38,6 +38,7 @@ NOT MIMIC data.
 """
 import warnings
 warnings.filterwarnings("ignore")
+import hashlib
 import json
 from pathlib import Path
 
@@ -265,6 +266,20 @@ else:
             f"reference model, or check out the pipeline version matching the model."
         )
 
+    # Fingerprint the model that actually produced these numbers. reference_dev_site
+    # is "MIMIC" for every version, so on its own it cannot tell one model from
+    # another: a site with a half-updated checkout, or a future second refit, would
+    # be pooled with everyone else and nothing in the output would show it. The
+    # hash covers the parts that change the arithmetic — covariates, coefficients,
+    # intercept, imputation medians — so two sites agreeing on it agree on the model.
+    _fp_src = json.dumps({"covariates": model.get("covariates"),
+                          "coef": model.get("coef"),
+                          "intercept": model.get("intercept"),
+                          "impute_medians": model.get("impute_medians")},
+                         sort_keys=True)
+    MODEL_FINGERPRINT = hashlib.sha256(_fp_src.encode()).hexdigest()[:12]
+    print(f"  reference model fingerprint: {MODEL_FINGERPRINT} (dev_n={model.get('dev_n')})")
+
     COVARS = model["covariates"]
     coef, intercept = model["coef"], model["intercept"]
     pdf = cohort.copy()
@@ -290,7 +305,9 @@ else:
            # staggered re-run these will differ between sites, and pooling SMRs
            # computed under different definitions would be meaningless.
            "outcome_definition": OUTCOME_DEF,
-           "model_outcome_definition": _model_def if _model_def else "UNTAGGED (pre-2026-08-11)"}
+           "model_outcome_definition": _model_def if _model_def else "UNTAGGED (pre-2026-08-11)",
+           "model_fingerprint": MODEL_FINGERPRINT,
+           "model_dev_n": model.get("dev_n")}
     pd.DataFrame([row]).to_csv(EPI_OUT / f"{SITE}_smr.csv", index=False)
     # Transfer calibration: observed vs expected by predicted-risk decile
     cal = (pd.DataFrame({"y": y, "p": p})
