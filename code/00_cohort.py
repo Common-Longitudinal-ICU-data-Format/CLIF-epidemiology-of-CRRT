@@ -207,6 +207,32 @@ else:
 strobe_counts = {}
 
 
+# ============================================================================
+# Determinism helpers
+# ----------------------------------------------------------------------------
+# Several per-encounter values are picked by "first"/"last"/"most frequent"
+# after a sort. Where the sort key does not order rows TOTALLY, the winner is
+# decided by the order pandas happens to hold the rows in, which is not stable:
+# weight_df and hospital_diagnosis_df were observed to come out in a different
+# row order on every run of this script. At UChicago no tie had disagreeing
+# values so nothing moved, but at a site whose ties disagree the same code would
+# produce a different cohort run to run.
+#
+# The fix is to make every such choice a function of the DATA, never of the row
+# order — either by appending tie-break keys to the sort, or via _modal_stable
+# below. Cheaper and safer than trying to force a stable order upstream.
+def _modal_stable(s):
+    """Most frequent value in *s*; ties broken by sorting the tied values, so
+    the result never depends on row order. Returns NaN for an all-null series.
+
+    pandas' .mode()[0] and .value_counts().index[0] both break count ties by
+    order of appearance, which is exactly the dependency being removed."""
+    vc = s.dropna().value_counts()
+    if vc.empty:
+        return np.nan
+    return sorted(vc[vc == vc.max()].index)[0]
+
+
 # ## Step0: Load Core Tables
 
 # In[6]:
@@ -1127,7 +1153,8 @@ combined = crrt_initiation.merge(weight_df, on='encounter_block', how='inner')
 
 before_mask = combined['recorded_dttm'] <= combined['crrt_initiation_time']
 combined_before = combined[before_mask].copy()
-combined_before_sorted = combined_before.sort_values(['encounter_block', 'recorded_dttm'])
+# weight_kg appended so ties at the same timestamp resolve by value, not row order.
+combined_before_sorted = combined_before.sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
 closest_before = (combined_before_sorted
                   .groupby('encounter_block')
                   .last()
@@ -1148,7 +1175,7 @@ after_mask = (
     (combined['weight_kg'].notnull())
 )
 combined_after = combined[after_mask].copy()
-combined_after_sorted = combined_after.sort_values(['encounter_block', 'recorded_dttm'])
+combined_after_sorted = combined_after.sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
 first_after = (combined_after_sorted
                .groupby('encounter_block')
                .first()
@@ -1164,8 +1191,13 @@ print(f"   Number of weights from after initiation: {num_taken_after}")
 combined_final = pd.concat([closest_before, first_after], axis=0, ignore_index=True)
 combined = combined_final
 
+# weight_kg appended as a tie-break: (encounter_block, recorded_dttm) is NOT a
+# total order — a block can carry two weights at the same timestamp — and
+# .last() would then return whichever row pandas happened to hold last, which
+# varies between runs. With weight_kg in the sort the tie resolves to the
+# largest weight, deterministically, and a run is reproducible from the data.
 closest_weights = (combined
-                .sort_values(['encounter_block', 'recorded_dttm'])
+                .sort_values(['encounter_block', 'recorded_dttm', 'weight_kg'])
                 .groupby('encounter_block')
                 .last()
                 .reset_index())
@@ -1473,7 +1505,7 @@ if has_crrt_settings:
     # Recorded mode = MOST FREQUENT non-blank mode in the window, mirroring the
     # first-3h aggregation the dose uses (median_3hr takes x.mode()[0]).
     _rec0 = (_w3.dropna(subset=['_m']).groupby('encounter_block')['_m']
-             .agg(lambda s: s.value_counts().index[0]).reindex(_all_blocks))
+             .agg(_modal_stable).reindex(_all_blocks))
     _blank_blocks = _all_blocks[_rec0.isna()]
 
     # Settings inference over the same window: a flow counts if it is EVER
@@ -1490,7 +1522,8 @@ if has_crrt_settings:
     _ct['_m'] = _normmode(_ct['crrt_mode_category'])
     _ct.loc[_ct['_m'].isin(_BL), '_m'] = pd.NA
     _past = _ct.dropna(subset=['_m'])
-    _past = _past[_past['recorded_dttm'] <= _past['crrt_initiation_time']].sort_values(['encounter_block', 'recorded_dttm'])
+    _past = _past[_past['recorded_dttm'] <= _past['crrt_initiation_time']].sort_values(
+        ['encounter_block', 'recorded_dttm', '_m'])   # '_m' breaks same-timestamp ties
     _ffill = _past.groupby('encounter_block')['_m'].last()
 
     # (b) ffill -> settings for the blank blocks
@@ -1557,8 +1590,11 @@ if has_crrt_settings:
           f"{len(_blank_blocks):,}/{len(_all_blocks):,} blocks have NO recorded mode in the window")
     _recnn = _ct.dropna(subset=['_m']).copy()
     _recnn['_dt'] = (_recnn['recorded_dttm'] - _recnn['crrt_initiation_time']).abs()
-    _closest = _recnn.sort_values(['encounter_block', '_dt']).groupby('encounter_block')['_m'].first()
-    _most_common = _recnn.groupby('encounter_block')['_m'].agg(lambda s: s.value_counts().index[0])
+    # '_dt' alone is not a total order: a record 5 min before and one 5 min
+    # after are equidistant. recorded_dttm then '_m' make the pick data-determined.
+    _closest = (_recnn.sort_values(['encounter_block', '_dt', 'recorded_dttm', '_m'])
+                .groupby('encounter_block')['_m'].first())
+    _most_common = _recnn.groupby('encounter_block')['_m'].agg(_modal_stable)
     _repl_ever = ((_ct['pre_filter_replacement_fluid_rate'].fillna(0) > 0) |
                   (_ct['post_filter_replacement_fluid_rate'].fillna(0) > 0)).groupby(_ct['encounter_block']).any()
 
@@ -1698,7 +1734,11 @@ adt_df_non_icu_hosps.to_csv(f'{OUT}/intermediate_phi/adt_df_non_icu_hosps.csv', 
 _loc = adt_final_stitched.merge(
     crrt_initiation[['encounter_block', 'crrt_initiation_time']].drop_duplicates('encounter_block'),
     on='encounter_block', how='inner')
-_before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(['encounter_block', 'in_dttm'])
+# hospital_id appended: ties on in_dttm previously decided which HOSPITAL an
+# encounter was attributed to by row order alone — now consequential, since
+# 02c ships hospital-level aggregates.
+_before = _loc[_loc['in_dttm'] <= _loc['crrt_initiation_time']].sort_values(
+    ['encounter_block', 'in_dttm'] + ([c for c in ('hospital_id',) if c in _loc.columns]))
 # The last ADT segment at/before CRRT initiation gives BOTH the start location and
 # the HOSPITAL where CRRT was started (hospital_id_at_init). A stitched
 # encounter_block can span multiple hospitals (transfers), so hospital is only
@@ -2515,7 +2555,7 @@ if has_crrt_settings:
         'hospitalization_id': 'first',
         'crrt_initiation_time': 'first',
         'weight_kg': 'first',
-        'crrt_mode_category': lambda x: x.mode()[0] if not x.empty else np.nan,  # Most frequent mode
+        'crrt_mode_category': _modal_stable,  # most frequent mode, ties broken deterministically
         **{col: 'median' for col in dose_columns}
     }).reset_index()
 
@@ -3152,6 +3192,12 @@ cohort_df.to_parquet(f"{OUT}/intermediate_phi/cohort_df.parquet", index=False)
 outcomes_df.to_parquet(f"{OUT}/intermediate_phi/outcomes_df.parquet", index=False)
 # Filter weight_df to hospitalization_ids present in cohort_df before saving
 weight_df_filtered = weight_df[weight_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
+# Sorted before writing so the artifact is byte-reproducible: this frame's row
+# order was observed to differ on every run, which made hash-comparing a re-run
+# impossible even when every value was identical.
+weight_df_filtered = weight_df_filtered.sort_values(
+    [c for c in ('hospitalization_id', 'recorded_dttm', 'weight_kg', 'encounter_block')
+     if c in weight_df_filtered.columns]).reset_index(drop=True)
 weight_df_filtered.to_parquet(f"{OUT}/intermediate_phi/weight_df.parquet", index=False)
 # save or use crrt_initiation df
 crrt_initiation.to_parquet(f"{OUT}/intermediate_phi/crrt_initiation.parquet", index=False)
@@ -3161,6 +3207,11 @@ crrt_cohort.to_parquet(f"{OUT}/intermediate_phi/crrt_cohort.parquet", index=Fals
 # Save processed hospital_diagnosis (with POA normalized, codes cleaned)
 # Filtered to cohort hospitalization_ids for use by script 04
 diag_cohort = hospital_diagnosis_df[hospital_diagnosis_df["hospitalization_id"].isin(cohort_df["hospitalization_id"])]
+# Sorted before writing, same reason as weight_df above.
+# Sort on EVERY column: a three-key sort is not a total order here (rows tying
+# on those keys but differing in diagnosis_primary etc. keep an arbitrary
+# relative order), and 168 rows are exact duplicates.
+diag_cohort = diag_cohort.sort_values(list(diag_cohort.columns)).reset_index(drop=True)
 diag_cohort.to_parquet(f"{OUT}/intermediate_phi/hospital_diagnosis_df.parquet", index=False)
 print(f"Saved hospital_diagnosis_df: {len(diag_cohort):,} rows ({diag_cohort['poa_present'].sum():,} POA=1)")
 
