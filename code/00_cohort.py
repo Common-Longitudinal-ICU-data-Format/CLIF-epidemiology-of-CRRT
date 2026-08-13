@@ -2545,10 +2545,13 @@ if has_crrt_settings:
     print("\n   Mode distribution across all time points:")
     print(crrt_df_filtered['crrt_mode_category'].value_counts())
 
-    # Mode-specific total effluent flow at each time point — shared formula
+    # Total effluent flow at each time point — shared formula
     # (pipeline_helpers.crrt_effluent_flow), the single source of truth also used
-    # by 03 and 04 so a mode change is one edit. cvvhd: dialysate; cvvh:
-    # replacement; cvvhdf/avvh: sum all present flows; else NaN.
+    # by 03 and 04 so a formula change is one edit. MODALITY-AGNOSTIC: every
+    # dose-eligible mode sums dialysate + pre- + post-filter replacement,
+    # counting whichever are charted; SCUF/unmapped and rows with nothing
+    # charted -> NaN. Rationale and the label-reliability argument live in the
+    # helper's docstring.
     crrt_df_filtered['total_flow_rate'] = crrt_effluent_flow(
         crrt_df_filtered['crrt_mode_category'],
         crrt_df_filtered['dialysate_flow_rate'],
@@ -2556,11 +2559,10 @@ if has_crrt_settings:
         crrt_df_filtered['post_filter_replacement_fluid_rate'])
 
     # Also calculate full flow rate (all components) at each time point
-    crrt_df_filtered['total_flow_rate_full'] = (
-        crrt_df_filtered['dialysate_flow_rate'] +
-        crrt_df_filtered['pre_filter_replacement_fluid_rate'] +
-        crrt_df_filtered['post_filter_replacement_fluid_rate']
-    )
+    # (There used to be a parallel "_full" flow here — dialysate + pre + post
+    # regardless of mode. Now that crrt_effluent_flow is modality-agnostic it
+    # computes exactly that, so the second column was a duplicate of the first
+    # and was removed 2026-08-13.)
 
     # Merge weight data (assuming weight_df has encounter_block and weight_kg)
     crrt_df_filtered = crrt_df_filtered.merge(
@@ -2576,15 +2578,8 @@ if has_crrt_settings:
         np.nan
     )
 
-    crrt_df_filtered['crrt_dose_ml_kg_hr_full'] = np.where(
-        (crrt_df_filtered['weight_kg'] > 0) & (crrt_df_filtered['total_flow_rate_full'] > 0),
-        crrt_df_filtered['total_flow_rate_full'] / crrt_df_filtered['weight_kg'],
-        np.nan
-    )
-
     print(f"\n   Dose calculations at individual time points:")
-    print(f"     Mode-specific doses calculated: {crrt_df_filtered['crrt_dose_ml_kg_hr'].notna().sum():,}")
-    print(f"     Full doses calculated: {crrt_df_filtered['crrt_dose_ml_kg_hr_full'].notna().sum():,}")
+    print(f"     Doses calculated: {crrt_df_filtered['crrt_dose_ml_kg_hr'].notna().sum():,}")
 
 
     # In[47]:
@@ -2605,8 +2600,7 @@ if has_crrt_settings:
     dose_columns = ['dialysate_flow_rate', 'blood_flow_rate', 
                     'pre_filter_replacement_fluid_rate', 
                     'post_filter_replacement_fluid_rate', 'ultrafiltration_out',
-                    'total_flow_rate', 'total_flow_rate_full',
-                    'crrt_dose_ml_kg_hr', 'crrt_dose_ml_kg_hr_full']
+                    'total_flow_rate', 'crrt_dose_ml_kg_hr']
 
     # Calculate medians for first 3 hours
     median_3hr = crrt_first_3hrs.groupby('encounter_block').agg({
@@ -2742,8 +2736,7 @@ if has_crrt_settings:
         'weight_kg', 'crrt_mode_category',
         'dialysate_flow_rate', 'blood_flow_rate',
         'pre_filter_replacement_fluid_rate', 'post_filter_replacement_fluid_rate',
-        'ultrafiltration_out', 'total_flow_rate', 'total_flow_rate_full',
-        'crrt_dose_ml_kg_hr', 'crrt_dose_ml_kg_hr_full'
+        'ultrafiltration_out', 'total_flow_rate', 'crrt_dose_ml_kg_hr'
     ]
 
     # Then the initiation columns (with _not_avged suffix)
@@ -2803,9 +2796,16 @@ if has_crrt_settings:
     # Create a single figure
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Remove NaN values for cleaner plotting
-    dose_full_median = final_df['crrt_dose_ml_kg_hr_full'].dropna()
-    dose_full_init = final_df['crrt_dose_ml_kg_hr_full_not_avged'].dropna()
+    # Median-of-first-3h vs the single value charted at initiation. This is the
+    # charting-lag detector: where a site's EHR back-fills CRRT settings, the
+    # first charted value is systematically low and the red curve sits left of
+    # the blue one. It is why the pipeline's dose is a 3h median and not the
+    # initiation value, so the _not_avged column it needs is deliberately kept.
+    #
+    # Read the _full columns until 2026-08-13; those were duplicates of these and
+    # were removed. The figure is unchanged — the values were identical.
+    dose_full_median = final_df['crrt_dose_ml_kg_hr'].dropna()
+    dose_full_init = final_df['crrt_dose_ml_kg_hr_not_avged'].dropna()
 
     # Create overlaid histograms
     ax.hist(dose_full_median, bins=30, alpha=0.5, label='Median (First 3hr)',
@@ -2822,7 +2822,7 @@ if has_crrt_settings:
     # Labels and title
     ax.set_xlabel('CRRT Dose (mL/kg/hr)', fontsize=12)
     ax.set_ylabel('Density', fontsize=12)
-    ax.set_title('Full CRRT Dose: Median (3hr) vs Initiation', fontsize=14, fontweight='bold')
+    ax.set_title('CRRT Dose: Median (3hr) vs Initiation', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
 

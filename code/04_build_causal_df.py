@@ -10,8 +10,10 @@ Extends the archived 04_build_competing_risk_df.py with:
   - 19 CCI binary components (from clifpy.calculate_cci + ICD-10 cancer split)
   - 30-day censoring (columns named time_to_event_90d / censored_at_90d
     to match R script expectations)
-  - Sensitivity analysis columns for 24h/48h intervals: CRRT dose (0-24h, 24-48h),
-    labs/SOFA/pf_sf_ratio/NEE/IMV at t=24, and 48h eligibility flag
+  - Sensitivity analysis columns for 24h/48h intervals: labs/SOFA/pf_sf_ratio/
+    NEE/IMV at t=24, and the 48h eligibility flag. (The windowed CRRT dose
+    columns that used to sit here — 0-12h, 12-24h, 0-24h, 24-48h and the
+    at-initiation value — were removed 2026-08-13; see the note at STEP 4.)
   - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
 Usage: uv run python code/04_build_causal_df.py
@@ -33,7 +35,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
 from pipeline_helpers import (load_config, load_intermediate, get_tables_path,  # noqa: E402
-    get_output_root, compute_cci, crrt_effluent_flow)
+    get_output_root, compute_cci)
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
 
@@ -202,94 +204,22 @@ crrt_ffill_cols = [c for c in crrt_cols if c in wide_df.columns]
 wide_df[crrt_ffill_cols] = wide_df.groupby("encounter_block")[crrt_ffill_cols].ffill(limit=8)
 print(f"  Forward-filled CRRT settings (limit=8 rows)")
 
-# Mode-specific dose formula (shared with 00/03 via pipeline_helpers)
-crrt_rows = wide_df[wide_df["crrt_mode_category"].notna()].copy()
-crrt_rows["total_flow_rate"] = crrt_effluent_flow(
-    crrt_rows["crrt_mode_category"],
-    crrt_rows["crrt_dialysate_flow_rate"],
-    crrt_rows["crrt_pre_filter_replacement_fluid_rate"],
-    crrt_rows["crrt_post_filter_replacement_fluid_rate"])
-crrt_rows["crrt_dose_ml_kg_hr"] = np.where(
-    (crrt_rows["weight_kg"] > 0) & (crrt_rows["total_flow_rate"] > 0),
-    crrt_rows["total_flow_rate"] / crrt_rows["weight_kg"],
-    np.nan,
-)
-
-# 4a: Dose at initiation
-init_dose = (
-    crrt_rows[crrt_rows["hours_from_crrt"] >= 0]
-    .sort_values("event_dttm")
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .first()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_ml_kg_hr_0"})
-)
-
-# 4b: Mean dose 0-12h
-dose_0_12 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 0) & (crrt_rows["hours_from_crrt"] < 12)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_0_12"})
-)
-
-# 4c: Mean dose 12-24h
-dose_12_24 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 12) & (crrt_rows["hours_from_crrt"] < 24)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_12_24"})
-)
-
-result = result.merge(init_dose, on="encounter_block", how="left")
-result = result.merge(dose_0_12, on="encounter_block", how="left")
-result = result.merge(dose_12_24, on="encounter_block", how="left")
-# Fallback: if dose 12-24h still missing, carry forward from 0-12h
-n_miss_before = result["crrt_dose_12_24"].isna().sum()
-result["crrt_dose_12_24"] = result["crrt_dose_12_24"].fillna(result["crrt_dose_0_12"])
-n_miss_after = result["crrt_dose_12_24"].isna().sum()
-print(f"  Dose at initiation: {init_dose['crrt_dose_ml_kg_hr_0'].notna().sum()} encounters")
-print(f"  Dose 0-12h: {dose_0_12['crrt_dose_0_12'].notna().sum()} encounters")
-print(f"  Dose 12-24h: {dose_12_24['crrt_dose_12_24'].notna().sum()} encounters"
-      f" (+{n_miss_before - n_miss_after} filled from 0-12h)")
-
-# 4d: Mean dose 0-24h (sensitivity)
-dose_0_24 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 0) & (crrt_rows["hours_from_crrt"] < 24)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_0_24"})
-)
-
-# 4e: Mean dose 24-48h (sensitivity)
-dose_24_48 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 24) & (crrt_rows["hours_from_crrt"] < 48)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_24_48"})
-)
-
-result = result.merge(dose_0_24, on="encounter_block", how="left")
-result = result.merge(dose_24_48, on="encounter_block", how="left")
-# Fallback: if dose 24-48h missing, carry forward from 0-24h
-n_miss_24_48_before = result["crrt_dose_24_48"].isna().sum()
-result["crrt_dose_24_48"] = result["crrt_dose_24_48"].fillna(result["crrt_dose_0_24"])
-n_miss_24_48_after = result["crrt_dose_24_48"].isna().sum()
-print(f"  Dose 0-24h: {dose_0_24['crrt_dose_0_24'].notna().sum()} encounters")
-print(f"  Dose 24-48h: {dose_24_48['crrt_dose_24_48'].notna().sum()} encounters"
-      f" (+{n_miss_24_48_before - n_miss_24_48_after} filled from 0-24h)")
+# NO DOSE IS COMPUTED HERE. 04 used to recompute a per-record dose from wide_df
+# and window it into crrt_dose_ml_kg_hr_0 (value at initiation) and mean doses
+# over 0-12h / 12-24h / 0-24h / 24-48h. Those five columns were built for the
+# time-varying MSM, which was cut from the manuscript and archived, and for 05b's
+# 24h sensitivity analysis, which was removed in 6c9e124. Nothing has read them
+# since; they were removed 2026-08-13 along with the duplicate dose computation
+# that existed only to feed them.
+#
+# The exposure is crrt_dose_median_3h, merged from index_crrt_df above — the
+# first-3h median computed once in 00. Having exactly one place that turns flows
+# into a dose is the point: the deleted block could have drifted from 00's
+# formula without anything failing.
+#
+# Note crrt_dose_ml_kg_hr_0 was a FIRST-charted-value dose, the definition this
+# project rejected because EHR back-filling makes it systematically low. It is
+# not a loss.
 
 # Flag patients with any non-zero CLEARANCE flow (for ultrafiltration-only exclusion).
 #
@@ -339,7 +269,7 @@ result = flag_clearance(wide_df, result, 24, "has_clearance_24h")
 # 4f: Clearance check extended to 48h (sensitivity)
 result = flag_clearance(wide_df, result, 48, "has_clearance_48h")
 
-del crrt_rows, wide_df
+del wide_df
 import gc; gc.collect()
 
 # ===================================================================
@@ -973,10 +903,7 @@ final_cols = [
     "ethnicity_category",
     "weight_kg",
     "crrt_mode_category",
-    "crrt_dose_ml_kg_hr_0",
     "crrt_dose_median_3h",
-    "crrt_dose_0_12",
-    "crrt_dose_12_24",
     "crrt_duration_days",
     "imv_duration_days",
     "creatinine_0",
@@ -1020,8 +947,6 @@ final_cols = [
     "cci_aids",
     "cci_score",
     # --- Sensitivity analysis columns (24h/48h windows) ---
-    "crrt_dose_0_24",
-    "crrt_dose_24_48",
     "lactate_24",
     "bicarbonate_24",
     "potassium_24",
@@ -1143,7 +1068,7 @@ n_descriptive = n_with_labs
 
 # n_excluded_short and n_excluded_scuf were computed in step 9b above
 n_causal = len(result)
-_dose_col = "crrt_dose_median_3h" if "crrt_dose_median_3h" in result.columns else "crrt_dose_ml_kg_hr_0"
+_dose_col = "crrt_dose_median_3h"   # the only dose in this frame since 2026-08-13
 n_high_dose = int((result[_dose_col] >= 30).sum())
 n_low_dose = int((result[_dose_col] < 30).sum())
 
