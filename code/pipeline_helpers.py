@@ -432,36 +432,46 @@ def course_average_intensity(records, group_col, time_col, rate_col,
     return g[cols]
 
 
-# ── CRRT dose: single source of truth for the mode-specific effluent formula ──
+# ── CRRT dose: single source of truth for the effluent formula ──
 # Previously copy-pasted as an np.select in 00, 03 and 04 — centralised here so a
-# mode change is one edit (and can't be applied to 2 of 3 sites again, the AVVH
+# formula change is one edit (and can't be applied to 2 of 3 sites again, the AVVH
 # bug). SCUF is pure ultrafiltration (no clearance) and is the only mode excluded.
+#
+# MODALITY-AGNOSTIC as of 2026-08-13: every dose-eligible mode sums every
+# clearance-generating flow that is charted. This extends to all modes the
+# reasoning already committed for AVVH in a577774 — the formula must not assume a
+# charting pattern the mode label does not guarantee. See crrt_effluent_flow.
 DOSE_ELIGIBLE_MODES = {"cvvh", "cvvhd", "cvvhdf", "avvh"}
-CONVECTIVE_MODES = ("cvvh",)          # clearance via replacement fluid only
-SUM_ALL_MODES = ("cvvhdf", "avvh")    # sum every clearance-generating flow present
 
 
 def crrt_effluent_flow(mode, dialysate, pre_repl, post_repl):
-    """Mode-specific total effluent flow (mL/hr) = the CRRT clearance term
-    (flow / weight -> mL/kg/hr dose). cvvhd: dialysate; cvvh (convective):
-    replacement fluid; cvvhdf/avvh: sum every clearance-generating flow present
-    (dialysate + replacement); anything else -> NaN.
+    """Total effluent flow (mL/hr) = the CRRT clearance term (flow / weight ->
+    mL/kg/hr dose). For every mode in DOSE_ELIGIBLE_MODES: dialysate + pre- +
+    post-filter replacement, counting whichever are charted. Any other mode
+    (SCUF, unmapped) -> NaN, as does a row with none of the three charted.
 
-    avvh sums all present flows rather than assuming a charting pattern: it
-    degrades to the cvvh formula where only replacement is charted (dialysate=0)
-    and to the cvvhd formula where only dialysate is (replacement=0). Matches the
-    consortium dose decision (2026-08-11).
+    Modality-agnostic by design. The formula degrades to the textbook one for
+    each modality whenever the site charts to the modality's definition — to
+    dialysate alone for CVVHD, to replacement alone for CVVH — so it is a no-op
+    at any site whose charting matches its labels. It differs only where a row
+    carries a flow its label says should not be there, and there it counts real
+    clearance the mode-specific formula discarded.
+
+    Why not trust the label: mode and charted fluids demonstrably disagree in
+    this consortium (one site documents CVVHDF on 19% of its cohort while never
+    charting replacement fluid). A label-conditional formula silently converts
+    that documentation artefact into a dose error; this one does not. The cost is
+    the mirror case — a genuinely mischarted fluid is counted as clearance — which
+    is the trade accepted for AVVH in a577774 and now applied consistently.
+
+    All-missing -> NaN rather than 0 so "no flow charted" stays distinguishable
+    from "zero flow"; callers additionally guard on flow > 0.
 
     Name-agnostic — pass whichever Series the frame holds (crrt_-prefixed in
     wide_df, unprefixed in crrt_cohort). Modes are assumed already lowercased, as
-    they are upstream. Masked assignment (not np.select) so each mode's formula is
-    evaluated only on its own rows."""
+    they are upstream."""
     flow = pd.Series(np.nan, index=mode.index)
-    repl = pre_repl.fillna(0) + post_repl.fillna(0)
-    is_cvvhd = mode == "cvvhd"
-    is_conv = mode.isin(CONVECTIVE_MODES)
-    is_sum = mode.isin(SUM_ALL_MODES)
-    flow[is_cvvhd] = dialysate[is_cvvhd]
-    flow[is_conv] = repl[is_conv]
-    flow[is_sum] = dialysate[is_sum].fillna(0) + repl[is_sum]
+    charted = dialysate.notna() | pre_repl.notna() | post_repl.notna()
+    is_dose = mode.isin(DOSE_ELIGIBLE_MODES) & charted
+    flow[is_dose] = (dialysate.fillna(0) + pre_repl.fillna(0) + post_repl.fillna(0))[is_dose]
     return flow

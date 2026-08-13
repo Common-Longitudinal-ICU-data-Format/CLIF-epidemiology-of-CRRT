@@ -2545,10 +2545,13 @@ if has_crrt_settings:
     print("\n   Mode distribution across all time points:")
     print(crrt_df_filtered['crrt_mode_category'].value_counts())
 
-    # Mode-specific total effluent flow at each time point — shared formula
+    # Total effluent flow at each time point — shared formula
     # (pipeline_helpers.crrt_effluent_flow), the single source of truth also used
-    # by 03 and 04 so a mode change is one edit. cvvhd: dialysate; cvvh:
-    # replacement; cvvhdf/avvh: sum all present flows; else NaN.
+    # by 03 and 04 so a formula change is one edit. MODALITY-AGNOSTIC: every
+    # dose-eligible mode sums dialysate + pre- + post-filter replacement,
+    # counting whichever are charted; SCUF/unmapped and rows with nothing
+    # charted -> NaN. Rationale and the label-reliability argument live in the
+    # helper's docstring.
     crrt_df_filtered['total_flow_rate'] = crrt_effluent_flow(
         crrt_df_filtered['crrt_mode_category'],
         crrt_df_filtered['dialysate_flow_rate'],
