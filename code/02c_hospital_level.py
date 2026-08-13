@@ -228,6 +228,30 @@ def _row_multi(label, col, level_order):
         _rows.append(r)
 
 
+def _row_dose_bins(label, col):
+    # N(%) per dose band, stratified by hospital. Band edges and labels match 02's
+    # site-wide Table 1 exactly (BANDS at 02:598): <20, 20-30 inclusive of BOTH
+    # ends so dose==30 lands in the KDIGO-target band rather than >30, and >30.
+    #
+    # Denominator is patients with a NON-MISSING dose in that column, not the
+    # column N — so the three bands sum to 100% of the dosed and a hospital with
+    # poor dose capture is not made to look low-dose. That differs from the other
+    # _row_* helpers here, which use len(f); the header N therefore does not
+    # reconcile with these percentages, by design.
+    if col not in t1.columns:
+        return
+    bands = [("<20 mL/kg/hr", lambda s: s < 20),
+             ("20-30 mL/kg/hr", lambda s: (s >= 20) & (s <= 30)),
+             (">30 mL/kg/hr", lambda s: s > 30)]
+    _rows.append({COL: f"__{label}__", **{HDR[g]: "" for g in GROUPS}})
+    for disp, pred in bands:
+        r = {COL: disp}
+        for g in GROUPS:
+            s = pd.to_numeric(gframe[g][col], errors="coerce")
+            r[HDR[g]] = _npct(int(pred(s).sum()), int(s.notna().sum()))
+        _rows.append(r)
+
+
 # Hospital type first: it describes the COLUMN (the hospital), so a reader knows
 # which stratum is academic and which is community before reading any patient
 # characteristic, without joining {SITE}_hospital_type.csv.
@@ -266,6 +290,7 @@ _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
 _row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+_row_dose_bins("Initial CRRT Dose, banded (% of dosed)", "crrt_dose_ml_kg_hr")
 if HAS_CRRT_SETTINGS and "crrt_mode_category" in t1.columns:
     _modes = list(t1["crrt_mode_category"].dropna().astype("string").str.lower().value_counts().index)
     if _modes:
