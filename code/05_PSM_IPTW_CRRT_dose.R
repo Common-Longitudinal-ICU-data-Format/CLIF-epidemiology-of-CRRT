@@ -22,11 +22,13 @@ cat("Environment and plots cleared.\n")
 # Set working directory to project root using config.json project_root
 # Try multiple config paths: relative to code/, relative to cwd, or via --file=
 .find_config <- function() {
-  candidates <- c("../config/config.json", "config/config.json")
-  # honor CLIF_CONFIG (matches the Python pipeline_helpers) so a multi-site run
-  # can point at config_nu.json etc. without editing config.json
+  # CLIF_CONFIG takes HIGHEST precedence (matches Python pipeline_helpers) so a
+  # multi-site run can point at config_nu.json etc. without editing config.json.
+  # Return immediately: the script-dir/RStudio candidates below would otherwise
+  # find the default config/config.json first and silently override CLIF_CONFIG.
   .cc <- Sys.getenv("CLIF_CONFIG")
-  if (nzchar(.cc)) candidates <- c(.cc, candidates)
+  if (nzchar(.cc) && file.exists(.cc)) return(normalizePath(.cc))
+  candidates <- c("../config/config.json", "config/config.json")
   # Also try relative to script location
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
