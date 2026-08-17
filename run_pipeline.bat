@@ -64,6 +64,7 @@ for %%S in (
     00_cohort.py
     01_create_wide_df.py
     02_construct_crrt_tableone.py
+    02c_hospital_level.py
     03_crrt_epidemiology.py
     03b_crrt_epi_smr.py
     06_low_dose_characterization.py

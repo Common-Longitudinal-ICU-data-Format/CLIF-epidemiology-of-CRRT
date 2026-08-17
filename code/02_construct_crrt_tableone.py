@@ -477,9 +477,17 @@ for col in analysis_df.columns:
 # unlimited-forward-fill staleness in the *_baseline columns (a point lab does
 # not persist like an infusion rate). Computed ONCE here and persisted so BOTH
 # Table 1 (below) and the SMR builder (03b) consume one definition (and one
-# tz-correct windowing). NOTE: the *_baseline columns consumed by 04/causal
-# still use the forward-filled values - a separate, causal-affecting decision.
-_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate"]
+# tz-correct windowing). 04 STEP 3 (2026-06-09) recomputes the causal baseline
+# labs as nearest-measured, and 03/06/05b read *_t1 too, so the stale point-lab
+# *_baseline columns are dropped before save below (see end of file, 2026-07-29).
+# All point labs get the nearest-measured *_t1 definition (unlimited ffill is
+# invalid for snapshot labs). The first 7 are Table-1 / consumed; the rest have
+# no consumer today but are converted for consistency + future use (their stale
+# *_baseline columns are dropped below either way). Verified 2026-07-29 none of
+# these *_baseline columns are read anywhere (P/F uses lab_po2_arterial straight
+# from wide_df in 04, not po2_arterial_baseline).
+_T1_LABS = ["creatinine", "bun", "lactate", "bicarbonate", "potassium", "phosphate", "ph_arterial",
+            "calcium_total", "chloride", "glucose_serum", "magnesium", "po2_arterial", "sodium"]
 _t1_lab_cols = [f"lab_{x}" for x in _T1_LABS]
 _t1_avail = {f.name for f in pq.read_schema(INTERMEDIATE_DIR / "wide_df.parquet")}
 _t1_need = ["hospitalization_id", "event_dttm"] + [c for c in _t1_lab_cols if c in _t1_avail]
@@ -496,6 +504,50 @@ for _x in _T1_LABS:
                  .groupby("encounter_block")[_c].first())
         analysis_df[f"{_x}_t1"] = analysis_df["encounter_block"].map(_near)
 del _t1_wd
+
+# ── Baseline SEVERITY threshold proportions (patient-level, at CRRT start) ──────
+# Companion to the median[IQR] labs in Table 1: the % of patients whose baseline
+# lab crosses a clinically severe threshold at CRRT initiation. The median can
+# understate hyperkalemia / hyperlactatemia (tail phenomena in a CRRT cohort where
+# most patients are near-normal), so these give a threshold-based severity view.
+# Denominator = patients with the lab measured in the baseline window (non-null
+# _t1). Uses the same nearest-measured _t1 values as the Table 1 lab rows. Emitted
+# per site for cross-site pooling. Thresholds chosen 2026-07-28.
+_SEV_THRESHOLDS = [
+    ("Severe hyperkalemia (K > 6 mEq/L)",           "potassium_t1",   "gt", 6.0),
+    ("Severe hyperlactatemia (lactate > 4 mmol/L)", "lactate_t1",     "gt", 4.0),
+    ("Severe acidosis (bicarbonate < 15 mEq/L)",    "bicarbonate_t1", "lt", 15.0),
+    ("Severe azotemia (creatinine > 4 mg/dL)",      "creatinine_t1",  "gt", 4.0),
+    ("Severe uremia (BUN > 80 mg/dL)",              "bun_t1",         "gt", 80.0),
+]
+_sev_rows = []
+for _lbl, _col, _dir, _thr in _SEV_THRESHOLDS:
+    if _col not in analysis_df.columns:
+        continue
+    _v = pd.to_numeric(analysis_df[_col], errors="coerce").dropna()
+    _n = len(_v)
+    _meet = int((_v > _thr).sum()) if _dir == "gt" else int((_v < _thr).sum())
+    _sev_rows.append({
+        "metric": _lbl, "column": _col,
+        "threshold": (">" if _dir == "gt" else "<") + f" {_thr:g}",
+        "n_with_lab": _n, "n_meeting": _meet,
+        "pct_meeting": round(100 * _meet / _n, 1) if _n else float("nan"),
+    })
+baseline_severity_df = pd.DataFrame(_sev_rows)
+baseline_severity_df.to_csv(FINAL_DIR / f"{SITE_NAME}_baseline_severity_thresholds.csv", index=False)
+print(f"  Baseline severity thresholds saved -> {SITE_NAME}_baseline_severity_thresholds.csv")
+print(baseline_severity_df[["metric", "pct_meeting", "n_meeting", "n_with_lab"]].to_string(index=False))
+
+# Drop every point-lab *_baseline column: point labs are snapshots, so unlimited
+# ffill is invalid. Each now has a nearest-measured *_t1 column instead - consumers
+# (Table 1 above, 03, 06, 05b) read *_t1; the rest carried no consumer and are just
+# removed as stale clutter. Vaso/NEE/resp/settings *_baseline are KEPT - forward-fill
+# is valid for values that persist between charted measurements.
+_stale_baseline = [f"{_x}_baseline" for _x in _T1_LABS
+                   if f"{_x}_baseline" in analysis_df.columns]
+if _stale_baseline:
+    analysis_df = analysis_df.drop(columns=_stale_baseline)
+    print(f"  Dropped stale ffill baseline lab cols: {_stale_baseline}")
 
 # Save
 analysis_df.to_parquet(INTERMEDIATE_DIR / "tableone_analysis_df.parquet", index=False)
@@ -667,17 +719,68 @@ _row_cont("Lactate (mmol/L)", "lactate_t1", 1)
 _row_cont("Bicarbonate (mEq/L)", "bicarbonate_t1", 1)
 _row_cont("Potassium (mEq/L)", "potassium_t1", 2)
 _row_cont("Phosphate (mg/dL)", "phosphate_t1", 1)
+_row_cont("Arterial pH", "ph_arterial_t1", 2)
 _row_cont("NE Equivalent (mcg/kg/min)", "nee_baseline", 2)
 _row_binary("On IMV (%)", "_imv")
 # CRRT practice descriptors
 _row_cont("Initial CRRT Dose (mL/kg/hr)", "crrt_dose_ml_kg_hr", 1)
+
+# --- Dose-band composition -------------------------------------------------
+# Mirrors the block in 02c's hospital-level Table 1 and the CRRT Dose Band block
+# of the pooled combined Table 1, so all three tables state the distribution the
+# same way instead of leaving the reader to derive it from the column headers.
+#
+# STRUCTURALLY DEGENERATE IN THE BAND COLUMNS, deliberately so: this table is
+# stratified BY dose band, so the "<20" column's "<20" row is 100% by
+# construction. Kept visible rather than blanked because it makes the banding
+# auditable at a glance — any band column whose own row is not 100% means the
+# strata and the row disagree, which is a bug. The Overall column is the
+# informative one.
+#
+# Denominator is the number WITH A COMPUTABLE DOSE, not the cohort N, matching
+# 03's crrt_practice_quality, the pooled dose-band figure and the combined
+# Table 1. Using the cohort N here would give this table a fourth, private
+# definition of "dose band %".
+#
+# No p-value: testing dose_band against strata defined by dose_band is a perfect
+# association by construction, not a result.
+_dn = {g: int(gframe[g]["dose_band"].notna().sum()) for g in GROUPS}
+_band_hdr = "CRRT Dose Band"
+if _dn["Overall"] != len(t1):
+    # Qualifier appears only while some encounters have no computable dose
+    # (SCUF, unmapped modality, missing flows); it disappears on its own once
+    # that gap closes, with no code change here.
+    _band_hdr += f" (n = {_dn['Overall']:,} with computable dose)"
+_rows.append({COL: f"__{_band_hdr}__", PCOL: "", **{GHDR[g]: "" for g in GROUPS}})
+for _b in BANDS:
+    _r = {COL: _b, PCOL: ""}
+    for g in GROUPS:
+        _r[GHDR[g]] = _npct(int((gframe[g]["dose_band"] == _b).sum()), _dn[g])
+    _rows.append(_r)
 if HAS_CRRT_SETTINGS:
     _modes = list(_dosed["crrt_mode_category"].dropna().value_counts().index)
     if _modes:
         _row_multi("CRRT Modality", "crrt_mode_category", [(m, str(m).upper()) for m in _modes])
-    _row_cont("Net UF Intensity (mL/kg/hr, first 72h)", "net_uf_intensity", 2)
+    # Net UF Intensity omitted from Table 1 — ultrafiltration_out sign convention
+    # is inconsistent across sites (negative values), so the derived intensity is
+    # unreliable for reporting (per Shan). The column is still computed for 03.
 # Outcome
-_row_binary("30-Day Mortality (%)", "_death30")
+# Both mortality rows are IN-HOSPITAL and differ only in the window, so both
+# labels say so. Neither is all-cause: death is established from the discharge
+# disposition (expired OR hospice, 00:2261), so a death after discharge is
+# unobservable and is never counted.
+#
+#   30-day : died within 30 days of CRRT INITIATION (00's death_30d, re-anchored
+#            2026-08-11; it previously ran from ~admission).
+#   90-day : 00's in_hosp_death — died before discharge, with deaths more than
+#            90 days after CRRT initiation un-counted (00:2297-2300). The old
+#            label "In-Hospital Mortality" hid that cap, so it is named for the
+#            window it actually applies.
+#
+# UChicago: 1,385 (65%) vs 1,440 (67%); the 55-encounter gap is deaths between
+# day 30 and day 90. 39 of the counted deaths are hospice discharges.
+_row_binary("30-Day In-Hospital Mortality (%)", "_death30")
+_row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 
 # ===================================================================
@@ -709,4 +812,17 @@ with open(html_path, "w", encoding="utf-8") as _f:
         "p-value across the three dose bands (Kruskal-Wallis / chi-square).</em></p>"
         + _disp.to_html(index=False, escape=False) + "</body></html>")
 print(f"  HTML: {html_path}")
+
+# ── Full Table-1 frame for hospital-level aggregates (02c) ──
+# t1 carries every Table-1 display column (cci_score, net_uf_intensity, _female,
+# _race_grp, sofa_nonrenal, _imv, _death30, …) that the saved tableone_analysis_df
+# (written earlier, before those were computed) does not. Persist it — with
+# hospital_id_at_init merged on — so 02c can re-stratify by hospital without
+# recomputing anything.
+if "hospital_id_at_init" not in t1.columns and "hospital_id_at_init" in index_crrt_df.columns:
+    t1 = t1.merge(
+        index_crrt_df[["encounter_block", "hospital_id_at_init"]].drop_duplicates("encounter_block"),
+        on="encounter_block", how="left")
+t1.to_parquet(INTERMEDIATE_DIR / "tableone_full_df.parquet", index=False)
+print(f"  Saved full Table-1 frame -> tableone_full_df.parquet ({len(t1)} rows)")
 print("Done!")

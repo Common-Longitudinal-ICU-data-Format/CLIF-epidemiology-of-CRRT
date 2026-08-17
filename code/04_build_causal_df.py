@@ -10,8 +10,10 @@ Extends the archived 04_build_competing_risk_df.py with:
   - 19 CCI binary components (from clifpy.calculate_cci + ICD-10 cancer split)
   - 30-day censoring (columns named time_to_event_90d / censored_at_90d
     to match R script expectations)
-  - Sensitivity analysis columns for 24h/48h intervals: CRRT dose (0-24h, 24-48h),
-    labs/SOFA/pf_sf_ratio/NEE/IMV at t=24, and 48h eligibility flag
+  - Sensitivity analysis columns for 24h/48h intervals: labs/SOFA/pf_sf_ratio/
+    NEE/IMV at t=24, and the 48h eligibility flag. (The windowed CRRT dose
+    columns that used to sit here — 0-12h, 12-24h, 0-24h, 24-48h and the
+    at-initiation value — were removed 2026-08-13; see the note at STEP 4.)
   - Causal CONSORT flow diagram (descriptive → causal cohort narrowing)
 
 Usage: uv run python code/04_build_causal_df.py
@@ -32,13 +34,15 @@ import pyarrow.parquet as pq
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "code"))
 
-from pipeline_helpers import load_config, load_intermediate, get_tables_path, compute_cci  # noqa: E402
+from pipeline_helpers import (load_config, load_intermediate, get_tables_path,  # noqa: E402
+    get_output_root, compute_cci)
 config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
 
 from sofa_calculator import compute_sofa_polars  # noqa: E402
 
-INTERMEDIATE_DIR = project_root / "output" / "intermediate_phi"
-OUTPUT_DIR = project_root / "output" / "intermediate_phi"
+INTERMEDIATE_DIR = OUTPUT_ROOT / "intermediate_phi"
+OUTPUT_DIR = OUTPUT_ROOT / "intermediate_phi"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TABLES_PATH = config["tables_path"]
@@ -200,141 +204,72 @@ crrt_ffill_cols = [c for c in crrt_cols if c in wide_df.columns]
 wide_df[crrt_ffill_cols] = wide_df.groupby("encounter_block")[crrt_ffill_cols].ffill(limit=8)
 print(f"  Forward-filled CRRT settings (limit=8 rows)")
 
-# Mode-specific dose formula
-crrt_rows = wide_df[wide_df["crrt_mode_category"].notna()].copy()
-conditions = [
-    crrt_rows["crrt_mode_category"] == "cvvhd",
-    crrt_rows["crrt_mode_category"] == "cvvh",
-    crrt_rows["crrt_mode_category"] == "cvvhdf",
+# NO DOSE IS COMPUTED HERE. 04 used to recompute a per-record dose from wide_df
+# and window it into crrt_dose_ml_kg_hr_0 (value at initiation) and mean doses
+# over 0-12h / 12-24h / 0-24h / 24-48h. Those five columns were built for the
+# time-varying MSM, which was cut from the manuscript and archived, and for 05b's
+# 24h sensitivity analysis, which was removed in 6c9e124. Nothing has read them
+# since; they were removed 2026-08-13 along with the duplicate dose computation
+# that existed only to feed them.
+#
+# The exposure is crrt_dose_median_3h, merged from index_crrt_df above — the
+# first-3h median computed once in 00. Having exactly one place that turns flows
+# into a dose is the point: the deleted block could have drifted from 00's
+# formula without anything failing.
+#
+# Note crrt_dose_ml_kg_hr_0 was a FIRST-charted-value dose, the definition this
+# project rejected because EHR back-filling makes it systematically low. It is
+# not a loss.
+
+# Flag patients with any non-zero CLEARANCE flow (for ultrafiltration-only exclusion).
+#
+# Clearance is delivered diffusively (dialysate) OR convectively (replacement fluid).
+# CVVH has no dialysate flow at all, so a dialysate-only test misclassifies every
+# hemofiltration patient as "ultrafiltration-only" and drops them at step 9b. The
+# union below mirrors has_crrt_activity in 00_cohort.py:830-840, so cohort entry and
+# this exclusion agree on what counts as clearance. The dose calculation above
+# (mode-specific, replacement fluid for cvvh) already made this distinction.
+CLEARANCE_COLS = [
+    "crrt_dialysate_flow_rate",
+    "crrt_pre_filter_replacement_fluid_rate",
+    "crrt_post_filter_replacement_fluid_rate",
 ]
-choices = [
-    crrt_rows["crrt_dialysate_flow_rate"],
-    crrt_rows["crrt_pre_filter_replacement_fluid_rate"].fillna(0)
-    + crrt_rows["crrt_post_filter_replacement_fluid_rate"].fillna(0),
-    crrt_rows["crrt_dialysate_flow_rate"].fillna(0)
-    + crrt_rows["crrt_pre_filter_replacement_fluid_rate"].fillna(0)
-    + crrt_rows["crrt_post_filter_replacement_fluid_rate"].fillna(0),
-]
-crrt_rows["total_flow_rate"] = np.select(conditions, choices, default=np.nan)
-crrt_rows["crrt_dose_ml_kg_hr"] = np.where(
-    (crrt_rows["weight_kg"] > 0) & (crrt_rows["total_flow_rate"] > 0),
-    crrt_rows["total_flow_rate"] / crrt_rows["weight_kg"],
-    np.nan,
-)
 
-# 4a: Dose at initiation
-init_dose = (
-    crrt_rows[crrt_rows["hours_from_crrt"] >= 0]
-    .sort_values("event_dttm")
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .first()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_ml_kg_hr_0"})
-)
 
-# 4b: Mean dose 0-12h
-dose_0_12 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 0) & (crrt_rows["hours_from_crrt"] < 12)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_0_12"})
-)
+def flag_clearance(wide_df, result, hours, colname):
+    """Flag encounter_blocks with any positive clearance flow in [0, hours)."""
+    present = [c for c in CLEARANCE_COLS if c in wide_df.columns]
+    if not present:
+        # Returning all-zeros here would silently drop the entire causal cohort at
+        # step 9b, so fail loudly instead.
+        raise KeyError(
+            "No CRRT clearance-flow columns found in wide_df; expected any of "
+            f"{CLEARANCE_COLS}"
+        )
+    in_window = (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < hours)
+    any_flow = np.zeros(len(wide_df), dtype=bool)
+    for col in present:
+        any_flow |= (wide_df[col].fillna(0) > 0).to_numpy()
 
-# 4c: Mean dose 12-24h
-dose_12_24 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 12) & (crrt_rows["hours_from_crrt"] < 24)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_12_24"})
-)
+    flag = (
+        wide_df.loc[in_window & any_flow, ["encounter_block"]]
+        .drop_duplicates()
+        .assign(**{colname: 1})
+    )
+    result = result.merge(flag, on="encounter_block", how="left")
+    result[colname] = result[colname].fillna(0).astype(int)
+    n_none = (result[colname] == 0).sum()
+    print(f"  Patients with no clearance flow in 0-{hours}h: {n_none}"
+          f"  (clearance cols used: {', '.join(present)})")
+    return result
 
-result = result.merge(init_dose, on="encounter_block", how="left")
-result = result.merge(dose_0_12, on="encounter_block", how="left")
-result = result.merge(dose_12_24, on="encounter_block", how="left")
-# Fallback: if dose 12-24h still missing, carry forward from 0-12h
-n_miss_before = result["crrt_dose_12_24"].isna().sum()
-result["crrt_dose_12_24"] = result["crrt_dose_12_24"].fillna(result["crrt_dose_0_12"])
-n_miss_after = result["crrt_dose_12_24"].isna().sum()
-print(f"  Dose at initiation: {init_dose['crrt_dose_ml_kg_hr_0'].notna().sum()} encounters")
-print(f"  Dose 0-12h: {dose_0_12['crrt_dose_0_12'].notna().sum()} encounters")
-print(f"  Dose 12-24h: {dose_12_24['crrt_dose_12_24'].notna().sum()} encounters"
-      f" (+{n_miss_before - n_miss_after} filled from 0-12h)")
 
-# 4d: Mean dose 0-24h (sensitivity)
-dose_0_24 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 0) & (crrt_rows["hours_from_crrt"] < 24)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_0_24"})
-)
+result = flag_clearance(wide_df, result, 24, "has_clearance_24h")
 
-# 4e: Mean dose 24-48h (sensitivity)
-dose_24_48 = (
-    crrt_rows[
-        (crrt_rows["hours_from_crrt"] >= 24) & (crrt_rows["hours_from_crrt"] < 48)
-    ]
-    .groupby("encounter_block")["crrt_dose_ml_kg_hr"]
-    .mean()
-    .reset_index()
-    .rename(columns={"crrt_dose_ml_kg_hr": "crrt_dose_24_48"})
-)
+# 4f: Clearance check extended to 48h (sensitivity)
+result = flag_clearance(wide_df, result, 48, "has_clearance_48h")
 
-result = result.merge(dose_0_24, on="encounter_block", how="left")
-result = result.merge(dose_24_48, on="encounter_block", how="left")
-# Fallback: if dose 24-48h missing, carry forward from 0-24h
-n_miss_24_48_before = result["crrt_dose_24_48"].isna().sum()
-result["crrt_dose_24_48"] = result["crrt_dose_24_48"].fillna(result["crrt_dose_0_24"])
-n_miss_24_48_after = result["crrt_dose_24_48"].isna().sum()
-print(f"  Dose 0-24h: {dose_0_24['crrt_dose_0_24'].notna().sum()} encounters")
-print(f"  Dose 24-48h: {dose_24_48['crrt_dose_24_48'].notna().sum()} encounters"
-      f" (+{n_miss_24_48_before - n_miss_24_48_after} filled from 0-24h)")
-
-# Flag patients with any non-zero dialysate flow in 0-24h (for SCUF exclusion)
-has_dialysate_24h = (
-    wide_df[
-        (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < 24)
-        & (wide_df["crrt_dialysate_flow_rate"].notna())
-        & (wide_df["crrt_dialysate_flow_rate"] > 0)
-    ]
-    .groupby("encounter_block")["crrt_dialysate_flow_rate"]
-    .count()
-    .reset_index()
-    .rename(columns={"crrt_dialysate_flow_rate": "has_dialysate_24h"})
-)
-has_dialysate_24h["has_dialysate_24h"] = 1
-result = result.merge(has_dialysate_24h, on="encounter_block", how="left")
-result["has_dialysate_24h"] = result["has_dialysate_24h"].fillna(0).astype(int)
-n_no_dialysate = (result["has_dialysate_24h"] == 0).sum()
-print(f"  Patients with no dialysate in 0-24h (SCUF-only candidates): {n_no_dialysate}")
-
-# 4f: Dialysate check extended to 48h (sensitivity)
-has_dialysate_48h = (
-    wide_df[
-        (wide_df["hours_from_crrt"] >= 0) & (wide_df["hours_from_crrt"] < 48)
-        & (wide_df["crrt_dialysate_flow_rate"].notna())
-        & (wide_df["crrt_dialysate_flow_rate"] > 0)
-    ]
-    .groupby("encounter_block")["crrt_dialysate_flow_rate"]
-    .count()
-    .reset_index()
-    .rename(columns={"crrt_dialysate_flow_rate": "has_dialysate_48h"})
-)
-has_dialysate_48h["has_dialysate_48h"] = 1
-result = result.merge(has_dialysate_48h, on="encounter_block", how="left")
-result["has_dialysate_48h"] = result["has_dialysate_48h"].fillna(0).astype(int)
-n_no_dialysate_48 = (result["has_dialysate_48h"] == 0).sum()
-print(f"  Patients with no dialysate in 0-48h: {n_no_dialysate_48}")
-
-del crrt_rows, wide_df
+del wide_df
 import gc; gc.collect()
 
 # ===================================================================
@@ -579,12 +514,17 @@ extra_df["pf_sf_ratio"] = np.where(pf_ratio.notna(), pf_ratio, sf_ratio)
 
 # Plausibility cap: S/F at SpO2=100, FiO2=0.21 (room air) ≈ 476; P/F rarely
 # exceeds 500 in ICU. Values above imply bad FiO2 or PaO2 encoding; set to NaN.
-try:
-    with open("../config/outlier_config.json") as _oc_f:
-        _oc = json.load(_oc_f)
-    _lo, _hi = _oc.get("pf_sf_ratio", [0, 500])
-except Exception:
-    _lo, _hi = 0, 500
+# Path resolved against THIS FILE, not the cwd. It was "../config/...", which
+# only resolves when launched from code/, and the except-branch fell back to a
+# DIFFERENT cap than the config carries ([0, 500] vs the config's [0, 1000]) —
+# so a run from anywhere else silently applied a tighter cap and nulled every
+# P/F between 500 and 1000, changing a causal covariate with no warning. The
+# file is tracked in the repo, so a missing one is a broken checkout, not a
+# recoverable condition.
+_oc_path = Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+with open(_oc_path) as _oc_f:
+    _oc = json.load(_oc_f)
+_lo, _hi = _oc.get("pf_sf_ratio", [0, 1000])
 _pf_sf = extra_df["pf_sf_ratio"]
 _n_oob = int(((_pf_sf < _lo) | (_pf_sf > _hi)).sum())
 if _n_oob > 0:
@@ -917,11 +857,13 @@ if EXCLUDE_SHORT_CRRT:
     print(f"\nStep 9b: Excluded {n_excluded_short} patients (died or off CRRT within 24h)")
     print(f"  Remaining: {len(result)}")
 
-    # Exclude SCUF-only patients (no dialysate clearance in first 24h)
-    scuf_no_clearance = (result["has_dialysate_24h"] == 0)
+    # Exclude ultrafiltration-only patients (no diffusive or convective clearance
+    # in the first 24h). Keys on dialysate OR replacement fluid so CVVH is retained.
+    scuf_no_clearance = (result["has_clearance_24h"] == 0)
     n_excluded_scuf = scuf_no_clearance.sum()
     result = result[~scuf_no_clearance].reset_index(drop=True)
-    print(f"  Excluded {n_excluded_scuf} SCUF-only patients (no dialysate in 0-24h)")
+    print(f"  Excluded {n_excluded_scuf} ultrafiltration-only patients "
+          f"(no clearance flow in 0-24h)")
     print(f"  Remaining: {len(result)}")
 
 # ===================================================================
@@ -933,8 +875,8 @@ eligible_48h_mask = (
     ~((result["outcome"] == 2) & (result["time_to_event_90d"] <= 2.0))
     # CRRT duration >= 48h (2 days)
     & (result["crrt_duration_days"] >= 2.0)
-    # Has dialysate flow in 0-48h window
-    & (result["has_dialysate_48h"] == 1)
+    # Has clearance flow (dialysate or replacement) in 0-48h window
+    & (result["has_clearance_48h"] == 1)
 )
 result["eligible_48h_sensitivity"] = eligible_48h_mask.astype(int)
 n_eligible = result["eligible_48h_sensitivity"].sum()
@@ -948,7 +890,7 @@ if n_eligible < 200:
 # STEP 10: Final column ordering per schema (59 columns)
 # ===================================================================
 # Drop helper columns used for exclusion
-for helper_col in ["has_dialysate_24h", "has_dialysate_48h"]:
+for helper_col in ["has_clearance_24h", "has_clearance_48h"]:
     if helper_col in result.columns:
         result.drop(columns=[helper_col], inplace=True)
 
@@ -961,10 +903,7 @@ final_cols = [
     "ethnicity_category",
     "weight_kg",
     "crrt_mode_category",
-    "crrt_dose_ml_kg_hr_0",
     "crrt_dose_median_3h",
-    "crrt_dose_0_12",
-    "crrt_dose_12_24",
     "crrt_duration_days",
     "imv_duration_days",
     "creatinine_0",
@@ -1008,8 +947,6 @@ final_cols = [
     "cci_aids",
     "cci_score",
     # --- Sensitivity analysis columns (24h/48h windows) ---
-    "crrt_dose_0_24",
-    "crrt_dose_24_48",
     "lactate_24",
     "bicarbonate_24",
     "potassium_24",
@@ -1041,7 +978,7 @@ print(f"\nSaved patient-level missingness: {diag_path}")
 print(f"  Patients with any missing covariate: {(diag_missing['total_missing'] > 0).sum()}/{len(diag_missing)}")
 
 # --- Aggregate missingness summary (safe to share) — internal QC, lives under diagnostics/ ---
-DIAG_DIR = project_root / "output" / "final_no_phi" / "diagnostics"
+DIAG_DIR = OUTPUT_ROOT / "final_no_phi" / "diagnostics"
 DIAG_GRAPHS = DIAG_DIR / "graphs"
 DIAG_GRAPHS.mkdir(parents=True, exist_ok=True)
 
@@ -1118,7 +1055,7 @@ print("\nStep 11: Generating causal CONSORT flow diagram …")
 from matplotlib.patches import FancyBboxPatch
 
 # --- Load STROBE counts from descriptive cohort (step 00) ---
-strobe = pd.read_csv(project_root / "output" / "final_no_phi" / "crrt_epi" / f"{SITE}_strobe_counts.csv")
+strobe = pd.read_csv(OUTPUT_ROOT / "final_no_phi" / "crrt_epi" / f"{SITE}_strobe_counts.csv")
 strobe_dict = dict(zip(strobe["counter"], strobe["value"]))
 
 n_total_hosp = int(strobe_dict.get("1b_after_stitching", strobe_dict.get("1_adult_hospitalizations", 0)))
@@ -1131,7 +1068,7 @@ n_descriptive = n_with_labs
 
 # n_excluded_short and n_excluded_scuf were computed in step 9b above
 n_causal = len(result)
-_dose_col = "crrt_dose_median_3h" if "crrt_dose_median_3h" in result.columns else "crrt_dose_ml_kg_hr_0"
+_dose_col = "crrt_dose_median_3h"   # the only dose in this frame since 2026-08-13
 n_high_dose = int((result[_dose_col] >= 30).sum())
 n_low_dose = int((result[_dose_col] < 30).sum())
 
@@ -1139,6 +1076,37 @@ print(f"  Descriptive cohort: {n_descriptive:,}")
 print(f"  Excluded (died/off CRRT <=24h): {n_excluded_short:,}")
 print(f"  Excluded (SCUF-only): {n_excluded_scuf:,}")
 print(f"  Causal cohort: {n_causal:,} (high={n_high_dose:,}, low={n_low_dose:,})")
+
+# ── ETL / data-integrity guard ────────────────────────────────────────────────
+# The causal cohort is a SURVIVOR-RESTRICTED SUBSET of the descriptive cohort
+# (step 9b removes died/off-CRRT-within-24h + SCUF-only), so by construction
+# n_causal <= n_descriptive and causal_df must hold exactly one row per
+# encounter_block. A larger causal cohort, or duplicate encounter_blocks, indicates
+# ROW DUPLICATION / a merge fan-out upstream — an ETL problem, not a modeling one
+# (this is the Hopkins 2026-07 case: causal 8,764 > descriptive 2,868). Warn loudly
+# but DO NOT halt, so the site still gets outputs to inspect. (The coordinating-
+# center site_validation.py gate re-checks this post-collection; this catches it
+# earlier, at the site, before upload.)
+_n_blocks_unique = result["encounter_block"].nunique()
+if n_causal > n_descriptive:
+    print("\n" + "!" * 78)
+    print(f"  WARNING — POSSIBLE ETL / DATA-INTEGRITY ISSUE at {SITE}")
+    print(f"  Causal cohort ({n_causal:,}) is LARGER than the descriptive cohort "
+          f"({n_descriptive:,}).")
+    print("  The causal cohort is a survivor-restricted SUBSET, so this is impossible")
+    print("  by construction — it points to ROW DUPLICATION / a merge fan-out upstream.")
+    print("  Check crrt_therapy, labs, ADT, and the hospitalization/encounter keys")
+    print("  for duplicate rows per patient.")
+    print("!" * 78)
+if _n_blocks_unique != n_causal:
+    print("\n" + "!" * 78)
+    print(f"  WARNING — DUPLICATE encounter_blocks in causal_df at {SITE}")
+    print(f"  {n_causal:,} rows but only {_n_blocks_unique:,} unique encounter_blocks "
+          f"({n_causal - _n_blocks_unique:,} duplicates).")
+    print("  causal_df must be one row per encounter_block; duplicates inflate every")
+    print("  downstream count and estimate. Check upstream merges for a non-unique")
+    print("  join key.")
+    print("!" * 78)
 
 # --- Draw the diagram (matching 00_cohort.py style) ---
 fig, ax = plt.subplots(figsize=(10, 8))
@@ -1200,7 +1168,7 @@ rows = [
 
 excl_short_label = f"Excluded: Died or off CRRT within 24h\nn = {n_excluded_short:,}"
 if n_excluded_scuf > 0:
-    excl_short_label += f"\n+ SCUF-only: n = {n_excluded_scuf:,}"
+    excl_short_label += f"\n+ Ultrafiltration-only: n = {n_excluded_scuf:,}"
 rows.append({
     "remaining_label": "Causal analysis cohort\n(complete-case, dichotomized dose)",
     "remaining_n": n_causal,
@@ -1231,7 +1199,7 @@ for i, row in enumerate(rows):
                     xytext=(x_main_center, arrow_vertical_center),
                     arrowprops=arrow_props, annotation_clip=False)
 
-CONSORT_DIR = project_root / "output" / "final_no_phi" / "psm_iptw"
+CONSORT_DIR = OUTPUT_ROOT / "final_no_phi" / "psm_iptw"
 CONSORT_DIR.mkdir(parents=True, exist_ok=True)
 out_png = CONSORT_DIR / f"{SITE}_causal_consort_diagram.png"
 out_pdf = CONSORT_DIR / f"{SITE}_causal_consort_diagram.pdf"

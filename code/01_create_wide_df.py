@@ -249,6 +249,14 @@ else:
 # =============================================================================
 # Pivot Vitals: narrow → wide
 # =============================================================================
+# Deterministic tie-break: (hospitalization_id, recorded_dttm) x vital_category is
+# NOT a unique key — a patient can have two same-category values at the same
+# timestamp. aggfunc='first' then picks whichever row the (unstable) load order put
+# first, making runs non-reproducible. Sorting by the value column makes 'first'
+# well-defined (smallest value; NaNs sorted last so a real value wins).
+vitals_df = vitals_df.sort_values(
+    ['hospitalization_id', 'recorded_dttm', 'vital_category', 'vital_value'],
+    na_position='last', kind='stable')
 vitals_wide = vitals_df.pivot_table(
     index=['hospitalization_id', 'recorded_dttm'],
     columns='vital_category',
@@ -264,6 +272,10 @@ vitals_wide.columns = ['hospitalization_id', 'event_dttm'] + \
 # =============================================================================
 # Pivot Labs: narrow → wide
 # =============================================================================
+# Deterministic tie-break (see vitals pivot above)
+labs_df = labs_df.sort_values(
+    ['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value_numeric'],
+    na_position='last', kind='stable')
 labs_wide = labs_df.pivot_table(
     index=['hospitalization_id', 'lab_result_dttm'],
     columns='lab_category',
@@ -279,6 +291,10 @@ labs_wide.columns = ['hospitalization_id', 'event_dttm'] + \
 # =============================================================================
 # Pivot Meds Continuous: narrow → wide
 # =============================================================================
+# Deterministic tie-break (see vitals pivot above)
+meds_cont_df = meds_cont_df.sort_values(
+    ['hospitalization_id', 'admin_dttm', 'med_category', 'med_dose'],
+    na_position='last', kind='stable')
 meds_cont_wide = meds_cont_df.pivot_table(
     index=['hospitalization_id', 'admin_dttm'],
     columns='med_category',

@@ -74,7 +74,8 @@ matplotlib.rcParams.update({
 
 from pipeline_helpers import (
     load_config, safe_load_clif_table, integrate_persisting_rate,
-    course_average_intensity, STUDY_YEAR_START, STUDY_YEAR_END,
+    course_average_intensity, get_output_root, STUDY_YEAR_START, STUDY_YEAR_END,
+    crrt_effluent_flow,
 )
 
 warnings.filterwarnings("ignore")
@@ -88,8 +89,9 @@ HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 YEAR_START = STUDY_YEAR_START
 YEAR_END = STUDY_YEAR_END
 
-INTER = Path("../output/intermediate_phi")
-OUT = Path("../output/final_no_phi/crrt_epi")
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
+INTER = OUTPUT_ROOT / "intermediate_phi"
+OUT = OUTPUT_ROOT / "final_no_phi" / "crrt_epi"
 OUT.mkdir(parents=True, exist_ok=True)
 GRAPHS = OUT / "graphs"
 GRAPHS.mkdir(parents=True, exist_ok=True)
@@ -115,7 +117,7 @@ def build_incidence() -> pd.DataFrame:
         data_directory=TABLES_PATH,
         filetype=config["file_type"],
         timezone=config["timezone"],
-        output_directory="../output",  # else clifpy logs to <cwd>/output (= code/output)
+        output_directory=str(OUTPUT_ROOT),  # else clifpy logs to <cwd>/output (= code/output)
     )
 
     # Core tables, full population
@@ -275,8 +277,8 @@ def build_practice_quality() -> pd.DataFrame:
               median=med, q25=q1, q75=q3, mean=mn, sd=sd)
 
         # Acid-base delivery adequacy: among acidotic at baseline, % corrected by post window
-        ph_b = pd.to_numeric(coh["ph_arterial_baseline"], errors="coerce")
-        hco3_b = pd.to_numeric(coh["bicarbonate_baseline"], errors="coerce")
+        ph_b = pd.to_numeric(coh["ph_arterial_t1"], errors="coerce")
+        hco3_b = pd.to_numeric(coh["bicarbonate_t1"], errors="coerce")
         ph_p = pd.to_numeric(coh["ph_arterial_post_crrt"], errors="coerce")
         hco3_p = pd.to_numeric(coh["bicarbonate_post_crrt"], errors="coerce")
         acidotic = (ph_b < 7.30) | (hco3_b < 22)
@@ -472,11 +474,7 @@ def _crrt_dose_per_row(df: pd.DataFrame) -> np.ndarray:
     dia = pd.to_numeric(df.get("crrt_dialysate_flow_rate"), errors="coerce")
     pre = pd.to_numeric(df.get("crrt_pre_filter_replacement_fluid_rate"), errors="coerce")
     post = pd.to_numeric(df.get("crrt_post_filter_replacement_fluid_rate"), errors="coerce")
-    total = np.select(
-        [mode == "cvvhd", mode == "cvvh", mode == "cvvhdf"],
-        [dia, pre.fillna(0) + post.fillna(0), dia.fillna(0) + pre.fillna(0) + post.fillna(0)],
-        default=np.nan,
-    )
+    total = crrt_effluent_flow(mode, dia, pre, post)   # shared formula (pipeline_helpers)
     wt = pd.to_numeric(df["weight_kg"], errors="coerce")
     return np.where((wt > 0) & (total > 0), total / wt, np.nan)
 
@@ -719,7 +717,7 @@ def build_uf_trajectories(w: pd.DataFrame) -> None:
       (a) net UF RATE over time (mL/kg/hr, per-bin median [IQR]);
       (b) CUMULATIVE net UF volume over time (mL/kg, among encounters still on
           CRRT each day);
-      (c) crude 30-day mortality vs COURSE-AVERAGE net UF intensity (Murugan
+      (c) crude 30-day in-hospital mortality vs COURSE-AVERAGE net UF intensity (Murugan
           2019 style, over the whole course rather than the initiation snapshot).
     """
     if not HAS_CRRT_SETTINGS or "crrt_ultrafiltration_out" not in w.columns:
@@ -810,10 +808,10 @@ def build_uf_trajectories(w: pd.DataFrame) -> None:
                 ax.axvspan(1.01, 1.75, color=GREEN, alpha=0.20, label="Murugan Middle (1.01–1.75)")
                 ax.plot(x, y, color=BLUE, linewidth=1.5, zorder=2)
                 ax.scatter(x, y, s=sizes, color=BLUE, alpha=0.85, zorder=3,
-                           label="Crude 30-Day Mortality (Marker Size Scaled to n)")
+                           label="Crude 30-Day In-Hospital Mortality (Marker Size Scaled to n)")
                 ax.set_xlabel("Net Ultrafiltration Intensity, First 72 h (mL/kg/hr)")
-                ax.set_ylabel("Crude 30-Day Mortality (%)")
-                ax.set_title(f"Crude 30-Day Mortality vs Net UF Intensity (First 72 h): {SITE_NAME}")
+                ax.set_ylabel("Crude 30-Day In-Hospital Mortality (%)")
+                ax.set_title(f"Crude 30-Day In-Hospital Mortality vs Net UF Intensity (First 72 h): {SITE_NAME}")
                 ax.legend(fontsize=9)
                 fig.tight_layout()
                 fig.savefig(GRAPHS / f"{SITE_NAME}_uf_mortality.png", dpi=150, bbox_inches="tight")
@@ -1035,7 +1033,7 @@ def build_dose_by_ibw() -> None:
     # Height from vitals (clifpy, filtered to cohort + height_cm).
     from clifpy.clif_orchestrator import ClifOrchestrator
     clif = ClifOrchestrator(data_directory=TABLES_PATH, filetype=config["file_type"],
-                            timezone=config["timezone"], output_directory="../output")
+                            timezone=config["timezone"], output_directory=str(OUTPUT_ROOT))
     hosp_ids = cohort["hospitalization_id"].astype(str).unique().tolist()
     safe_load_clif_table(clif, "vitals", tables_path=TABLES_PATH,
                          columns=["hospitalization_id", "vital_category", "vital_value"],

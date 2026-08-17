@@ -3,12 +3,31 @@
 # 05b_dose_response_analysis.R
 #
 # Continuous dose-response analysis for CRRT dose on 30-day mortality.
-# Three complementary approaches:
+# Three complementary approaches, increasing in adjustment:
 #   Section 1: Dose decile analysis (descriptive, unadjusted)
-#   Section 2: Restricted cubic spline Cox model (regression-adjusted)
-#   Section 3: Generalized propensity score (propensity-weighted, causal)
+#   Section 2: Natural spline Cox model (regression-adjusted) + the primary
+#              LINEAR dose HR per mL/kg/hr, which is the scalar the coordinating
+#              centre meta-analyses across sites
+#   Section 3: Generalized propensity score via CBPS (propensity-weighted, causal)
 #   Section 4: Combined three-panel figure
-#   Section 5: Target trial emulation specification table
+#
+# Dose is winsorized at the 1st/99th percentile before all three; script 05 uses
+# the raw dichotomized exposure and is unaffected.
+#
+# REMOVED 2026-08-04:
+#   - "Section 5: Target trial emulation specification table" was advertised here
+#     but had no implementation anywhere in the repository.
+#   - The real Section 5, a 24h-exclusion sensitivity analysis, was removed
+#     because it could not answer the question it posed: it changed the cohort,
+#     the covariate set (dropping 5 covariates and adding sofa_total_0, which the
+#     primary specification deliberately excludes), the imputation handling
+#     (complete-case, not MICE) and the winsorization all at once, so any
+#     difference between its two rows was uninterpretable. The underlying
+#     limitation is real and is now stated in the manuscript rather than probed
+#     with a confounded check: the causal cohort excludes patients who died or
+#     stopped CRRT within 24h, which conditions on a post-treatment variable.
+#     Doing it properly needs the full covariate set on the pre-exclusion cohort,
+#     which means 04 writing that frame out; see .claude/supplement_draft.md.
 #
 # Input:  output/intermediate_phi/causal_df.parquet
 # Output: output/final_no_phi/psm_iptw/{SITE}_dose_*.{csv,png,pdf}
@@ -28,6 +47,12 @@ cat(paste(rep("=", 80), collapse = ""), "\n\n")
 
 ## ---- A. Working directory (from config.json project_root) ----
 .find_config <- function() {
+  # CLIF_CONFIG takes HIGHEST precedence (matches Python pipeline_helpers) so a
+  # multi-site run can point at config_nu.json etc. without editing config.json.
+  # Return immediately: the script-dir/RStudio candidates below would otherwise
+  # find the default config/config.json first and silently override CLIF_CONFIG.
+  .cc <- Sys.getenv("CLIF_CONFIG")
+  if (nzchar(.cc) && file.exists(.cc)) return(normalizePath(.cc))
   candidates <- c("../config/config.json", "config/config.json")
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
@@ -66,16 +91,20 @@ if (length(new_packages)) {
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Output directory ----
-output_dir <- "output/final_no_phi/psm_iptw"
+# Output root: honors config output_dir so a per-site run (output_ucmc / output_nu)
+# stays isolated from the default "output" tree.
+.out_root <- if (!is.null(.config$output_dir) && nzchar(.config$output_dir)) .config$output_dir else "output"
+cat("Output root:", .out_root, "\n")
+output_dir <- file.path(.out_root, "final_no_phi", "psm_iptw")
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
 ## ---- D. Load configuration ----
-config <- jsonlite::fromJSON("config/config.json")
+config <- .config  # honors CLIF_CONFIG
 SITE_NAME <- config$site_name
 cat("Site:", SITE_NAME, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate_phi/causal_df.parquet"
+data_path <- file.path(.out_root, "intermediate_phi", "causal_df.parquet")
 if (!file.exists(data_path)) stop("File not found: ", data_path)
 df <- arrow::read_parquet(data_path)
 cat("Loaded:", nrow(df), "rows x", ncol(df), "columns\n")
@@ -102,11 +131,13 @@ df$race_category <- forcats::fct_collapse(
 )
 
 ## ---- H. MICE imputation (same as script 05) ----
+# Comorbidity enters as the Charlson total, not the 17 binary components —
+# kept in lockstep with model_covariates in script 05 (see the rationale there).
 model_covariates_full <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  cci_vars
+  "cci_score"
 )
 
 required_vars <- c(
@@ -218,7 +249,11 @@ decile_summary <- df %>%
     .groups = "drop"
   ) %>%
   mutate(
-    # Wilson 95% CI for mortality
+    # Normal-approximation (Wald) binomial 95% CI for mortality, clipped to
+    # [0, 1]. NOT a Wilson interval, despite what this comment said before
+    # 2026-08-04; Wilson would be better behaved in sparse end deciles, but
+    # switching it would move the published Panel A error bars for no
+    # substantive gain, so the description is corrected instead.
     mort_ci_lower = mortality_rate -
       1.96 * sqrt(mortality_rate * (1 - mortality_rate) / n),
     mort_ci_upper = mortality_rate +
@@ -369,6 +404,43 @@ write.csv(anova_out,
           file.path(output_dir,
                     paste0(SITE_NAME, "_dose_response_rcs_anova.csv")),
           row.names = FALSE)
+
+## ---- Primary linear dose-response estimate (POOLED BY THE COORDINATING CENTRE) ----
+# The linear dose HR per mL/kg/hr is the poolable scalar summary of the
+# dose-response analysis; script 08 meta-analyses it across sites. It is written
+# here, unconditionally, immediately after the model that produces it.
+#
+# HISTORY (2026-08-04): this row used to be emitted only as the comparison arm
+# inside the Section 5 "24h exclusion sensitivity" block, so it inherited that
+# block's dependency on tableone_analysis_df.parquet — a site missing that file
+# would have silently contributed no dose-response estimate at all. Section 5 has
+# since been removed (see the module docstring); the estimate now stands alone.
+lin_dose_coef <- summary(lin_fit)$coefficients[DOSE_VAR, ]
+dose_linear_out <- data.frame(
+  site             = SITE_NAME,
+  analysis         = "Primary (causal cohort, full covariate set)",
+  model            = "Linear dose Cox, cause-specific (death)",
+  n                = nrow(df),
+  n_deaths         = sum(df$outcome == 2),
+  n_covariates     = length(model_covariates),
+  dose_var         = DOSE_VAR,
+  winsorized       = TRUE,
+  hr               = exp(lin_dose_coef["coef"]),
+  hr_lower         = exp(lin_dose_coef["coef"] - 1.96 * lin_dose_coef["se(coef)"]),
+  hr_upper         = exp(lin_dose_coef["coef"] + 1.96 * lin_dose_coef["se(coef)"]),
+  se_log_hr        = lin_dose_coef["se(coef)"],
+  p_value          = lin_dose_coef["Pr(>|z|)"],
+  stringsAsFactors = FALSE,
+  row.names        = NULL
+)
+write.csv(dose_linear_out,
+          file.path(output_dir,
+                    paste0(SITE_NAME, "_dose_response_linear.csv")),
+          row.names = FALSE)
+cat(sprintf("Primary linear dose HR: %.4f (%.4f-%.4f) per mL/kg/hr, p = %.3f  [n=%d, %d deaths]\n",
+            dose_linear_out$hr, dose_linear_out$hr_lower, dose_linear_out$hr_upper,
+            dose_linear_out$p_value, dose_linear_out$n, dose_linear_out$n_deaths))
+cat("Saved primary linear dose-response CSV\n")
 
 ## ---- Cox PH and discrimination diagnostics ----
 # cox.zph tests the proportional-hazards assumption per term + global. For
@@ -754,169 +826,13 @@ cat("Saved combined three-panel figure.\n\n")
 
 
 # ===================================================================
-# 5. SENSITIVITY: INCLUDING PATIENTS WITH CRRT < 24h
-# ===================================================================
-cat(paste(rep("=", 80), collapse = ""), "\n")
-cat("Section 5: Sensitivity — Including Patients Excluded by 24h Criterion\n")
-cat(paste(rep("=", 80), collapse = ""), "\n\n")
-
-# The primary analysis excludes 503 patients who died or stopped CRRT
-# within 24h. This conditions on a post-treatment variable, which could
-# bias results if high-dose CRRT causes early death. This sensitivity
-# analysis re-fits the linear dose model on the full descriptive cohort.
-
-# Load the full cohort (N=2,136) from tableone_analysis_df
-tbl_path <- "output/intermediate_phi/tableone_analysis_df.parquet"
-if (!file.exists(tbl_path)) {
-  cat("  SKIPPED: tableone_analysis_df.parquet not found.\n\n")
-} else {
-  df_full <- arrow::read_parquet(tbl_path)
-  cat("Full descriptive cohort:", nrow(df_full), "rows\n")
-
-  # Compute time-to-event (days from CRRT initiation to death or censoring)
-  df_full$crrt_initiation_time <- as.POSIXct(df_full$crrt_initiation_time)
-  df_full$death_dttm <- as.POSIXct(df_full$death_dttm)
-  df_full$final_outcome_dttm <- as.POSIXct(df_full$final_outcome_dttm)
-
-  df_full$time_to_event_days <- as.numeric(difftime(
-    ifelse(!is.na(df_full$death_dttm), df_full$death_dttm, df_full$final_outcome_dttm),
-    df_full$crrt_initiation_time, units = "days"
-  ))
-  # Cap at 30 days
-  df_full$event_30d <- ifelse(
-    df_full$death_30d == 1 & df_full$time_to_event_days <= 30, 1, 0
-  )
-  df_full$time_30d <- pmin(df_full$time_to_event_days, 30)
-  df_full$time_30d <- pmax(df_full$time_30d, 0.01)  # avoid zero times
-
-  # Rename covariates to match the primary analysis
-  df_full <- df_full %>%
-    rename(
-      lactate_0 = lactate_baseline,
-      bicarbonate_0 = bicarbonate_baseline,
-      potassium_0 = potassium_baseline,
-      sofa_total_0 = sofa_total
-    )
-
-  # Dose from index_crrt (already in tableone_analysis_df)
-  df_full$crrt_dose <- df_full$crrt_dose_ml_kg_hr
-
-  # Identify which patients are in the primary vs excluded
-  primary_ebs <- df$encounter_block
-  df_full$in_primary <- df_full$encounter_block %in% primary_ebs
-
-  n_primary <- sum(df_full$in_primary)
-  n_excluded <- sum(!df_full$in_primary)
-  n_excluded_with_dose <- sum(!df_full$in_primary & !is.na(df_full$crrt_dose))
-  n_excluded_no_dose <- sum(!df_full$in_primary & is.na(df_full$crrt_dose))
-  n_sensitivity <- sum(!is.na(df_full$crrt_dose))
-
-  cat("\n--- Cohort Breakdown ---\n")
-  cat("  Primary analysis cohort:           ", n_primary, "\n")
-  cat("  Excluded by 24h criterion:         ", n_excluded, "\n")
-  cat("    - with computable dose:          ", n_excluded_with_dose, "\n")
-  cat("    - without dose (excluded again): ", n_excluded_no_dose, "\n")
-  cat("  Sensitivity analysis cohort:       ", n_sensitivity, "\n")
-  cat("  Patients added back:               ", n_sensitivity - n_primary, "\n\n")
-
-  # Mortality comparison
-  mort_primary <- mean(df_full$event_30d[df_full$in_primary], na.rm = TRUE)
-  mort_excluded <- mean(df_full$event_30d[!df_full$in_primary & !is.na(df_full$crrt_dose)],
-                        na.rm = TRUE)
-  cat("30-day mortality:\n")
-  cat("  Primary cohort:   ", round(mort_primary * 100, 1), "%\n")
-  cat("  Added-back group: ", round(mort_excluded * 100, 1), "%\n\n")
-
-  # Fit linear dose Cox model on full cohort with available covariates
-  # (pf_sf_ratio and NEE not available in tableone_analysis_df)
-  df_sens <- df_full %>% filter(!is.na(crrt_dose))
-
-  # Race collapse
-  df_sens$race_category <- forcats::fct_collapse(
-    df_sens$race_category,
-    "White" = "white", "Black" = "black or african american",
-    other_level = "Other"
-  )
-
-  # Available covariates (subset of primary model)
-  sens_covariates <- c(
-    "age_at_admission", "sex_category", "race_category",
-    "lactate_0", "bicarbonate_0", "potassium_0", "sofa_total_0"
-  )
-  # Filter to covariates with >=2 unique values
-  sens_covariates <- sens_covariates[
-    sapply(sens_covariates, function(v) {
-      v %in% names(df_sens) && length(unique(df_sens[[v]])) >= 2
-    })
-  ]
-
-  cat("Sensitivity model covariates:", paste(sens_covariates, collapse = ", "), "\n")
-  cat("(Note: P/F or S/F ratio, NEE, IMV status, and CCI not available ",
-      "for the full cohort in tableone_analysis_df)\n\n")
-
-  sens_fml <- as.formula(
-    paste0("Surv(time_30d, event_30d) ~ crrt_dose + ",
-           paste(sens_covariates, collapse = " + "))
-  )
-
-  sens_fit <- coxph(sens_fml, data = df_sens)
-  sens_summary <- summary(sens_fit)
-  dose_coef <- sens_summary$coefficients["crrt_dose", ]
-
-  cat("--- Sensitivity Result ---\n")
-  cat(sprintf("  Linear dose HR: %.4f (95%% CI: %.4f - %.4f), p = %.3f\n",
-              exp(dose_coef["coef"]),
-              exp(dose_coef["coef"] - 1.96 * dose_coef["se(coef)"]),
-              exp(dose_coef["coef"] + 1.96 * dose_coef["se(coef)"]),
-              dose_coef["Pr(>|z|)"]))
-
-  # Compare to primary analysis
-  primary_dose_coef <- summary(lin_fit)$coefficients["crrt_dose_median_3h", ]
-  cat(sprintf("  Primary analysis HR: %.4f (95%% CI: %.4f - %.4f), p = %.3f\n\n",
-              exp(primary_dose_coef["coef"]),
-              exp(primary_dose_coef["coef"] - 1.96 * primary_dose_coef["se(coef)"]),
-              exp(primary_dose_coef["coef"] + 1.96 * primary_dose_coef["se(coef)"]),
-              primary_dose_coef["Pr(>|z|)"]))
-
-  # Save results
-  sens_results <- data.frame(
-    analysis = c("Primary (N=1,633)", paste0("Sensitivity (N=", n_sensitivity, ")")),
-    n = c(n_primary, n_sensitivity),
-    n_deaths = c(sum(df$outcome == 2),
-                 sum(df_sens$event_30d, na.rm = TRUE)),
-    hr = c(exp(primary_dose_coef["coef"]), exp(dose_coef["coef"])),
-    hr_lower = c(
-      exp(primary_dose_coef["coef"] - 1.96 * primary_dose_coef["se(coef)"]),
-      exp(dose_coef["coef"] - 1.96 * dose_coef["se(coef)"])
-    ),
-    hr_upper = c(
-      exp(primary_dose_coef["coef"] + 1.96 * primary_dose_coef["se(coef)"]),
-      exp(dose_coef["coef"] + 1.96 * dose_coef["se(coef)"])
-    ),
-    se_log_hr = c(primary_dose_coef["se(coef)"], dose_coef["se(coef)"]),
-    p_value = c(primary_dose_coef["Pr(>|z|)"], dose_coef["Pr(>|z|)"]),
-    patients_added_back = c(0, n_sensitivity - n_primary),
-    mortality_rate = c(
-      round(mort_primary * 100, 1),
-      round(mean(df_sens$event_30d, na.rm = TRUE) * 100, 1)
-    ),
-    stringsAsFactors = FALSE
-  )
-  write.csv(sens_results,
-            file.path(output_dir, paste0(SITE_NAME, "_sensitivity_24h_exclusion.csv")),
-            row.names = FALSE)
-  cat("Saved sensitivity results.\n\n")
-}
-
-
-# ===================================================================
 # DONE
 # ===================================================================
 cat("\n", paste(rep("=", 80), collapse = ""), "\n")
 cat("05b complete. Outputs in:", output_dir, "\n")
 
 outputs <- list.files(output_dir,
-                      pattern = paste0(SITE_NAME, "_(dose_|gps_|sensitivity_)"),
+                      pattern = paste0(SITE_NAME, "_(dose_|gps_|winsorization_)"),
                       full.names = FALSE)
 cat("  Files generated:\n")
 for (f in sort(outputs)) cat("    ", f, "\n")

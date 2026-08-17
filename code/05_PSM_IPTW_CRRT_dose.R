@@ -22,6 +22,12 @@ cat("Environment and plots cleared.\n")
 # Set working directory to project root using config.json project_root
 # Try multiple config paths: relative to code/, relative to cwd, or via --file=
 .find_config <- function() {
+  # CLIF_CONFIG takes HIGHEST precedence (matches Python pipeline_helpers) so a
+  # multi-site run can point at config_nu.json etc. without editing config.json.
+  # Return immediately: the script-dir/RStudio candidates below would otherwise
+  # find the default config/config.json first and silently override CLIF_CONFIG.
+  .cc <- Sys.getenv("CLIF_CONFIG")
+  if (nzchar(.cc) && file.exists(.cc)) return(normalizePath(.cc))
   candidates <- c("../config/config.json", "config/config.json")
   # Also try relative to script location
   args <- commandArgs(trailingOnly = FALSE)
@@ -62,14 +68,34 @@ if (is.null(getOption("repos")) || getOption("repos")["CRAN"] == "@CRAN@") {
 required_packages <- c("tidyverse", "readr", "arrow", "gtsummary", "cmprsk",
                        "survival", "jsonlite", "MatchIt", "WeightIt", "broom",
                        "cobalt", "EValue", "SuperLearner", "randomForest",
-                       "xgboost","gam","survminer", "survey", "mice", "smd")
+                       # survminer removed 2026-08-11: not called anywhere in the
+                       # ACTIVE pipeline (this script or 05b). It IS used by archived
+                       # scripts — ggsurvplot in code/archive/{03_psm_iptw,primary_psm_iptw,
+                       # extreme_psm_iptw}_models.R and survminer::ggcoxzph in
+                       # archive/code/05c_low_dose_emulation.R — so restoring any of those
+                       # means restoring survminer to renv.lock too. It became unnecessary
+                       # here when the estimand moved from Kaplan-Meier to COMPETING RISKS:
+                       # CIF curves come from cmprsk::cuminc and the standardized
+                       # g-computation, and PH diagnostics are written as tables rather than
+                       # plotted with ggcoxzph. It dragged in a
+                       # 7-package chain — survminer -> ggpubr -> rstatix -> car ->
+                       # pbkrtest -> doBy -> Deriv — and Deriv 4.3.0 uses C-API
+                       # symbols added in R 4.5.0 (R_ClosureFormals, Rf_allocLang).
+                       # On any site with R < 4.5 that failed to compile, renv::restore()
+                       # aborted, the project library stayed empty, and BOTH R steps
+                       # then died on "there is no package called 'jsonlite'".
+                       "xgboost","gam", "survey", "mice", "smd")
 new_packages <- required_packages[!(required_packages %in% installed.packages()
                                     [,"Package"])]
 if(length(new_packages)) install.packages(new_packages)
 lapply(required_packages, require, character.only = TRUE)
 
 ## ---- C. Create output directory if it doesn't exist ----
-output_dir <- "output/final_no_phi/psm_iptw"
+# Output root: honors config output_dir so a per-site run (output_ucmc / output_nu)
+# stays isolated from the default "output" tree.
+.out_root <- if (!is.null(.config$output_dir) && nzchar(.config$output_dir)) .config$output_dir else "output"
+cat("Output root:", .out_root, "\n")
+output_dir <- file.path(.out_root, "final_no_phi", "psm_iptw")
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
   cat("Created output directory:", output_dir, "\n")
@@ -110,19 +136,15 @@ rubins_pool <- function(betas, ses) {
 }
 
 ## ---- E. Load configuration ----
-config_path <- "config/config.json"
-if (!file.exists(config_path)) {
-  stop("Configuration file not found: ", config_path)
-}
-
-config <- jsonlite::fromJSON(config_path)
+config_path <- .config_path  # honors CLIF_CONFIG
+config <- .config
 SITE_NAME <- config$site_name
 
 cat("Site:", SITE_NAME, "\n")
 cat("Timezone:", config$timezone, "\n\n")
 
 ## ---- E. Load data ----
-data_path <- "output/intermediate_phi/causal_df.parquet"
+data_path <- file.path(.out_root, "intermediate_phi", "causal_df.parquet")
 if (!file.exists(data_path)) {
   stop("File '", data_path, "' not found.")
 }
@@ -177,7 +199,12 @@ required_vars <- c(
   "sofa_total_0",
   # New covariates at t=0
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  # CCI components (baseline only)
+  # Charlson total — the comorbidity adjustment used by all models (see
+  # model_covariates below). Requires step 04 to have been re-run under the
+  # aligned schema; absent it, the stop() below reports it explicitly.
+  "cci_score",
+  # CCI components (baseline only) — no longer model covariates, but still
+  # needed for the subgroup cci_total and the balance-plot labels.
   cci_vars
 )
 
@@ -304,15 +331,27 @@ if (nrow(df_complete) < 50) {
 
 # All potential covariates for propensity / outcome models
 # NOTE: sofa_total_0 deliberately excluded from models
+#
+# Comorbidity is adjusted for as the Charlson TOTAL (cci_score), not the 17
+# binary components. Rationale: (a) the components are rare enough that several
+# are constant within a small site's matched set — an all-zero column makes the
+# doubly-robust Fine-Gray design matrix exactly singular, which halted script 05
+# outright at one site; (b) 17 extra parameters badly overfits a small matched
+# set (~4.5 obs/parameter at the smallest site vs ~10 after collapsing); (c) the
+# per-site dynamic filter below silently drops zero-prevalence components, so
+# sites were fitting DIFFERENT model specifications and the pooled meta-analysis
+# was combining them. A single total keeps every site's model identical, and
+# matches how comorbidity is already reported in Table 2.
 model_covariates <- c(
   "age_at_admission", "sex_category", "race_category", "weight_kg",
   "lactate_0", "bicarbonate_0", "potassium_0",
   "pf_sf_ratio_0", "norepinephrine_equivalent_0", "imv_status_0",
-  cci_vars
+  "cci_score"
 )
 
 # Dynamic filter: drop covariates with <2 unique values at this site
-# (e.g., CCI components with zero prevalence, single-level categoricals)
+# (e.g., single-level categoricals). Retained as a safety net; with the CCI
+# collapsed to a total it should no longer drop anything at a typical site.
 model_covariates <- model_covariates[
   sapply(model_covariates, function(v) {
     length(unique(df_complete[[v]])) >= 2
@@ -1066,9 +1105,15 @@ cat("\nPooling Fine-Gray DR models across", N_IMP, "MICE imputations...\n")
 # stays fixed — only the imputed values change.
 matched_ids <- as.integer(rownames(df_match))
 
+# Minimum number of imputations that must produce a usable Fine-Gray fit before
+# the treatment effect is pooled. Mirrors the identical guard already used by the
+# subgroup analysis (see `sum(fit_ok) < 3` in Section 6).
+MIN_IMP_FITS_FG <- 3
+
 pool_fg_treatment <- function(failcode_val, outcome_label) {
-  betas <- numeric(N_IMP)
-  ses   <- numeric(N_IMP)
+  betas  <- numeric(N_IMP)
+  ses    <- numeric(N_IMP)
+  fit_ok <- logical(N_IMP)   # which imputations actually yielded an estimate
 
   for (m in seq_len(N_IMP)) {
     d_imp <- imp_list[[m]]
@@ -1099,11 +1144,47 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
 
     s <- summary(fg_m)$coef
     trt_row <- grep("crrt_high", rownames(s))[1]
-    betas[m] <- s[trt_row, "coef"]
-    ses[m]   <- s[trt_row, "se(coef)"]
+    if (is.na(trt_row)) next            # treatment term absent from the fit
+    b  <- s[trt_row, "coef"]
+    se <- s[trt_row, "se(coef)"]
+    if (!is.finite(b) || !is.finite(se) || se <= 0) next
+    betas[m]  <- b
+    ses[m]    <- se
+    fit_ok[m] <- TRUE
   }
 
-  pooled <- rubins_pool(betas, ses)
+  # Pool ONLY the imputations that produced an estimate.
+  #
+  # Before 2026-08-04 a failed imputation was skipped by `next`, which left a 0
+  # in both `betas` and `ses`, and every element was then passed to
+  # rubins_pool(). Those zeros were averaged in as though they were real
+  # estimates. Two failure modes followed:
+  #   - ALL m failed  -> beta_bar = 0, se = 0, i.e. SHR exactly 1.00 with a
+  #     zero standard error. One site currently ships exactly this file. It is
+  #     caught downstream (report_core._collect_psm_fg drops se <= 0), but an SE
+  #     of zero carries infinite weight in inverse-variance meta-analysis, so
+  #     that guard was the only thing standing between a placeholder and a
+  #     pooled estimate determined entirely by it.
+  #   - SOME m failed -> the zeros biased the pooled log-HR toward the null and
+  #     shrank its standard error, producing a plausible-looking wrong number
+  #     with a positive SE that passes every downstream check. This is the more
+  #     dangerous case and nothing downstream could have detected it.
+  n_ok <- sum(fit_ok)
+  if (n_ok < MIN_IMP_FITS_FG) {
+    cat(sprintf(
+      "  *** PSM FG (%s): only %d of %d imputations produced a usable fit (need %d).\n",
+      outcome_label, n_ok, N_IMP, MIN_IMP_FITS_FG))
+    cat("      NOT pooled; this site will contribute no Fine-Gray estimate for this outcome.\n")
+    return(NULL)
+  }
+  if (n_ok < N_IMP) {
+    cat(sprintf("  Note: PSM FG (%s) pooled over %d of %d imputations (%d failed).\n",
+                outcome_label, n_ok, N_IMP, N_IMP - n_ok))
+  }
+
+  # rubins_pool() derives m from length(betas), so passing only the successful
+  # fits also makes m correct for Rubin's rules rather than overstating it.
+  pooled <- rubins_pool(betas[fit_ok], ses[fit_ok])
   data.frame(
     model    = paste0("PSM FG (pooled) - ", outcome_label),
     HR_type  = "SHR",
@@ -1119,20 +1200,30 @@ pool_fg_treatment <- function(failcode_val, outcome_label) {
 
 pooled_fg_death <- pool_fg_treatment(2, "Death")
 pooled_fg_disch <- pool_fg_treatment(1, "Discharge")
+# bind_rows() drops NULL arguments, so an outcome that could not be pooled simply
+# contributes no row.
 pooled_fg_results <- bind_rows(pooled_fg_death, pooled_fg_disch)
 
-cat("Pooled Fine-Gray results:\n")
-for (i in seq_len(nrow(pooled_fg_results))) {
-  r <- pooled_fg_results[i, ]
-  cat(sprintf("  %-35s SHR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
-              r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
-}
-cat("\n")
+if (nrow(pooled_fg_results) > 0) {
+  cat("Pooled Fine-Gray results:\n")
+  for (i in seq_len(nrow(pooled_fg_results))) {
+    r <- pooled_fg_results[i, ]
+    cat(sprintf("  %-35s SHR=%.2f (%.2f-%.2f) p=%.4f FMI=%.3f\n",
+                r$model, r$HR, r$HR_lower, r$HR_upper, r$p_value, r$fmi))
+  }
+  cat("\n")
 
-write.csv(pooled_fg_results,
-          file.path(output_dir, paste0(SITE_NAME, "_fg_psm_pooled_results.csv")),
-          row.names = FALSE)
-cat("Saved pooled Fine-Gray results CSV\n")
+  write.csv(pooled_fg_results,
+            file.path(output_dir, paste0(SITE_NAME, "_fg_psm_pooled_results.csv")),
+            row.names = FALSE)
+  cat("Saved pooled Fine-Gray results CSV\n")
+} else {
+  # Deliberately write NO file rather than an empty or placeholder one. A missing
+  # file is unambiguous to the coordinating centre; a file containing SHR = 1.00
+  # with se = 0 is not.
+  cat("No poolable Fine-Gray outcome at this site; writing no",
+      "_fg_psm_pooled_results.csv.\n")
+}
 } else {
   pooled_fg_results <- data.frame(
     model = character(), HR_type = character(), HR = numeric(),
@@ -1549,15 +1640,24 @@ summary(fit_cs_disch)
 
 #### ---- II. Extract IPTW Cox cause-specific HR results (full covariates) ----
 
+# Pick the first AVAILABLE column in order of preference.
+# intersect() returns elements ordered by its FIRST argument, so
+# intersect(colnames(co), c("robust se", "se(coef)"))[1] silently returns
+# "se(coef)": summary.coxph orders its columns coef, exp(coef), se(coef),
+# robust se, z, Pr(>|z|), so the naive model-based SE always wins the race
+# even though "robust se" was listed first to express the preference. For a
+# weighted Cox fit that is the wrong standard error.
+first_present <- function(prefs, cols) prefs[prefs %in% cols][1]
+
 extract_iptw_cox <- function(fit, label){
   s <- summary(fit)
   co <- s$coefficients
   ci <- confint(fit)    # CI already on coef scale
 
-  # detect correct column names
-  z_col <- intersect(colnames(co), c("robust z","z"))[1]
-  p_col <- intersect(colnames(co), c("Pr(>|z|)","Robust Pr(>|z|)","p"))[1]
-  se_col <- intersect(colnames(co), c("robust se","se(coef)"))[1]
+  # detect correct column names (preference order is honoured)
+  z_col <- first_present(c("robust z","z"), colnames(co))
+  p_col <- first_present(c("Pr(>|z|)","Robust Pr(>|z|)","p"), colnames(co))
+  se_col <- first_present(c("robust se","se(coef)"), colnames(co))
 
   data.frame(
     outcome = label,
@@ -1774,6 +1874,22 @@ cumhaz_at_grid <- function(basehaz_df, grid_time) {
   out
 }
 
+# Helper: UNCENTERED linear predictor x'beta.
+# predict(fit, type = "lp") returns the linear predictor centered at fit$means,
+# i.e. x'beta - xbar'beta. Pairing that with basehaz(centered = FALSE), which is
+# the cumulative hazard at x = 0, multiplies every subject's hazard by a spurious
+# constant exp(-xbar'beta). The constant differs between the death and discharge
+# models, so it does not cancel in the competing-risks recursion: it deflates one
+# cause and inflates the other. Build x'beta explicitly instead of using
+# predict(..., reference = "zero"), because older survival versions absorb an
+# unknown `reference` into `...` and would silently return the centered value.
+lp_uncentered <- function(fit, newdata) {
+  b <- coef(fit)
+  b <- b[!is.na(b)]   # aliased terms carry no contribution
+  mm <- model.matrix(delete.response(terms(fit)), data = newdata, xlev = fit$xlevels)
+  as.vector(mm[, names(b), drop = FALSE] %*% b)
+}
+
 # Population-averaged standardized CIFs via g-computation
 build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, newdata) {
   bh_death <- basehaz(fit_death, centered = FALSE)
@@ -1789,8 +1905,8 @@ build_standardized_cifs <- function(fit_death, fit_disch, trt_var, trt_levels, n
   out <- lapply(trt_levels, function(lv) {
     cf_data <- newdata
     cf_data[[trt_var]] <- factor(lv, levels = trt_levels)
-    lp_death <- predict(fit_death, newdata = cf_data, type = "lp")
-    lp_disch <- predict(fit_disch, newdata = cf_data, type = "lp")
+    lp_death <- lp_uncentered(fit_death, cf_data)
+    lp_disch <- lp_uncentered(fit_disch, cf_data)
     mult_death <- exp(lp_death)
     mult_disch <- exp(lp_disch)
     n <- length(mult_death)
@@ -1968,9 +2084,10 @@ extract_iptw_trt <- function(fit, label){
   ci <- confint(fit)
   idx <- grep("crrt_high", rownames(co))
 
-  # Detect column names dynamically
-  p_col <- intersect(colnames(co), c("Pr(>|z|)", "Robust Pr(>|z|)"))[1]
-  se_col <- intersect(colnames(co), c("robust se", "se(coef)"))[1]
+  # Detect column names dynamically (see first_present: intersect() would
+  # ignore the preference order and hand back the naive se(coef))
+  p_col <- first_present(c("Pr(>|z|)", "Robust Pr(>|z|)"), colnames(co))
+  se_col <- first_present(c("robust se", "se(coef)"), colnames(co))
 
   data.frame(
     model = label,

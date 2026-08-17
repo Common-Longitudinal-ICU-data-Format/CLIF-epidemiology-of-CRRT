@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from pipeline_helpers import load_config
+from pipeline_helpers import load_config, get_output_root
 
 warnings.filterwarnings("ignore")
 
@@ -41,8 +41,9 @@ config = load_config()  # honors CLIF_CONFIG; defaults to config/config.json
 SITE_NAME = config["site_name"]
 HAS_CRRT_SETTINGS = config.get("has_crrt_settings", True)
 
-INTER = Path("../output/intermediate_phi")
-OUT = Path("../output/final_no_phi/low_dose")
+OUTPUT_ROOT = get_output_root(config)  # honors config['output_dir'] (isolates dev sites)
+INTER = OUTPUT_ROOT / "intermediate_phi"
+OUT = OUTPUT_ROOT / "final_no_phi" / "low_dose"
 OUT.mkdir(parents=True, exist_ok=True)
 
 LOW_LO, LOW_HI = 10.0, 15.0  # very-low-dose band (mL/kg/hr), inclusive
@@ -174,12 +175,12 @@ add_continuous("SOFA renal (baseline)", "sofa_renal")
 add_continuous("SOFA respiratory (baseline)", "sofa_resp")
 # Baseline labs
 for col, label in [
-    ("creatinine_baseline", "Creatinine (baseline)"),
-    ("bun_baseline", "BUN (baseline)"),
-    ("lactate_baseline", "Lactate (baseline)"),
-    ("ph_arterial_baseline", "Arterial pH (baseline)"),
-    ("bicarbonate_baseline", "Bicarbonate (baseline)"),
-    ("potassium_baseline", "Potassium (baseline)"),
+    ("creatinine_t1", "Creatinine (baseline)"),
+    ("bun_t1", "BUN (baseline)"),
+    ("lactate_t1", "Lactate (baseline)"),
+    ("ph_arterial_t1", "Arterial pH (baseline)"),
+    ("bicarbonate_t1", "Bicarbonate (baseline)"),
+    ("potassium_t1", "Potassium (baseline)"),
 ]:
     add_continuous(label, col)
 # Support / context
