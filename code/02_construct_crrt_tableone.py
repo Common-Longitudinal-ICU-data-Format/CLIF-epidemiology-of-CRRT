@@ -676,6 +676,25 @@ def _p_cat(series):
 
 _rows = []
 
+# Machine-readable companion to the rendered Table 1 (STEP 7b).
+#
+# The rendered table is a display artifact: one formatted "median (q25, q75)"
+# string per stratum, and a single cohort N per stratum living in the COLUMN
+# HEADER. That shape cannot carry a mean, an SD, or — decisively — the
+# NON-MISSING count per variable per stratum, which is the weight a pooled mean
+# requires. Missingness varies enormously by variable (phosphate reaches 55% at
+# one site), so weighting by the stratum N instead would materially misweight it.
+#
+# Why a mean at all, when Table 1 reports medians: a pooled MEAN is exactly
+# recoverable from per-site means and counts, Sum(x_i n_i)/Sum(n_i), and a pooled
+# SD from the law of total variance. Neither is an approximation — they equal
+# what patient-level pooling would give. A pooled MEDIAN is not recoverable from
+# per-site medians at all. See docs/pooling_methods_audit.md.
+#
+# Populated from inside _row_cont so the labels, strata and cohort framing are
+# the SAME OBJECTS the rendered table uses and cannot drift from it.
+_cont_summary: list = []
+
 
 def _row_cont(label, col, dec):
     if col not in t1.columns:
@@ -683,6 +702,16 @@ def _row_cont(label, col, dec):
     r = {COL: f"__{label}__", PCOL: _fmt_p(_p_cont(col))}
     for g in GROUPS:
         r[GHDR[g]] = _iqr(gframe[g][col], dec)
+        v = pd.to_numeric(gframe[g][col], errors="coerce").dropna()
+        _cont_summary.append({
+            "site": SITE_NAME, "variable": label, "stratum": g,
+            "n": int(len(v)), "n_stratum": int(len(gframe[g])),
+            "mean": float(v.mean()) if len(v) else None,
+            "sd": float(v.std(ddof=1)) if len(v) > 1 else None,
+            "median": float(v.median()) if len(v) else None,
+            "q25": float(v.quantile(0.25)) if len(v) else None,
+            "q75": float(v.quantile(0.75)) if len(v) else None,
+        })
     _rows.append(r)
 
 
@@ -792,6 +821,15 @@ table1_df = pd.DataFrame(_rows, columns=columns)
 output_csv = FINAL_DIR / f"{SITE_NAME}_table1_crrt.csv"
 table1_df.to_csv(output_csv, index=False)
 print(f"  CSV: {output_csv}  ({len(table1_df)} rows; N {gn})")
+
+# --- Companion: per-variable continuous summary, long format (see _cont_summary) ---
+_cs = pd.DataFrame(_cont_summary, columns=[
+    "site", "variable", "stratum", "n", "n_stratum",
+    "mean", "sd", "median", "q25", "q75"])
+_cs_path = FINAL_DIR / f"{SITE_NAME}_table1_continuous_summary.csv"
+_cs.to_csv(_cs_path, index=False)
+print(f"  CSV: {_cs_path}  ({_cs['variable'].nunique()} variables x "
+      f"{_cs['stratum'].nunique()} strata = {len(_cs)} rows)")
 
 _disp = table1_df.copy()
 _disp.columns = [_re.sub(r"\*+", "", c).strip() for c in _disp.columns]

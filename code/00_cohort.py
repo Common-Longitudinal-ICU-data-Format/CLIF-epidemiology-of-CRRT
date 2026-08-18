@@ -2641,10 +2641,21 @@ if has_crrt_settings:
         _pt_init = _pt_init.merge(
             median_3hr[['encounter_block', 'crrt_dose_ml_kg_hr']],
             on='encounter_block', how='left')
+    # Every value here used to be a DISPLAY STRING ("2915 [2390-3865]"), which
+    # meant this table — the source for the per-site initial-settings supplement
+    # table — carried no machine-readable number at all: not a mean, and not even
+    # a poolable median without regex-parsing the format. Numeric columns added
+    # 2026-08-17 alongside the strings, so the settings can be summarized across
+    # sites. A pooled MEAN is exactly recoverable from per-site means and counts;
+    # a pooled median is not, so both the mean/SD and the quartiles are exported.
+    # Naming follows the {var}_{Stat} convention already used by the sibling
+    # crrt_settings_distribution_by_mode.csv in this same directory.
+    # The display strings are unchanged, so 07's renderer is unaffected.
     _init_rows = []
     for _mode in sorted(_pt_init['crrt_mode_category'].dropna().unique()):
         _md = _pt_init[_pt_init['crrt_mode_category'] == _mode]
         _row = {'Mode': str(_mode).upper(), 'N_patients': len(_md)}
+        _nums = {}
         for _c in _init_params + ['crrt_dose_ml_kg_hr']:
             if _c not in _pt_init.columns:
                 continue
@@ -2655,6 +2666,16 @@ if has_crrt_settings:
                             f"[{_v.quantile(.25):.{_dec}f}-{_v.quantile(.75):.{_dec}f}]")
             else:
                 _row[_c] = "No data"
+            # n is the NON-MISSING count, which is the weight a pooled mean needs;
+            # N_patients above is the mode's denominator and would misweight it
+            # wherever a setting is charted for only some of the mode's patients.
+            _nums[f'{_c}_N'] = int(len(_v))
+            _nums[f'{_c}_Mean'] = float(_v.mean()) if len(_v) else np.nan
+            _nums[f'{_c}_SD'] = float(_v.std(ddof=1)) if len(_v) > 1 else np.nan
+            _nums[f'{_c}_Median'] = float(_v.median()) if len(_v) else np.nan
+            _nums[f'{_c}_Q25'] = float(_v.quantile(.25)) if len(_v) else np.nan
+            _nums[f'{_c}_Q75'] = float(_v.quantile(.75)) if len(_v) else np.nan
+        _row.update(_nums)
         _init_rows.append(_row)
     init_settings_df = pd.DataFrame(_init_rows)
     init_settings_df.to_csv(
