@@ -121,6 +121,14 @@ def add_continuous(label: str, col: str):
             "median": float(v.median()) if len(v) else None,
             "q25": float(v.quantile(.25)) if len(v) else None,
             "q75": float(v.quantile(.75)) if len(v) else None,
+            # mean/sd added 2026-08-17: a pooled MEAN is exactly recoverable from
+            # per-site means and counts, Sum(x_i n_i)/Sum(n_i), while a pooled
+            # median is not recoverable from per-site medians at all. `n` above is
+            # already the NON-MISSING count, which is the weight the pooled mean
+            # needs — the stratum total (`total`) would misweight it wherever
+            # missingness varies by variable. ddof=1 to match pandas' sample SD.
+            "mean": float(v.mean()) if len(v) else None,
+            "sd": float(v.std(ddof=1)) if len(v) > 1 else None,
             "pval": p,
         })
     table_rows.append([label, _fmt_mi(low[col]), _fmt_mi(rest[col]), p])
@@ -152,7 +160,8 @@ def add_categorical(label: str, col: str, levels=None):
             tot = int(col_s.notna().sum())
             long_rows.append({
                 "variable": label, "level": str(lvl), "subgroup": gname, "stat_type": "categorical",
-                "n": n_lvl, "total": tot, "median": None, "q25": None, "q75": None, "pval": p,
+                "n": n_lvl, "total": tot, "median": None, "q25": None, "q75": None,
+                "mean": None, "sd": None, "pval": p,
             })
         lo_n = int((low[col] == lvl).sum()); lo_t = int(low[col].notna().sum())
         re_n = int((rest[col] == lvl).sum()); re_t = int(rest[col].notna().sum())

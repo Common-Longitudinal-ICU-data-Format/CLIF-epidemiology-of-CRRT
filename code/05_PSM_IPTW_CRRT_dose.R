@@ -135,6 +135,110 @@ rubins_pool <- function(betas, ses) {
   )
 }
 
+## ---- D2. Continuous-summary companion export -------------------------------
+# The three baseline tables this script writes (unadjusted / matched / IPTW) are
+# RENDERED display artifacts: one formatted "median (p25, p75)" string per cell,
+# with a single N per column. That shape cannot carry a mean, an SD, or the
+# per-variable NON-MISSING count that a pooled mean must be weighted by.
+#
+# Why a mean at all when the tables report medians: a pooled MEAN is exactly
+# recoverable from per-site means and counts, Sum(x_i n_i)/Sum(n_i), and a
+# pooled SD from the law of total variance. Neither is an approximation. A
+# pooled MEDIAN is not recoverable from per-site medians at all. See
+# docs/pooling_methods_audit.md in the coordinating-center repo.
+#
+# The rendered tables are deliberately left untouched; this writes a parallel
+# long-format CSV instead. Continuous variables are derived from table1_type at
+# call time, so the dynamic per-site variable filtering upstream is inherited
+# automatically and the companion cannot list a variable the table does not.
+.cont_summary_rows <- list()
+
+.continuous_vars <- function(type_list, present) {
+  v <- vapply(type_list, function(f) all.vars(f)[1], character(1))
+  k <- vapply(type_list, function(f) as.character(f)[[3]], character(1))
+  intersect(v[k == "continuous"], present)
+}
+
+# Display label for a variable, from the same table1_label list gtsummary renders
+# from. Exported alongside the raw column name so the companion can be joined to
+# the rendered table (which carries labels, not column names) without the
+# coordinating-center code maintaining a second copy of the mapping — a copy
+# that would drift the first time a label is reworded.
+.var_label <- function(v) {
+  if (!exists("table1_label")) return(NA_character_)
+  for (f in table1_label) if (all.vars(f)[1] == v) return(as.character(f)[[3]])
+  NA_character_
+}
+
+# Unweighted: used for the unadjusted and matched tables.
+.summarise_continuous <- function(df, vars, group_col, table_label) {
+  out <- list()
+  groups <- c("Overall", levels(droplevels(as.factor(df[[group_col]]))))
+  for (g in groups) {
+    d <- if (g == "Overall") df else df[!is.na(df[[group_col]]) & df[[group_col]] == g, , drop = FALSE]
+    for (v in vars) {
+      x <- suppressWarnings(as.numeric(d[[v]]))
+      x <- x[!is.na(x)]
+      out[[length(out) + 1]] <- data.frame(
+        site = SITE_NAME, table = table_label, stratum = g,
+        variable = v, label = .var_label(v),
+        n = length(x), n_stratum = nrow(d), ess = NA_real_,
+        mean   = if (length(x))     mean(x)             else NA_real_,
+        sd     = if (length(x) > 1) stats::sd(x)        else NA_real_,
+        median = if (length(x))     stats::median(x)    else NA_real_,
+        q25    = if (length(x)) unname(stats::quantile(x, .25)) else NA_real_,
+        q75    = if (length(x)) unname(stats::quantile(x, .75)) else NA_real_,
+        stringsAsFactors = FALSE)
+    }
+  }
+  do.call(rbind, out)
+}
+
+# Survey-weighted: the IPTW table summarises a svydesign, so an unweighted mean
+# would not match what is rendered. ESS (Kish) is exported alongside n because
+# the correct weight for pooling a WEIGHTED mean across sites is the effective
+# sample size, not the row count — using n would silently overweight sites with
+# extreme weights.
+.summarise_continuous_svy <- function(design, vars, group_col, table_label) {
+  out <- list()
+  dat <- design$variables
+  groups <- c("Overall", levels(droplevels(as.factor(dat[[group_col]]))))
+  for (g in groups) {
+    d <- if (g == "Overall") design else subset(design, dat[[group_col]] == g)
+    w <- stats::weights(d)
+    ess <- if (length(w)) sum(w)^2 / sum(w^2) else NA_real_
+    for (v in vars) {
+      f <- stats::as.formula(paste0("~", v))
+      m <- try(survey::svymean(f, d, na.rm = TRUE), silent = TRUE)
+      vr <- try(survey::svyvar(f, d, na.rm = TRUE), silent = TRUE)
+      qq <- try(survey::svyquantile(f, d, quantiles = c(.25, .5, .75), na.rm = TRUE),
+                silent = TRUE)
+      qv <- if (inherits(qq, "try-error")) rep(NA_real_, 3) else as.numeric(unlist(qq)[1:3])
+      x <- suppressWarnings(as.numeric(d$variables[[v]]))
+      out[[length(out) + 1]] <- data.frame(
+        site = SITE_NAME, table = table_label, stratum = g,
+        variable = v, label = .var_label(v),
+        n = sum(!is.na(x)), n_stratum = nrow(d$variables), ess = ess,
+        mean   = if (inherits(m,  "try-error")) NA_real_ else as.numeric(m)[1],
+        sd     = if (inherits(vr, "try-error")) NA_real_ else sqrt(as.numeric(vr)[1]),
+        median = qv[2], q25 = qv[1], q75 = qv[3],
+        stringsAsFactors = FALSE)
+    }
+  }
+  do.call(rbind, out)
+}
+
+# Written after every append, not once at the end, so a run that stops before
+# the IPTW section still leaves a valid file for the tables it did complete.
+.flush_cont_summary <- function() {
+  if (!length(.cont_summary_rows)) return(invisible(NULL))
+  df <- do.call(rbind, .cont_summary_rows)
+  utils::write.csv(df, file.path(output_dir,
+    paste0(SITE_NAME, "_causal_continuous_summary.csv")), row.names = FALSE)
+  cat(sprintf("  causal_continuous_summary.csv: %d rows (%s)\n",
+              nrow(df), paste(unique(df$table), collapse = ", ")))
+}
+
 ## ---- E. Load configuration ----
 config_path <- .config_path  # honors CLIF_CONFIG
 config <- .config
@@ -821,6 +925,12 @@ write.csv(as_tibble(table1),
           file.path(output_dir, paste0(SITE_NAME, "_table2_unadjusted_balance.csv")),
           row.names = FALSE)
 
+# Companion continuous summary for the table just rendered (see section D2).
+.cont_summary_rows[[length(.cont_summary_rows) + 1]] <- .summarise_continuous(
+  df_tte_table1, .continuous_vars(table1_type, names(df_tte_table1)),
+  "crrt_group", "unadjusted")
+.flush_cont_summary()
+
 # ============================================ #
 # ---- 2. PROPENSITY SCORE MATCHING BRANCH ----
 # ============================================ #
@@ -1006,6 +1116,11 @@ gt::gtsave(
 write.csv(as_tibble(tableS1),
           file.path(output_dir, paste0(SITE_NAME, "_TableS1_matched.csv")),
           row.names = FALSE)
+
+.cont_summary_rows[[length(.cont_summary_rows) + 1]] <- .summarise_continuous(
+  df_tte_tableS1, .continuous_vars(table1_type, names(df_tte_tableS1)),
+  "crrt_group", "matched")
+.flush_cont_summary()
 
 ## ---- D. Analysis of PSM ----
 ### ---- I. Fine-Gray Analysis on Matched Patients ----
@@ -1590,6 +1705,12 @@ gt::gtsave(
 write.csv(as_tibble(tableS2),
           file.path(output_dir, paste0(SITE_NAME, "_TableS2_IPTW.csv")),
           row.names = FALSE)
+
+# Survey-weighted: matches what tbl_svysummary rendered, and carries ESS.
+.cont_summary_rows[[length(.cont_summary_rows) + 1]] <- .summarise_continuous_svy(
+  design_iptw, .continuous_vars(table1_type, names(df_tte_tableS2)),
+  "crrt_group", "iptw")
+.flush_cont_summary()
 
 # ============================================================= #
 ### ---- OPTIONAL TRIMMING ----

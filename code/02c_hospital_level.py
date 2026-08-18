@@ -196,6 +196,18 @@ def _npct(n, d):
 
 _rows = []
 
+# Machine-readable companion to the rendered hospital Table 1, mirroring 02's
+# {SITE}_table1_continuous_summary.csv. Rationale for exporting mean/SD at all,
+# and for carrying the per-variable non-missing n, is documented in 02.
+#
+# SUPPRESSION: this file is hospital-granular, so it is the more disclosive of
+# the two. A mean and SD on a small cell is MORE disclosive than the count that
+# _npct already suppresses — with n, mean and SD a small value set is often
+# reconstructable — so the same SUPPRESS_MIN_N gate is applied here, and the
+# statistics are nulled rather than the row dropped, to keep "suppressed"
+# distinguishable from "not reported".
+_cont_summary: list = []
+
 
 def _row_cont(label, col, dec):
     if col not in t1.columns:
@@ -203,6 +215,19 @@ def _row_cont(label, col, dec):
     r = {COL: f"__{label}__"}
     for g in GROUPS:
         r[HDR[g]] = _iqr(gframe[g][col], dec)
+        v = pd.to_numeric(gframe[g][col], errors="coerce").dropna()
+        _sup = _suppress_cell(len(v))
+        _cont_summary.append({
+            "site": SITE_NAME, "hospital": g, "variable": label,
+            "n": (None if _sup else int(len(v))),
+            "n_stratum": int(len(gframe[g])),
+            "suppressed": bool(_sup),
+            "mean": (None if _sup or not len(v) else float(v.mean())),
+            "sd": (None if _sup or len(v) < 2 else float(v.std(ddof=1))),
+            "median": (None if _sup or not len(v) else float(v.median())),
+            "q25": (None if _sup or not len(v) else float(v.quantile(0.25))),
+            "q75": (None if _sup or not len(v) else float(v.quantile(0.75))),
+        })
     _rows.append(r)
 
 
@@ -305,6 +330,16 @@ if "in_hosp_death" in t1.columns:
     _row_binary("90-Day In-Hospital Mortality (%)", "in_hosp_death")
 
 pd.DataFrame(_rows, columns=_columns).to_csv(OUT_DIR / f"{SITE_NAME}_table1_by_hospital.csv", index=False)
+
+# --- Companion: per-variable continuous summary by hospital (see _cont_summary) ---
+_cs = pd.DataFrame(_cont_summary, columns=[
+    "site", "hospital", "variable", "n", "n_stratum", "suppressed",
+    "mean", "sd", "median", "q25", "q75"])
+_cs.to_csv(OUT_DIR / f"{SITE_NAME}_hospital_continuous_summary.csv", index=False)
+_n_sup = int(_cs["suppressed"].sum())
+print(f"  {SITE_NAME}_hospital_continuous_summary.csv: {_cs['variable'].nunique()} variables x "
+      f"{_cs['hospital'].nunique()} groups = {len(_cs)} rows"
+      + (f" ({_n_sup} suppressed at n < {SUPPRESS_MIN_N})" if _n_sup else ""))
 
 
 # =====================================================================
