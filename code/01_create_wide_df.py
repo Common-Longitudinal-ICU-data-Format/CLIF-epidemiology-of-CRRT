@@ -23,8 +23,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import clifpy
 from utils.config import config
-from pipeline_helpers import load_intermediate, safe_load_clif_table, get_output_root
-from clifpy.utils.outlier_handler import apply_outlier_handling
+from pipeline_helpers import load_intermediate, safe_load_clif_table, get_output_root, normalize_categories
+from outlier_utils import apply_outliers
 import gc
 import yaml
 import numpy as np
@@ -207,8 +207,12 @@ clif.initialize(
     filters=filters_config
 )
 print("clifpy version:", getattr(clifpy, '__version__', 'unknown'))
-apply_outlier_handling(clif.labs)
-apply_outlier_handling(clif.vitals)
+
+# Category normalization — labs/vitals/meds load via clif.initialize (not the
+# safe_load_clif_table choke point), so normalize their *_category columns here.
+# Must precede pivots + outlier handling: both key off lower-case category values.
+for _t in ("labs", "vitals", "medication_admin_continuous"):
+    getattr(clif, _t).df = normalize_categories(getattr(clif, _t).df, _t)
 
 # =============================================================================
 # Extract DataFrames from loaded tables
@@ -216,6 +220,13 @@ apply_outlier_handling(clif.vitals)
 labs_df = clif.labs.df.copy()
 vitals_df = clif.vitals.df.copy()
 meds_cont_df = clif.medication_admin_continuous.df.copy()
+
+# Outlier handling — single source of truth (config/outlier_config.json). Labs and
+# vitals are clipped here; meds are clipped after unit conversion (below) so the NEE
+# sum can never inherit an implausible dose. Vitals are cleaned before the med-dose
+# conversion, which uses them for weight-normalized dosing.
+labs_df = apply_outliers(labs_df, long="lab")
+vitals_df = apply_outliers(vitals_df, long="vital")
 
 # =============================================================================
 # Convert vasopressor units to standard doses using clifpy
@@ -245,6 +256,10 @@ if len(vaso_df) > 0:
     print(f"Vasopressor unit conversion complete: {len(vaso_converted)} rows converted")
 else:
     print("No vasopressor rows found, skipping unit conversion")
+
+# Clip med doses to config bounds AFTER unit conversion, so NEE (computed from the
+# converted vasopressor doses below) can never sum an implausible value.
+meds_cont_df = apply_outliers(meds_cont_df, long="med")
 
 # =============================================================================
 # Pivot Vitals: narrow → wide
@@ -362,6 +377,11 @@ safe_load_clif_table(clif, 'respiratory_support', tables_path=config['tables_pat
                      columns=clif_config['respiratory_support_required_columns'],
                      filters={'hospitalization_id': list(final_hosp_ids)})
 
+# Outlier handling BEFORE the waterfall — so garbage (e.g. fio2_set = 88880) is
+# never forward-filled across timepoints, nor fed to the device/mode inference.
+# Raw resp columns are unprefixed, matching config keys directly.
+clif.respiratory_support.df = apply_outliers(clif.respiratory_support.df, wide=True, label="resp")
+
 clif.respiratory_support = clif.respiratory_support.waterfall()
 
 # =============================================================================
@@ -425,22 +445,11 @@ wide_df = wide_df.merge(
 # Re-sort by hospitalization and time
 wide_df = wide_df.sort_values(['hospitalization_id', 'event_dttm']).reset_index(drop=True)
 
-# Apply CRRT outlier handling (same ranges as outlier_config.json)
-crrt_outlier_ranges = {
-    "crrt_blood_flow_rate": (150, 500),
-    "crrt_dialysate_flow_rate": (0, 12000),
-    "crrt_pre_filter_replacement_fluid_rate": (0, 12000),
-    "crrt_post_filter_replacement_fluid_rate": (0, 12000),
-}
-for col, (lo, hi) in crrt_outlier_ranges.items():
-    if col in wide_df.columns:
-        n_before = wide_df[col].notna().sum()
-        wide_df.loc[wide_df[col] < lo, col] = np.nan
-        wide_df.loc[wide_df[col] > hi, col] = np.nan
-        n_after = wide_df[col].notna().sum()
-        n_removed = n_before - n_after
-        if n_removed > 0:
-            print(f"  CRRT outlier filter: {col} — {n_removed} values set to NaN")
+# Outlier handling for the wide-native tables merged above (CRRT settings, respiratory
+# support). One config-driven pass: any wide column whose de-prefixed name is a config
+# variable is clipped to its bound. Labs/vitals/meds columns are already clean from the
+# long-table pass, so this is a no-op for them.
+wide_df = apply_outliers(wide_df, wide=True)
 
 print(wide_df.columns)
 

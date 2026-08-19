@@ -1400,6 +1400,7 @@ def compute_sofa_polars(
     extremal_type: str = 'worst',
     fill_na_scores_with_zero: bool = True,
     remove_outliers: bool = True,
+    outlier_config_path: Optional[str] = None,
     timezone: Optional[str] = None,
     time_unit: str = 'us'
 ) -> pl.DataFrame:
@@ -1540,28 +1541,48 @@ def compute_sofa_polars(
     # Use 'diagonal' to handle different column sets - missing columns filled with null
     combined_lazy = pl.concat(combined_parts, how='diagonal')
 
+    # Normalize scoring-category casing (device/mode are already lower-cased inline
+    # during waterfall inference above). mCIDE category casing varies by site and
+    # the SOFA scoring keys off lower-case category values, so a non-conformant
+    # site would otherwise silently drop lab/vital/assessment components.
+    _cat_cols = [c for c in ('lab_category', 'vital_category', 'assessment_category',
+                             'med_category')
+                 if c in combined_lazy.collect_schema().names()]
+    if _cat_cols:
+        combined_lazy = combined_lazy.with_columns(
+            [pl.col(c).str.strip_chars().str.to_lowercase().alias(c) for c in _cat_cols]
+        )
+
     # Clean up lazy frames and intermediate variables (they don't consume memory)
     del combined_parts, labs_lazy, vitals_lazy, assessments_lazy, resp_lazy, meds_lazy
 
     # Apply outlier removal if requested (still lazy)
     if remove_outliers:
         logger.info("Adding outlier removal to lazy query...")
+        # Outlier bounds come from the ONE source of truth (config/outlier_config.json),
+        # not hardcoded literals — the same file the rest of the pipeline uses. Only the
+        # SOFA respiratory inputs are gated here (po2_arterial, fio2_set, spo2).
+        from outlier_utils import load_outlier_config
+        _ocfg = load_outlier_config(outlier_config_path)
+        po2_lo, po2_hi = _ocfg['po2_arterial']
+        fio2_lo, fio2_hi = _ocfg['fio2_set']
+        spo2_lo, spo2_hi = _ocfg['spo2']
         combined_lazy = combined_lazy.with_columns([
-            pl.when((pl.col('lab_value_numeric').is_not_null()) & (pl.col('lab_category') == 'po2_arterial') & (pl.col('lab_value_numeric') >= 0) & (pl.col('lab_value_numeric') <= 700))
+            pl.when((pl.col('lab_value_numeric').is_not_null()) & (pl.col('lab_category') == 'po2_arterial') & (pl.col('lab_value_numeric') >= po2_lo) & (pl.col('lab_value_numeric') <= po2_hi))
             .then(pl.col('lab_value_numeric'))
             .when((pl.col('lab_value_numeric').is_not_null()) & (pl.col('lab_category') == 'po2_arterial'))
             .then(None)
             .otherwise(pl.col('lab_value_numeric'))
             .alias('lab_value_numeric'),
 
-            pl.when((pl.col('fio2_set').is_not_null()) & (pl.col('fio2_set') >= 0.21) & (pl.col('fio2_set') <= 1))
+            pl.when((pl.col('fio2_set').is_not_null()) & (pl.col('fio2_set') >= fio2_lo) & (pl.col('fio2_set') <= fio2_hi))
             .then(pl.col('fio2_set'))
             .when(pl.col('fio2_set').is_not_null())
             .then(None)
             .otherwise(pl.col('fio2_set'))
             .alias('fio2_set'),
 
-            pl.when((pl.col('vital_value').is_not_null()) & (pl.col('vital_category') == 'spo2') & (pl.col('vital_value') >= 50) & (pl.col('vital_value') <= 100))
+            pl.when((pl.col('vital_value').is_not_null()) & (pl.col('vital_category') == 'spo2') & (pl.col('vital_value') >= spo2_lo) & (pl.col('vital_value') <= spo2_hi))
             .then(pl.col('vital_value'))
             .when((pl.col('vital_value').is_not_null()) & (pl.col('vital_category') == 'spo2'))
             .then(None)
