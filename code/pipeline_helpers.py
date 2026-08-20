@@ -191,14 +191,55 @@ def load_intermediate(filepath, **kwargs) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # CLIF table loading
 # ---------------------------------------------------------------------------
+# Category columns clifpy itself re-processes downstream (the respiratory-support
+# waterfall factorizes device/mode and expects mCIDE-canonical values), so we must
+# NOT touch their case or dtype here. The pipeline's own device/mode comparisons
+# lower-case inline where needed, so excluding these is safe.
+_CLIFPY_OWNED_CATEGORIES = {"device_category", "mode_category"}
+
+
+def normalize_categories(df, table_name=None):
+    """Lower-case + strip every ``*_category`` column (except clifpy-owned ones),
+    in place, preserving object dtype and NaN.
+
+    mCIDE category casing varies by field ('icu' vs 'Expired' vs 'IMV'); clifpy
+    does NOT normalize it (verified) and never runs its own validation in this
+    pipeline, so a site shipping a different case would mis-match every comparison
+    silently (no ICU flagged, no weight -> no dose). The pipeline compares against
+    lower-case literals throughout, so lower-casing at load makes every comparison
+    casing-safe. Warns (does not fail) when a column actually held non-lower-case
+    values, so a non-conformant site is visible rather than silently corrected.
+    """
+    for col in df.columns:
+        if not col.endswith("_category") or col in _CLIFPY_OWNED_CATEGORIES:
+            continue
+        s = df[col]
+        notna = s.notna()
+        if not notna.any():
+            continue
+        low = s.astype(object).copy()                       # keep object dtype + NaN
+        low[notna.to_numpy()] = s[notna].astype(str).str.strip().str.lower()
+        changed = notna & (s.astype(object) != low)
+        n = int(changed.sum())
+        if n:
+            where = f" in {table_name}" if table_name else ""
+            print(f"  ⚠️  normalized {n:,} non-lowercase '{col}' value(s){where}: "
+                  f"{sorted(set(s[changed].astype(str)))[:6]}")
+        df[col] = low
+    return df
+
+
 def safe_load_clif_table(clif, table_name, tables_path=None, **kwargs):
     """Wrap clif.load_table() with clear error messaging.
 
-    Returns the loaded table object (e.g., clif.vitals).
+    Returns the loaded table object (e.g., clif.vitals). Category columns are
+    normalized (lower-cased) at this single choke point so every downstream
+    comparison is casing-safe regardless of a site's mCIDE conformance.
     """
     try:
         clif.load_table(table_name, **kwargs)
         table = getattr(clif, table_name)
+        table.df = normalize_categories(table.df, table_name)
         print(f"  Loaded {table_name}: {len(table.df):,} rows")
         return table
     except FileNotFoundError:

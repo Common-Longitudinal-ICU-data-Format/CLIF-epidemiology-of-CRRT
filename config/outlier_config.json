@@ -25,6 +25,7 @@
 
     "lactate": [0, 40],
     "pf_sf_ratio": [0, 1000],
+    "po2_arterial": [0, 700],
 
     "blood_flow_rate": [10, 500],
     "pre_filter_replacement_fluid_rate": [0, 12000],

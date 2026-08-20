@@ -65,6 +65,7 @@ print(f"Current directory: {os.getcwd()}")
 from pipeline_helpers import (load_config, safe_load_clif_table, get_output_root,
                               STUDY_YEAR_START, STUDY_YEAR_END,
                               crrt_effluent_flow, DOSE_ELIGIBLE_MODES)
+from outlier_utils import apply_outliers  # single source of truth: config/outlier_config.json
 config = load_config()
 SITE_NAME = config["site_name"]
 
@@ -329,23 +330,7 @@ adult_encounters = adult_encounters[
     (adult_encounters['age_at_admission'] >= 18) & (adult_encounters['age_at_admission'].notna())
 ]
 
-# Filter for admission years — fixed study window (2018–2024), PI-approved.
-# Default from pipeline_helpers.STUDY_YEAR_START / STUDY_YEAR_END, OVERRIDABLE
-# per config.
-#
-# The override was removed on 2026-07-06 (2f3ba1c), which commented out
-# `year_start = config["admission_year_start"]` and hardcoded the constants. That
-# silently broke the MIMIC development site, whose admission dates are shifted to
-# 2105-2214 for de-identification: the 2018-2024 window excluded 100% of it, the
-# cohort came out empty, and 00 then died with a DuckDB "syntax error at or near
-# )" from an empty ID list. Nobody noticed, because the SMR reference model was
-# already frozen and the dev path had not been exercised since — so the refit
-# this pipeline depends on had been impossible, not merely undone.
-#
-# Semantics, chosen so consortium sites cannot drift: key ABSENT -> the PI-approved
-# constant (every site config; unchanged). Key present and NULL -> no bound on
-# that side, which is what config_mimic.json asks for. Key present with a value
-# -> that value.
+
 year_start = config.get("admission_year_start", STUDY_YEAR_START)
 year_end = config.get("admission_year_end", STUDY_YEAR_END)
 if (year_start, year_end) != (STUDY_YEAR_START, STUDY_YEAR_END):
@@ -542,27 +527,11 @@ print("=" * 80)
 
 
 if has_crrt_settings:
-    from utils import handle_crrt_outliers
-
-    # Apply outlier removal.
-    #
-    # Path resolved against THIS FILE, not the cwd. It was '../config/...',
-    # which only resolves when the script is launched from code/ (as
-    # run_pipeline.sh does). Launched from the repo root the file is not found,
-    # and handle_crrt_outliers prints a warning and SILENTLY SKIPS outlier
-    # removal (utils.py:30-34) rather than failing — so the run still exits 0
-    # while producing a DIFFERENT COHORT. At UChicago that was 18 extra CRRT
-    # records and 3 extra encounter blocks (2,136 -> 2,139).
-    _outlier_cfg = Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
-    if not _outlier_cfg.exists():
-        raise FileNotFoundError(
-            f"Outlier config not found: {_outlier_cfg}. Refusing to continue: "
-            "skipping outlier removal silently changes the cohort."
-        )
-    crrt_df, outlier_summary = handle_crrt_outliers(
-        crrt_df,
-        config_path=str(_outlier_cfg)
-    )
+    # CRRT-settings outlier removal — single source of truth (config/outlier_config.json).
+    # crrt_df columns are unprefixed, matching config keys directly. load_outlier_config
+    # raises if the file is missing, so a misconfigured run fails loudly instead of
+    # silently producing a different cohort.
+    crrt_df = apply_outliers(crrt_df, wide=True, label="crrt")
 
 if has_crrt_settings:
     # ============================================================================
@@ -1096,6 +1065,10 @@ safe_load_clif_table(clif, 'vitals', tables_path=config['tables_path'],
 print(f"   Unique vitals categories: {clif.vitals.df['vital_category'].nunique()}")
 print(f"   Unique vitals hospitalizations: {clif.vitals.df['hospitalization_id'].nunique()}")
 
+# Outlier handling (config/outlier_config.json) — clips weight_kg (the dose
+# denominator) and every other config vital before any value is used.
+clif.vitals.df = apply_outliers(clif.vitals.df, long="vital")
+
 clif.vitals.df = clif.vitals.df.merge(
     clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
     on='hospitalization_id',
@@ -1374,6 +1347,10 @@ safe_load_clif_table(clif, 'labs', tables_path=config['tables_path'],
                      })
 print(f"   Unique lab categories: {clif.labs.df['lab_category'].nunique()}")
 print(f"   Unique lab hospitalizations: {clif.labs.df['hospitalization_id'].nunique()}")
+
+# Outlier handling (config/outlier_config.json) — clips the config labs (lactate,
+# po2_arterial, …) before any lab value is used.
+clif.labs.df = apply_outliers(clif.labs.df, long="lab")
 
 clif.labs.df = clif.labs.df.merge(
     clif.encounter_mapping[['hospitalization_id', 'encounter_block']],
@@ -3150,6 +3127,9 @@ clif.respiratory_support.df = clif.respiratory_support.df.merge(
     on='hospitalization_id',
     how='left'
 )
+# Outlier handling BEFORE the waterfall — garbage (e.g. fio2_set = 88880) must not
+# be forward-filled nor feed the device/mode inference the waterfall runs.
+clif.respiratory_support.df = apply_outliers(clif.respiratory_support.df, wide=True, label="resp")
 clif.respiratory_support = clif.respiratory_support.waterfall()
 
 
