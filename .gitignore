@@ -69,6 +69,12 @@ docs/
 all_site_data/
 all_site_msm_data/
 output/multi_site/
+# Coordinating-center-only tooling: never ships to consortium sites.
+# These are symlinks into the private crrt-manuscript-tools repo; they were
+# briefly committed as real files (f242725) which shadowed the symlinks and
+# silently regressed the pooled artifacts. Keep them ignored.
+code/07_build_dashboard.py
+code/08_manuscript_artifacts.py
 code/report_core.py
 code/site_validation.py
 code/archive/output/
