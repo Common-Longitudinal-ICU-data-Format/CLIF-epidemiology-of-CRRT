@@ -444,7 +444,7 @@ def _load_labs(
 
     # Filter for required categories and hospitalization_ids
     labs = labs.filter(
-        pl.col('lab_category').is_in(REQUIRED_LABS) &
+        pl.col('lab_category').str.strip_chars().str.to_lowercase().is_in(REQUIRED_LABS) &
         pl.col('hospitalization_id').is_in(hospitalization_ids)
     )
 
@@ -528,7 +528,7 @@ def _load_vitals(
 
     # Filter for required categories and hospitalization_ids
     vitals = vitals.filter(
-        pl.col('vital_category').is_in(REQUIRED_VITALS) &
+        pl.col('vital_category').str.strip_chars().str.to_lowercase().is_in(REQUIRED_VITALS) &
         pl.col('hospitalization_id').is_in(hospitalization_ids)
     )
 
@@ -617,7 +617,7 @@ def _load_patient_assessments(
 
     # Filter for required categories and hospitalization_ids
     assessments = assessments.filter(
-        pl.col('assessment_category').is_in(REQUIRED_ASSESSMENTS) &
+        pl.col('assessment_category').str.strip_chars().str.to_lowercase().is_in(REQUIRED_ASSESSMENTS) &
         pl.col('hospitalization_id').is_in(hospitalization_ids)
     )
 
@@ -828,7 +828,8 @@ def _load_and_convert_medications(
     cohort_df: pl.DataFrame,
     vitals_df: pl.DataFrame,
     timezone: Optional[str] = None,
-    time_unit: str = 'us'
+    time_unit: str = 'us',
+    outlier_config_path: Optional[str] = None
 ) -> pl.LazyFrame:
     """
     Load medication data and convert all doses to mcg/kg/min (returns LazyFrame for memory efficiency).
@@ -882,7 +883,7 @@ def _load_and_convert_medications(
 
     # Filter for required medications and hospitalization_ids
     meds = meds.filter(
-        pl.col('med_category').is_in(REQUIRED_MEDS) &
+        pl.col('med_category').str.strip_chars().str.to_lowercase().is_in(REQUIRED_MEDS) &
         pl.col('hospitalization_id').is_in(hospitalization_ids)
     )
 
@@ -973,6 +974,21 @@ def _load_and_convert_medications(
         by='hospitalization_id',
         strategy='backward'
     )
+
+    # Guard the weight used for per-kg dose conversion against the config bound: a
+    # garbage weight (0, negative, or absurd) would inflate dose_mcg_kg_min without
+    # bound at the division below. Null out-of-range weights so the division yields
+    # null (dropped from scoring) rather than a spurious extreme that maxes out the
+    # cardiovascular component.
+    from outlier_utils import load_outlier_config
+    _wbound = load_outlier_config(outlier_config_path).get('weight_kg')
+    if _wbound is not None and 'weight_kg' in meds.columns:
+        _wlo, _whi = _wbound
+        meds = meds.with_columns(
+            pl.when(pl.col('weight_kg').is_not_null()
+                    & ((pl.col('weight_kg') < _wlo) | (pl.col('weight_kg') > _whi)))
+            .then(None).otherwise(pl.col('weight_kg')).alias('weight_kg')
+        )
 
     # Convert doses to mcg/kg/min
     # Apply mass conversions
@@ -1512,7 +1528,7 @@ def compute_sofa_polars(
     resp_df = _load_respiratory_support(data_directory, filetype, hospitalization_ids, cohort_df_local, lookback_hours=24, timezone=timezone)
 
     logger.info("Loading and converting medication data...")
-    meds_df = _load_and_convert_medications(data_directory, filetype, hospitalization_ids, cohort_df_local, vitals_df, timezone, time_unit)
+    meds_df = _load_and_convert_medications(data_directory, filetype, hospitalization_ids, cohort_df_local, vitals_df, timezone, time_unit, outlier_config_path if remove_outliers else None)
 
     # Combine all data sources (all are LazyFrames now)
     logger.info("Combining all data sources (lazy evaluation)...")
@@ -1558,37 +1574,44 @@ def compute_sofa_polars(
 
     # Apply outlier removal if requested (still lazy)
     if remove_outliers:
-        logger.info("Adding outlier removal to lazy query...")
-        # Outlier bounds come from the ONE source of truth (config/outlier_config.json),
-        # not hardcoded literals — the same file the rest of the pipeline uses. Only the
-        # SOFA respiratory inputs are gated here (po2_arterial, fio2_set, spo2).
+        logger.info("Adding config-driven outlier removal to lazy query...")
+        # Bounds come from the ONE source of truth (config/outlier_config.json). Clip
+        # EVERY SOFA scoring input before the worst-value aggregation, so a single
+        # spurious extreme cannot max out a component: creatinine/bilirubin/platelets
+        # (renal/hepatic/coag), map (cardiovascular), gcs_total (neuro), the pressor
+        # doses (cardiovascular), and po2/fio2/spo2 (respiratory). Clipping the
+        # CONVERTED dose_mcg_kg_min also nulls an infinite dose produced upstream by a
+        # garbage weight (weight=0 -> dose/weight=inf), which would otherwise force CV=4.
         from outlier_utils import load_outlier_config
         _ocfg = load_outlier_config(outlier_config_path)
-        po2_lo, po2_hi = _ocfg['po2_arterial']
-        fio2_lo, fio2_hi = _ocfg['fio2_set']
-        spo2_lo, spo2_hi = _ocfg['spo2']
-        combined_lazy = combined_lazy.with_columns([
-            pl.when((pl.col('lab_value_numeric').is_not_null()) & (pl.col('lab_category') == 'po2_arterial') & (pl.col('lab_value_numeric') >= po2_lo) & (pl.col('lab_value_numeric') <= po2_hi))
-            .then(pl.col('lab_value_numeric'))
-            .when((pl.col('lab_value_numeric').is_not_null()) & (pl.col('lab_category') == 'po2_arterial'))
-            .then(None)
-            .otherwise(pl.col('lab_value_numeric'))
-            .alias('lab_value_numeric'),
+        _schema = combined_lazy.collect_schema().names()
 
-            pl.when((pl.col('fio2_set').is_not_null()) & (pl.col('fio2_set') >= fio2_lo) & (pl.col('fio2_set') <= fio2_hi))
-            .then(pl.col('fio2_set'))
-            .when(pl.col('fio2_set').is_not_null())
-            .then(None)
-            .otherwise(pl.col('fio2_set'))
-            .alias('fio2_set'),
+        def _clip_by_category(cat_col, val_col, cats):
+            """Null val_col wherever its category value is outside the config bound."""
+            if cat_col not in _schema or val_col not in _schema:
+                return None
+            bad = pl.lit(False)
+            for c in cats:
+                if c in _ocfg:
+                    lo, hi = _ocfg[c]
+                    bad = bad | ((pl.col(cat_col) == c) & pl.col(val_col).is_not_null()
+                                 & ((pl.col(val_col) < lo) | (pl.col(val_col) > hi)))
+            return pl.when(bad).then(None).otherwise(pl.col(val_col)).alias(val_col)
 
-            pl.when((pl.col('vital_value').is_not_null()) & (pl.col('vital_category') == 'spo2') & (pl.col('vital_value') >= spo2_lo) & (pl.col('vital_value') <= spo2_hi))
-            .then(pl.col('vital_value'))
-            .when((pl.col('vital_value').is_not_null()) & (pl.col('vital_category') == 'spo2'))
-            .then(None)
-            .otherwise(pl.col('vital_value'))
-            .alias('vital_value')
-        ])
+        _exprs = [
+            _clip_by_category('lab_category', 'lab_value_numeric', REQUIRED_LABS),
+            _clip_by_category('vital_category', 'vital_value', REQUIRED_VITALS),
+            _clip_by_category('med_category', 'dose_mcg_kg_min', REQUIRED_MEDS),
+            _clip_by_category('assessment_category', 'assessment_value', REQUIRED_ASSESSMENTS),
+        ]
+        if 'fio2_set' in _schema and 'fio2_set' in _ocfg:  # fio2_set is a column, not categorical
+            _flo, _fhi = _ocfg['fio2_set']
+            _exprs.append(pl.when(pl.col('fio2_set').is_not_null()
+                                  & ((pl.col('fio2_set') < _flo) | (pl.col('fio2_set') > _fhi)))
+                          .then(None).otherwise(pl.col('fio2_set')).alias('fio2_set'))
+        _exprs = [e for e in _exprs if e is not None]
+        if _exprs:
+            combined_lazy = combined_lazy.with_columns(_exprs)
 
     # ==================================================================================
     # MEMORY OPTIMIZATION: Aggregate in long format BEFORE pivoting
