@@ -18,23 +18,39 @@ At MIMIC this requires the full pipeline run into its isolated output_mimic/ tre
 (CLIF_CONFIG=config/config_mimic.json on 00 -> 01 -> 02 -> 03b).
 
 Model: pre-specified PARSIMONIOUS LINEAR logistic — age, female, sofa_total,
-lactate, cci_score (all orthogonal to SOFA components; no double-counting). We
-tested enriching with bicarbonate + potassium and a non-linearity (restricted
-cubic spline) check: only bicarbonate was non-linear (p=0.015) yet enrichment
-left discrimination unchanged (AUC 0.652 vs 0.654) and the SMR unchanged
-(UChicago 1.052 vs 1.053), so for portability/parsimony the deployed model is
-linear in the five covariates (rationale in plan §4.3.3). Imputation = frozen
-development medians (NOT MICE — transported prediction model; plan §4.3.2).
-Diagnostics: VIF, in-sample + bootstrap optimism-corrected AUC, decile
-calibration. Unpenalized MLE -> in-sample sum(p)=sum(y), so the development
-site's own SMR is ~1.0 by construction.
+lactate, cci_score (all orthogonal to SOFA components; no double-counting).
+A covariate-enrichment sensitivity test (adding bicarbonate + potassium, plus a
+restricted-cubic-spline non-linearity check) was run BEFORE the 2026-06-29
+cohort harmonization and has NOT been repeated since. Its conclusion —
+enrichment left discrimination and the SMR essentially unchanged, so parsimony
+wins for portability (plan §4.3.3) — may well still hold, but THE NUMBERS IT
+REPORTED (AUC 0.652 vs 0.654; dev-site SMR 1.052 vs 1.053) DESCRIBE A COHORT AND
+A MODEL THAT NO LONGER EXIST and must not be quoted. Re-run the comparison
+against the current cohort before citing it. Imputation = frozen development
+medians (NOT MICE — transported prediction model; plan §4.3.2).
+Diagnostics: VIF, Wald SEs / ORs / 95% CIs, in-sample + bootstrap
+optimism-corrected AUC, decile calibration. Unpenalized MLE -> in-sample
+sum(p)=sum(y), so the development site's own SMR is ~1.0 by construction (and
+so its in-sample calibration slope is 1 and intercept 0 by construction, which
+is why neither is reported here — calibration is only informative on transfer,
+where 03b measures it).
+
+FINGERPRINT SAFETY: 03b hashes ONLY {covariates, coef, intercept,
+impute_medians} to fingerprint the deployed model, and refuses to pool sites
+whose fingerprints disagree. Diagnostics may therefore be added to the JSON
+freely, but the fit itself must not be re-specified casually: any change to the
+four hashed keys invalidates every site that has already re-run. This script
+prints UNCHANGED/CHANGED against the model it is overwriting so that is never a
+surprise.
 """
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pandas as pd
+from scipy.stats import norm
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.metrics import roc_auc_score
 
@@ -76,6 +92,60 @@ intercept = float(clf.intercept_[0])
 p_in = clf.predict_proba(X)[:, 1]
 auc = float(roc_auc_score(y, p_in))
 
+# ── Wald standard errors, odds ratios, 95% CIs ──────────────────────────────
+# Computed analytically from the observed information at the fitted solution
+# rather than by refitting under statsmodels: statsmodels is not in the pinned
+# compute stack, and a second optimizer could perturb the coefficients in their
+# last decimals — which would change the fingerprint and invalidate every site
+# that has already re-run. This reads the sklearn fit, it does not redo it.
+#   cov(beta_hat) = (Xd' W Xd)^-1,  W = diag(p(1-p)),  Xd = [1, X]
+# For an unpenalized logistic MLE this is the same covariance statsmodels would
+# report. With no statsmodels available to cross-check against, the closed form
+# is verified below against a FINITE-DIFFERENCE Hessian of the log-likelihood,
+# which shares no algebra with it — a genuinely independent check, unlike
+# re-deriving the same expression a second way.
+Xd = np.column_stack([np.ones(len(X)), X])
+W = p_in * (1 - p_in)
+fisher = Xd.T @ (W[:, None] * Xd)
+cov = np.linalg.inv(fisher)
+se_all = np.sqrt(np.diag(cov))
+beta_all = np.concatenate([[intercept], clf.coef_[0]])
+z_all = beta_all / se_all
+p_all = 2 * norm.sf(np.abs(z_all))
+_names = ["(Intercept)"] + COVARS
+se = {n: float(s) for n, s in zip(_names, se_all)}
+# ORs are undefined/uninterpretable for the intercept, so covariates only.
+odds_ratio = {c: float(np.exp(b)) for c, b in zip(COVARS, clf.coef_[0])}
+or_ci = {c: [float(np.exp(b - 1.96 * s)), float(np.exp(b + 1.96 * s))]
+         for c, b, s in zip(COVARS, clf.coef_[0], se_all[1:])}
+wald_p = {n: float(pv) for n, pv in zip(_names, p_all)}
+
+
+def _neg_loglik(b):
+    eta = Xd @ b
+    # log(1+exp(eta)) computed stably for large |eta|
+    return float(np.sum(np.logaddexp(0.0, eta) - y * eta))
+
+
+# Central-difference Hessian of the negative log-likelihood at beta_hat. At the
+# MLE this equals the observed information, so its inverse must equal `cov`.
+_h = 1e-5
+_H = np.empty((len(beta_all), len(beta_all)))
+for _i in range(len(beta_all)):
+    for _j in range(len(beta_all)):
+        _ei, _ej = np.zeros(len(beta_all)), np.zeros(len(beta_all))
+        _ei[_i], _ej[_j] = _h, _h
+        _H[_i, _j] = (_neg_loglik(beta_all + _ei + _ej) - _neg_loglik(beta_all + _ei - _ej)
+                      - _neg_loglik(beta_all - _ei + _ej) + _neg_loglik(beta_all - _ei - _ej)
+                      ) / (4 * _h * _h)
+_se_fd = np.sqrt(np.diag(np.linalg.inv(_H)))
+_se_dev = float(np.max(np.abs(_se_fd - se_all) / se_all))
+if _se_dev > 1e-3:
+    raise RuntimeError(
+        f"Analytic and finite-difference standard errors disagree by {_se_dev:.2%}. "
+        "The closed-form covariance is wrong, or the fit did not converge — do NOT "
+        "ship these standard errors.")
+
 # ── Collinearity (VIF) ──────────────────────────────────────────────────────
 vif = {}
 for i, c in enumerate(COVARS):
@@ -99,6 +169,20 @@ model = {"dev_site": DEV_SITE, "covariates": COVARS,
          "dev_n": int(len(dev)), "dev_auc": round(auc, 3),
          "dev_auc_optimism_corrected": round(auc_corr, 3),
          "vif": {k: round(v, 2) for k, v in vif.items()},
+         # ── Diagnostics for the supplement's model card ─────────────────────
+         # NONE of these are read by 03b or enter the fingerprint; they exist so
+         # the deployed model can be reported and reproduced without re-fitting.
+         "se": {k: round(v, 5) for k, v in se.items()},
+         "odds_ratio": {k: round(v, 4) for k, v in odds_ratio.items()},
+         "or_ci95": {k: [round(v[0], 4), round(v[1], 4)] for k, v in or_ci.items()},
+         "wald_p": wald_p,
+         "dev_deaths": int(y.sum()),
+         "dev_events_per_variable": round(float(y.sum()) / len(COVARS), 1),
+         # Pre-imputation missingness in the DEVELOPMENT cohort, as a fraction.
+         # Reported so a reader can see how much of the frozen-median imputation
+         # was actually exercised where the coefficients were estimated.
+         "dev_missingness": {k: round(v, 4) for k, v in miss.items()},
+         "auc_bootstrap_reps": B,
          # Which outcome this model predicts. 03b compares the site's OBSERVED
          # deaths against EXPECTED from this model, which is only meaningful when
          # both count the same thing; it refuses to run on a mismatch and warns
@@ -109,14 +193,48 @@ model = {"dev_site": DEV_SITE, "covariates": COVARS,
 # Resolved against THIS FILE, not the cwd — as "../config/..." it silently wrote
 # the frozen model to a path that only existed when run from code/.
 MODEL_PATH = Path(__file__).resolve().parent.parent / "config" / "smr_reference_model.json"
+
+
+def _fingerprint(m):
+    """The 12-char id 03b computes. MUST stay in sync with 03b:274-280 — it
+    hashes the four keys that change predictions, and nothing else."""
+    return hashlib.sha256(json.dumps(
+        {"covariates": m.get("covariates"), "coef": m.get("coef"),
+         "intercept": m.get("intercept"), "impute_medians": m.get("impute_medians")},
+        sort_keys=True).encode()).hexdigest()[:12]
+
+
+# A refit that changes the fingerprint invalidates every site that has already
+# run 03b against the old one: their SMRs were computed under different
+# coefficients and pooling them together is meaningless. That is sometimes the
+# intent (a genuine refit) and sometimes an accident (a stray optimizer change
+# while adding diagnostics), so say which happened, loudly, every time.
+_new_fp = _fingerprint(model)
+_old_fp = _fingerprint(json.loads(MODEL_PATH.read_text())) if MODEL_PATH.exists() else None
 MODEL_PATH.write_text(json.dumps(model, indent=2))
+if _old_fp is None:
+    print(f"\n  FINGERPRINT {_new_fp} (no previous model on disk)")
+elif _old_fp == _new_fp:
+    print(f"\n  FINGERPRINT {_new_fp} UNCHANGED — predictions are identical to the "
+          "deployed model; sites that have already re-run stay valid.")
+else:
+    print(f"\n  *** FINGERPRINT CHANGED {_old_fp} -> {_new_fp} ***\n"
+          "  This is a genuine refit. EVERY site must re-run 03b before its SMR can\n"
+          "  be pooled; results from the old fingerprint are not comparable.")
 
 # ── Report ──────────────────────────────────────────────────────────────────
-print(f"\n-- model (intercept {intercept:+.3f}) --")
+print(f"\n-- model card (n={len(dev):,}; deaths={int(y.sum()):,}; "
+      f"EPV={y.sum()/len(COVARS):.0f}) --")
+print(f"  {'term':13s} {'beta':>9s} {'SE':>8s} {'OR':>7s} {'95% CI':>16s} "
+      f"{'p':>9s} {'VIF':>5s}")
+print(f"  {'(Intercept)':13s} {intercept:+9.4f} {se['(Intercept)']:8.4f} "
+      f"{'—':>7s} {'—':>16s} {wald_p['(Intercept)']:9.2g} {'—':>5s}")
 for c in COVARS:
-    print(f"  {c:12s} {coef[c]:+.4f}")
-print(f"\n  AUC in-sample {auc:.3f}; optimism-corrected {auc_corr:.3f}")
-print("  VIF: " + ", ".join(f"{c} {vif[c]:.2f}" for c in COVARS))
+    print(f"  {c:13s} {coef[c]:+9.4f} {se[c]:8.4f} {odds_ratio[c]:7.3f} "
+          f"{f'{or_ci[c][0]:.3f}-{or_ci[c][1]:.3f}':>16s} {wald_p[c]:9.2g} {vif[c]:5.2f}")
+print(f"\n  standard errors verified against a finite-difference Hessian "
+      f"(max deviation {_se_dev:.2e})")
+print(f"  AUC in-sample {auc:.3f}; optimism-corrected {auc_corr:.3f} ({B} bootstrap reps)")
 cal = (pd.DataFrame({"y": y, "p": p_in})
        .assign(d=lambda t: pd.qcut(t["p"], 10, labels=False, duplicates="drop"))
        .groupby("d").agg(obs=("y", "mean"), exp=("p", "mean"), n=("p", "size")))

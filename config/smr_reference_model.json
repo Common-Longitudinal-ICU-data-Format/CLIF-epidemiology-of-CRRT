@@ -32,5 +32,60 @@
     "lactate": 1.05,
     "cci_score": 1.01
   },
+  "se": {
+    "(Intercept)": 0.29063,
+    "age": 0.00325,
+    "female": 0.09617,
+    "sofa_total": 0.01487,
+    "lactate": 0.01336,
+    "cci_score": 0.02106
+  },
+  "odds_ratio": {
+    "age": 1.0224,
+    "female": 1.0904,
+    "sofa_total": 1.1324,
+    "lactate": 1.1475,
+    "cci_score": 1.0276
+  },
+  "or_ci95": {
+    "age": [
+      1.0159,
+      1.0289
+    ],
+    "female": [
+      0.903,
+      1.3165
+    ],
+    "sofa_total": [
+      1.0999,
+      1.1659
+    ],
+    "lactate": [
+      1.1179,
+      1.178
+    ],
+    "cci_score": [
+      0.986,
+      1.0709
+    ]
+  },
+  "wald_p": {
+    "(Intercept)": 5.099065392968814e-26,
+    "age": 1.0156853753082492e-11,
+    "female": 0.3683827792477815,
+    "sofa_total": 6.237557803641431e-17,
+    "lactate": 6.837412772390307e-25,
+    "cci_score": 0.19668670245574882
+  },
+  "dev_deaths": 1188,
+  "dev_events_per_variable": 237.6,
+  "dev_missingness": {
+    "age": 0.0,
+    "female": 0.0,
+    "sofa_total": 0.0,
+    "lactate": 0.145,
+    "cci_score": 0.0
+  },
+  "auc_bootstrap_reps": 200,
   "outcome_definition": "death_30d_from_crrt_initiation"
 }
