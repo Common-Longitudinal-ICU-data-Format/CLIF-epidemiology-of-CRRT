@@ -385,7 +385,9 @@ sofa_12h_scores = compute_sofa_polars(
     filetype=FILE_TYPE,
     id_name="encounter_block",
     extremal_type="worst",
-    fill_na_scores_with_zero=False,
+    # Standard SOFA convention: missing component -> 0. Explicit so it is applied
+    # identically at every site regardless of polars sum_horizontal null handling.
+    fill_na_scores_with_zero=True,
     remove_outliers=True,
     timezone=TIMEZONE,
 ).to_pandas()
@@ -414,7 +416,9 @@ sofa_24h_scores = compute_sofa_polars(
     filetype=FILE_TYPE,
     id_name="encounter_block",
     extremal_type="worst",
-    fill_na_scores_with_zero=False,
+    # Standard SOFA convention: missing component -> 0. Explicit so it is applied
+    # identically at every site regardless of polars sum_horizontal null handling.
+    fill_na_scores_with_zero=True,
     remove_outliers=True,
     timezone=TIMEZONE,
 ).to_pandas()

@@ -158,7 +158,11 @@ sofa_scores = compute_sofa_polars(
     filetype=FILE_TYPE,
     id_name="encounter_block",
     extremal_type="worst",
-    fill_na_scores_with_zero=False,
+    # Standard SOFA convention: a component not measured within the lookback
+    # window is scored 0 (assume normal). Set explicitly so the zero-fill is
+    # applied identically at every site, independent of the polars version's
+    # sum_horizontal null handling (an older polars left it null -> total null).
+    fill_na_scores_with_zero=True,
     remove_outliers=True,
     timezone=TIMEZONE,
 ).to_pandas()
