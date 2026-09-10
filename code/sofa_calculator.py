@@ -39,7 +39,14 @@ def ensure_timezone_lazy(col: pl.Expr, target_tz: str) -> pl.Expr:
     # For lazy operations, attempt to convert to target timezone
     # If already in correct timezone, this is a no-op
     # If naive, this will localize it
-    return col.dt.convert_time_zone(target_tz)
+    #
+    # Also normalize the time UNIT to microseconds. Sites can ship different
+    # datetime precisions across tables (e.g. labs as datetime[ns], vitals as
+    # datetime[us]); join_asof requires both keys to share an identical dtype and
+    # will not implicitly cast, so a mixed-precision source raises SchemaError.
+    # 'us' is this module's canonical unit (meds/events are already cast to it),
+    # so pinning every datetime here makes all downstream asof-joins type-safe.
+    return col.dt.convert_time_zone(target_tz).dt.cast_time_unit("us")
 
 
 def ensure_local_timezone(df: pl.DataFrame, col_name: str, local_tz: str) -> pl.DataFrame:
