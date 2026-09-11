@@ -88,3 +88,8 @@ config_nu.json
 
 manuscript/
 manuscript_run_results/
+
+config/config_rush.json
+output_nu_final/
+output_rush/
+output_ucmc_final/
