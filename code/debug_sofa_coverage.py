@@ -292,6 +292,79 @@ def part_d_window_alignment(cfg, tables_path, file_type, timezone):
         print(f"  [Part D could not run: {type(e).__name__}: {e}]")
 
 
+def _resolve_table_path(tables_path, file_type, name):
+    for stem in (f"clif_{name}", name):
+        p = Path(tables_path) / f"{stem}.{file_type}"
+        if p.exists():
+            return p
+    return None
+
+
+def part_e_pipeline_repro(cfg, tables_path, file_type, timezone):
+    """Reproduce the pipeline's SOFA drop with the ACTUAL loader code path
+    (_load_vitals) on the 02-style cohort, and show the datetime dtypes the
+    window filter actually compares. This pinpoints the drop that Part D proved
+    is NOT a data-availability problem.
+    """
+    _section("E. Reproduce the pipeline SOFA drop (faithful _load_vitals)")
+    try:
+        import polars as pl
+        from sofa_calculator import _load_vitals, ensure_timezone_lazy
+
+        proj = Path(cfg.get("project_root", HERE.parent))
+        outdir = Path(cfg.get("output_dir", "output"))
+        if not outdir.is_absolute():
+            outdir = proj / outdir
+        interm = outdir / "intermediate_phi"
+        init = pd.read_parquet(interm / "crrt_initiation.parquet")
+        eb = pd.read_parquet(interm / "cohort_df.parquet",
+                             columns=["hospitalization_id", "encounter_block"])
+        eb["hospitalization_id"] = eb["hospitalization_id"].astype(str)
+
+        # build the SOFA cohort EXACTLY like script 02
+        sc = init.merge(eb, on="encounter_block")
+        sc["crrt_initiation_time"] = pd.to_datetime(sc["crrt_initiation_time"])
+        sc["start_dttm"] = sc["crrt_initiation_time"] - pd.Timedelta(hours=12)
+        sc["end_dttm"] = sc["crrt_initiation_time"] + pd.Timedelta(hours=3)
+        cohort = pl.from_pandas(sc[["hospitalization_id", "encounter_block", "start_dttm", "end_dttm"]]) \
+                   .with_columns(pl.col("hospitalization_id").cast(pl.Utf8))
+        n_blocks = cohort["encounter_block"].n_unique()
+        hosp_ids = cohort["hospitalization_id"].unique().to_list()
+
+        # faithful pipeline call (cohort window as script 02 passes it)
+        vit = _load_vitals(tables_path, file_type, hosp_ids, cohort, timezone).collect()
+        surv = vit["encounter_block"].n_unique() if "encounter_block" in vit.columns else 0
+        print(f"  cohort encounter_blocks:                         {n_blocks:,}")
+        print(f"  _load_vitals AS-IS -> blocks with vitals:        {surv:,}"
+              f"  ({surv/n_blocks:.1%})   <-- SOFA row count tracks this")
+
+        # candidate FIX: cast the cohort window to microseconds so both sides of the
+        # >= / <= filter share the same time unit as the data.
+        cohort_us = cohort.with_columns([
+            pl.col("start_dttm").dt.cast_time_unit("us"),
+            pl.col("end_dttm").dt.cast_time_unit("us"),
+        ])
+        vit2 = _load_vitals(tables_path, file_type, hosp_ids, cohort_us, timezone).collect()
+        surv2 = vit2["encounter_block"].n_unique() if "encounter_block" in vit2.columns else 0
+        print(f"  _load_vitals with us-cast window -> blocks:      {surv2:,}"
+              f"  ({surv2/n_blocks:.1%})   <-- if this jumps to ~100%, THAT is the fix")
+        print(f"  (Part D, correct handling, found {n_blocks:,} have vitals in-window)")
+
+        # show the two dtypes the window filter compares
+        vf = _resolve_table_path(tables_path, file_type, "vitals")
+        if vf is not None:
+            samp = pl.scan_parquet(vf).select("recorded_dttm").head(2000)
+            raw_dt = samp.collect_schema()["recorded_dttm"]
+            post_dt = samp.with_columns(ensure_timezone_lazy(pl.col("recorded_dttm"), timezone)) \
+                          .collect_schema()["recorded_dttm"]
+            print(f"\n  recorded_dttm dtype: raw {raw_dt}")
+            print(f"                       after ensure_timezone_lazy -> {post_dt}")
+            print(f"  cohort start_dttm dtype:                     {cohort['start_dttm'].dtype}")
+            print("  (a timezone/unit mismatch between the last two silently breaks the >= / <= filter)")
+    except Exception as e:
+        print(f"  [Part E could not run: {type(e).__name__}: {e}]")
+
+
 def main():
     print("SOFA coverage diagnostic")
     cfg = load_config()
@@ -307,6 +380,7 @@ def main():
 
     part_c_environment()
     part_d_window_alignment(cfg, tables_path, file_type, timezone)  # pinpoints the window/anchor drop
+    part_e_pipeline_repro(cfg, tables_path, file_type, timezone)    # reproduces drop via real loader
     if not window_only:
         part_b_source_coverage(tables_path, file_type)       # pinpoints a missing input
         part_a_component_nulls(tables_path, file_type, timezone)  # confirms on the SOFA window
