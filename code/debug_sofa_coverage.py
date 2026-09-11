@@ -206,6 +206,92 @@ def part_b_source_coverage(tables_path, file_type):
         print(f"    {field:16s} ({tbl}): {nn:,}/{tot:,} hosp = {nn/tot:5.1%}")
 
 
+def _to_utc(s, tz):
+    """Return a tz-aware UTC pandas datetime Series (localize naive to `tz`)."""
+    s = pd.to_datetime(s, errors="coerce")
+    if getattr(s.dtype, "tz", None) is None:
+        s = s.dt.tz_localize(tz, ambiguous="NaT", nonexistent="NaT")
+    return s.dt.tz_convert("UTC")
+
+
+def part_d_window_alignment(cfg, tables_path, file_type, timezone):
+    """Confirm WHETHER script 02's SOFA window (anchored on crrt_initiation_time)
+    actually overlaps the data. Reads the intermediate crrt_initiation.parquet from
+    the last pipeline run and compares its anchor to the first CRRT record, then
+    checks how many encounter_blocks have vitals in each window.
+    """
+    _section("D. SOFA window alignment (why script 02 drops encounters)")
+    try:
+        # locate the intermediate outputs from the last run
+        proj = Path(cfg.get("project_root", HERE.parent))
+        outdir = Path(cfg.get("output_dir", "output"))
+        if not outdir.is_absolute():
+            outdir = proj / outdir
+        interm = outdir / "intermediate_phi"
+        init_f = interm / "crrt_initiation.parquet"
+        xwalk_f = interm / "cohort_df.parquet"
+        if not init_f.exists() or not xwalk_f.exists():
+            print(f"  [need {init_f} and {xwalk_f} from the last run — not found; skipping]")
+            return
+
+        init = pd.read_parquet(init_f)  # [encounter_block, crrt_initiation_time]
+        init["crrt_initiation_time"] = _to_utc(init["crrt_initiation_time"], timezone)
+        xwalk = pd.read_parquet(xwalk_f, columns=["hospitalization_id", "encounter_block"])
+        xwalk["hospitalization_id"] = xwalk["hospitalization_id"].astype(str)
+        n_blocks = init["encounter_block"].nunique()
+        print(f"  SOFA cohort encounter_blocks: {n_blocks:,}")
+
+        # first CRRT record per encounter_block (the debug script's anchor)
+        crrt = read_table(tables_path, file_type, "crrt_therapy",
+                          columns=["hospitalization_id", "recorded_dttm"])
+        crrt["hospitalization_id"] = crrt["hospitalization_id"].astype(str)
+        crrt["recorded_dttm"] = _to_utc(crrt["recorded_dttm"], timezone)
+        crrt = crrt.merge(xwalk, on="hospitalization_id", how="inner")
+        first_crrt = crrt.groupby("encounter_block", as_index=False)["recorded_dttm"].min() \
+                         .rename(columns={"recorded_dttm": "first_crrt_time"})
+
+        m = init.merge(first_crrt, on="encounter_block", how="left")
+        m["gap_hours"] = (m["crrt_initiation_time"] - m["first_crrt_time"]).dt.total_seconds() / 3600.0
+        g = m["gap_hours"].dropna()
+        print("\n  gap = crrt_initiation_time - first_CRRT_record (hours):")
+        if len(g):
+            print(f"    median {g.median():.2f}h | p25 {g.quantile(.25):.2f} | p75 {g.quantile(.75):.2f} "
+                  f"| min {g.min():.1f} | max {g.max():.1f}")
+            for thr in (3, 15, 24, 72):
+                n = int((g.abs() > thr).sum())
+                print(f"    |gap| > {thr:>2}h : {n:,} ({n/len(g):.1%})   "
+                      f"{'<== these fall outside the -12h/+3h SOFA window' if thr==15 else ''}")
+
+        # Does each window overlap ANY vitals? (vitals are the densest signal)
+        vit = read_table(tables_path, file_type, "vitals",
+                         columns=["hospitalization_id", "recorded_dttm"])
+        vit["hospitalization_id"] = vit["hospitalization_id"].astype(str)
+        vit["recorded_dttm"] = _to_utc(vit["recorded_dttm"], timezone)
+        vit = vit.merge(xwalk, on="hospitalization_id", how="inner")[["encounter_block", "recorded_dttm"]]
+
+        def _covered(anchor_col):
+            w = m.merge(vit, on="encounter_block", how="left")
+            lo = w[anchor_col] - pd.Timedelta(hours=12)
+            hi = w[anchor_col] + pd.Timedelta(hours=3)
+            inwin = w["recorded_dttm"].between(lo, hi)
+            return w.loc[inwin, "encounter_block"].nunique()
+
+        cov_init = _covered("crrt_initiation_time")
+        cov_first = _covered("first_crrt_time")
+        print("\n  encounter_blocks with >=1 vital inside the -12h/+3h window:")
+        print(f"    anchored on crrt_initiation_time (what 02 uses): {cov_init:,}/{n_blocks:,} "
+              f"= {cov_init/n_blocks:.1%}   <-- should ~match the SOFA row count")
+        print(f"    anchored on first CRRT record (what debug uses):  {cov_first:,}/{n_blocks:,} "
+              f"= {cov_first/n_blocks:.1%}")
+        print("\n  INTERPRETATION:")
+        print("    - If the two rows differ a lot -> crrt_initiation_time is mis-anchored;")
+        print("      the window misses data the first-CRRT window finds (the bug).")
+        print("    - If both are high but SOFA still dropped rows -> the drop is a timezone/")
+        print("      precision mismatch in the pipeline's window filter, not the anchor.")
+    except Exception as e:
+        print(f"  [Part D could not run: {type(e).__name__}: {e}]")
+
+
 def main():
     print("SOFA coverage diagnostic")
     cfg = load_config()
@@ -215,9 +301,15 @@ def main():
     print(f"  tables_path: {tables_path}")
     print(f"  file_type:   {file_type}")
 
+    # `--window` runs ONLY the environment + window-alignment check (fast: reuses
+    # the last run's intermediates, no SOFA recompute). Default runs everything.
+    window_only = "--window" in sys.argv
+
     part_c_environment()
-    part_b_source_coverage(tables_path, file_type)   # fast: pinpoints the missing input
-    part_a_component_nulls(tables_path, file_type, timezone)  # slower: confirms on the SOFA window
+    part_d_window_alignment(cfg, tables_path, file_type, timezone)  # pinpoints the window/anchor drop
+    if not window_only:
+        part_b_source_coverage(tables_path, file_type)       # pinpoints a missing input
+        part_a_component_nulls(tables_path, file_type, timezone)  # confirms on the SOFA window
 
     _section("DONE — copy this ENTIRE console output back to the coordinating center")
 
